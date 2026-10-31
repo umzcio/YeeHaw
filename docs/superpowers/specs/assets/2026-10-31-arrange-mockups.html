@@ -1,0 +1,121 @@
+<style>
+  .yh-scene{background:linear-gradient(135deg,#2b3a55 0%,#5b4a6e 45%,#c27c6b 100%);border-radius:14px;padding:0 0 22px;position:relative;overflow:hidden;min-height:250px}
+  .yh-bar{height:30px;display:flex;align-items:center;justify-content:flex-end;gap:14px;padding:0 14px;background:rgba(30,30,36,.35);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);color:#fff;font:500 13px -apple-system,BlinkMacSystemFont,sans-serif}
+  .yh-bar .left{margin-right:auto;display:flex;gap:16px;align-items:center}
+  .yh-bar .left b{font-weight:700}
+  .yh-ic{width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;opacity:.95}
+  .yh-ic svg{width:16px;height:16px;fill:none;stroke:#fff;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .yh-ic.f svg{fill:#fff;stroke:none}
+  .yh-div{width:1px;height:14px;background:rgba(255,255,255,.55);border-radius:1px;position:relative}
+  .yh-div.hl{box-shadow:0 0 0 4px rgba(255,255,255,.12)}
+  .yh-dim{opacity:.35}
+  .yh-note{color:rgba(255,255,255,.85);font:12px -apple-system,sans-serif;padding:10px 16px 0;line-height:1.45}
+  .yh-callout{position:absolute;font:600 11px -apple-system,sans-serif;color:#fff;background:rgba(0,0,0,.45);padding:4px 8px;border-radius:7px;backdrop-filter:blur(10px)}
+  .yh-win{margin:16px auto 0;width:88%;background:rgba(246,246,248,.92);backdrop-filter:blur(30px);border-radius:16px;box-shadow:0 20px 50px rgba(0,0,0,.35),0 0 0 .5px rgba(0,0,0,.2);overflow:hidden;font:13px -apple-system,sans-serif;color:#1d1d1f}
+  .yh-tb{height:36px;display:flex;align-items:center;gap:7px;padding:0 13px}
+  .yh-tb i{width:12px;height:12px;border-radius:50%;display:block}
+  .yh-tb .t{margin-left:auto;margin-right:auto;font-weight:600;font-size:13px;transform:translateX(-24px)}
+  .yh-sec{padding:6px 18px 12px}
+  .yh-sec h5{margin:0 0 7px;font:600 11px -apple-system,sans-serif;color:#6e6e73;text-transform:uppercase;letter-spacing:.04em}
+  .yh-row{display:flex;gap:8px;align-items:center;min-height:40px;padding:6px 10px;border-radius:11px;background:#fff;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.1)}
+  .yh-tile{width:30px;height:30px;border-radius:8px;background:#2c2c31;display:flex;align-items:center;justify-content:center}
+  .yh-tile.drag{transform:translateY(-4px) rotate(-3deg);box-shadow:0 8px 18px rgba(0,0,0,.3);outline:2px solid #0a84ff}
+  .yh-gap{width:3px;height:26px;background:#0a84ff;border-radius:2px}
+  .yh-ctx{position:absolute;right:120px;top:36px;width:200px;background:rgba(245,245,247,.9);backdrop-filter:blur(30px);border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.35),0 0 0 .5px rgba(0,0,0,.2);padding:5px;font:13px -apple-system,sans-serif;color:#1d1d1f}
+  .yh-ctx div{padding:5px 10px;border-radius:7px}
+  .yh-ctx .on{background:#0a84ff;color:#fff}
+  .yh-ctx hr{border:0;border-top:.5px solid rgba(0,0,0,.15);margin:4px 6px}
+  .yh-strip{position:absolute;right:96px;top:38px;display:flex;gap:16px;padding:9px 16px;border-radius:16px;background:rgba(40,40,46,.55);backdrop-filter:blur(24px);box-shadow:0 10px 30px rgba(0,0,0,.3),inset 0 0 0 .5px rgba(255,255,255,.25)}
+</style>
+
+<h2>How do you want to choose what's hidden and set the order?</h2>
+<p class="subtitle">All three end up with the same floating strip for hidden icons. They differ in where you do the arranging.</p>
+
+<div class="cards">
+
+  <!-- A -->
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="yh-scene">
+        <div class="yh-bar">
+          <div class="left"><b></b><b>Finder</b><span>File</span><span>Edit</span></div>
+          <span class="yh-ic yh-dim"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11"/></svg></span>
+          <span class="yh-ic yh-dim"><svg viewBox="0 0 16 16"><path d="M3 8a5 5 0 1 0 1.5-3.5M3 3v2.5h2.5"/><path d="M8 5.5V8l2 1.5"/></svg></span>
+          <span class="yh-ic yh-dim"><svg viewBox="0 0 16 16"><rect x="2" y="4.5" width="12" height="7" rx="1.5"/><path d="M4.5 7h1M7 7h1M9.5 7h1M5 9.5h6"/></svg></span>
+          <span class="yh-div hl"></span>
+          <span class="yh-ic"><svg viewBox="0 0 16 16"><path d="M2 6.5a9 9 0 0 1 12 0M4 9a6 6 0 0 1 8 0M6.2 11.4a3 3 0 0 1 3.6 0"/></svg></span>
+          <span class="yh-ic"><svg viewBox="0 0 16 16"><rect x="2.5" y="3" width="11" height="4" rx="2"/><rect x="2.5" y="9" width="11" height="4" rx="2"/></svg></span>
+          <span>7:01 PM</span>
+        </div>
+        <div class="yh-callout" style="right:118px;top:40px">⌘-drag icons past this line to hide</div>
+        <div class="yh-note" style="padding-top:44px">You arrange right in the menu bar by ⌘-dragging, the same way macOS already works. A thin divider sits in the bar: everything to its left is hidden and shows up in the strip. You never open a window to do it.</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A · Right in the menu bar</h3>
+      <p>Nothing new to learn, and no settings window needed for layout. The catch: you're dragging tiny icons in a crowded bar, and the divider is always visible.</p>
+    </div>
+  </div>
+
+  <!-- B -->
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="yh-scene" style="padding-top:8px">
+        <div class="yh-win">
+          <div class="yh-tb"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="t">YeeHaw</span></div>
+          <div class="yh-sec">
+            <h5>Menu Bar</h5>
+            <div class="yh-row">
+              <div class="yh-tile"><span class="yh-ic"><svg viewBox="0 0 16 16"><path d="M2 6.5a9 9 0 0 1 12 0M4 9a6 6 0 0 1 8 0M6.2 11.4a3 3 0 0 1 3.6 0"/></svg></span></div>
+              <div class="yh-gap"></div>
+              <div class="yh-tile"><span class="yh-ic"><svg viewBox="0 0 16 16"><rect x="2.5" y="3" width="11" height="4" rx="2"/><rect x="2.5" y="9" width="11" height="4" rx="2"/></svg></span></div>
+            </div>
+          </div>
+          <div class="yh-sec" style="padding-bottom:16px">
+            <h5>Hidden</h5>
+            <div class="yh-row">
+              <div class="yh-tile"><span class="yh-ic"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11"/></svg></span></div>
+              <div class="yh-tile drag"><span class="yh-ic"><svg viewBox="0 0 16 16"><path d="M3 8a5 5 0 1 0 1.5-3.5M3 3v2.5h2.5"/><path d="M8 5.5V8l2 1.5"/></svg></span></div>
+              <div class="yh-tile"><span class="yh-ic"><svg viewBox="0 0 16 16"><rect x="2" y="4.5" width="12" height="7" rx="1.5"/><path d="M4.5 7h1M7 7h1M9.5 7h1M5 9.5h6"/></svg></span></div>
+            </div>
+          </div>
+        </div>
+        <div class="yh-note">A small window shows your icons at a comfortable size in two rows. Drag between rows to hide or show, drag within a row to reorder. The real menu bar updates as you go.</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B · A layout window</h3>
+      <p>Thaw's approach, done cleanly. Big targets, easy to see everything at once. The cost is one more window to open.</p>
+    </div>
+  </div>
+
+  <!-- C -->
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="yh-scene">
+        <div class="yh-bar">
+          <div class="left"><b></b><b>Finder</b><span>File</span><span>Edit</span></div>
+          <span class="yh-ic"><svg viewBox="0 0 16 16"><path d="M2 6.5a9 9 0 0 1 12 0M4 9a6 6 0 0 1 8 0M6.2 11.4a3 3 0 0 1 3.6 0"/></svg></span>
+          <span class="yh-ic" style="outline:1.5px solid rgba(255,255,255,.8);outline-offset:4px;border-radius:3px"><svg viewBox="0 0 16 16"><rect x="2" y="4.5" width="12" height="7" rx="1.5"/><path d="M4.5 7h1M7 7h1M9.5 7h1M5 9.5h6"/></svg></span>
+          <span class="yh-ic f"><svg viewBox="0 0 16 16"><path d="M8 2c2 3 4 4.5 4 7.2A4 4 0 0 1 4 9.2C4 6.5 6 5 8 2z"/></svg></span>
+          <span class="yh-ic"><svg viewBox="0 0 16 16"><rect x="2.5" y="3" width="11" height="4" rx="2"/><rect x="2.5" y="9" width="11" height="4" rx="2"/></svg></span>
+          <span>7:01 PM</span>
+        </div>
+        <div class="yh-ctx">
+          <div class="on">Hide “Keyboard Viewer”</div>
+          <hr>
+          <div>Show Hidden Icons</div>
+          <div style="color:#8e8e93">Settings…</div>
+        </div>
+        <div class="yh-note" style="padding-top:118px">Hold a modifier and right-click any icon to hide it (or show it, from the strip). Order still comes from ⌘-dragging in the bar. No divider, no layout window.</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C · Right-click to hide</h3>
+      <p>Fastest for the occasional "get this out of my way." Less good for seeing the whole layout at once or reordering many icons.</p>
+    </div>
+  </div>
+
+</div>
+
+<p class="subtitle" style="margin-top:18px">These can combine, e.g. B as the main way plus C as a shortcut.</p>
