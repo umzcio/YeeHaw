@@ -53,6 +53,19 @@ import Testing
         #expect(result == ["m1": 11.0, "m2": 11.0, "left": 12.0])
     }
 
+    @Test func cascadeKeepsTiedKeysTogether() {
+        let left = "status:com.google.drivefs::Item-0"
+        let sibling = "status:com.google.drivefs::Google Drive"
+        let table = PositionTable(["right": 10.0, left: 10.5, sibling: 10.5, "moved": 40])
+        let result = table.placement(of: ["moved"], leftNeighbor: left, rightNeighbor: "right")
+        #expect(result == ["moved": 11.0, left: 12.0, sibling: 12.0])
+    }
+
+    @Test func duplicateMovedKeysDoNotCrash() {
+        let result = Self.real.placement(of: [Self.digUp, Self.digUp], leftNeighbor: Self.fiddle, rightNeighbor: Self.chrome)
+        #expect(result == [Self.digUp: 328.75])
+    }
+
     @Test func preservesForeignAndStaleKeys() {
         let result = Self.real.placement(of: [Self.digUp], leftNeighbor: Self.fiddle, rightNeighbor: Self.chrome)
         #expect(Set(result.keys) == [Self.digUp])

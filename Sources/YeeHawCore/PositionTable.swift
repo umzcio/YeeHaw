@@ -21,21 +21,20 @@ public struct PositionTable: Equatable, Sendable {
 
         if upper - lower >= 2 * Self.minimumGap {
             let v = (upper + lower) / 2
-            return Dictionary(uniqueKeysWithValues: keys.map { ($0, v) })
+            return Dictionary(uniqueKeysWithValues: moved.map { ($0, v) })
         }
 
         let v = lower + Self.minimumGap
-        var result = Dictionary(uniqueKeysWithValues: keys.map { ($0, v) })
+        var result = Dictionary(uniqueKeysWithValues: moved.map { ($0, v) })
         guard let leftValue else { return result }
 
+        // Entries tied at one original value (duplicate keys of one item) move as a group.
+        let groups = Dictionary(grouping: others.filter { $0.value >= leftValue }, by: { $0.value })
         var previous = v
-        let walk = others
-            .filter { $0.value >= leftValue }
-            .sorted { ($0.value, $0.key) < ($1.value, $1.key) }
-        for (key, value) in walk {
+        for value in groups.keys.sorted() {
             let needed = previous + Self.minimumGap
             guard value < needed else { break }
-            result[key] = needed
+            for entry in groups[value]! { result[entry.key] = needed }
             previous = needed
         }
         return result
