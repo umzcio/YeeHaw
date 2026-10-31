@@ -16,6 +16,14 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let command = DebugCommand(arguments: CommandLine.arguments) {
+            Task {
+                await command.run()
+                // exit, not terminate: a debug run must never reach any quit-time writes.
+                exit(0)
+            }
+            return
+        }
         Self.log.notice("YeeHaw started")
     }
 }
