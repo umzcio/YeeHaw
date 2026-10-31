@@ -18,4 +18,19 @@ public enum PositionKey {
         let first = names.first { !$0.isEmpty } ?? itemName
         return ["status:\(bundleID)::\(first)"]
     }
+
+    /// The table key of an Apple item, or nil when it can't be resolved. Control Center and the
+    /// clock map to their fixed keys; anything else must match an existing `module:<Name>` key
+    /// whose Name equals the identifier's suffix, ignoring case (`...menuextra.wifi` → `module:WiFi`).
+    public static func appleKey(appleIdentifier: String, table: PositionTable) -> String? {
+        switch appleIdentifier {
+        case "com.apple.menuextra.controlcenter": return controlCenter
+        case "com.apple.menuextra.clock": return clock
+        default:
+            let prefix = "com.apple.menuextra."
+            guard appleIdentifier.hasPrefix(prefix) else { return nil }
+            let target = "module:" + appleIdentifier.dropFirst(prefix.count).lowercased()
+            return table.values.keys.filter { $0.lowercased() == target }.sorted().first
+        }
+    }
 }

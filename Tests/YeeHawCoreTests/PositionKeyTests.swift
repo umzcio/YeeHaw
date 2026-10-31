@@ -40,4 +40,22 @@ import Testing
         #expect(PositionKey.clock == "module:Clock")
         #expect(PositionKey.controlCenter == "module:BentoBox-0")
     }
+
+    @Test func appleKeyPinnedItems() {
+        let table = PositionTable([:])
+        #expect(PositionKey.appleKey(appleIdentifier: "com.apple.menuextra.controlcenter", table: table) == "module:BentoBox-0")
+        #expect(PositionKey.appleKey(appleIdentifier: "com.apple.menuextra.clock", table: table) == "module:Clock")
+    }
+
+    @Test func appleKeyMatchesModuleCaseInsensitively() {
+        let table = PositionTable(["module:WiFi": 50, "module:Battery": 30, "status:com.x::wifi": 9])
+        #expect(PositionKey.appleKey(appleIdentifier: "com.apple.menuextra.wifi", table: table) == "module:WiFi")
+        #expect(PositionKey.appleKey(appleIdentifier: "com.apple.menuextra.battery", table: table) == "module:Battery")
+    }
+
+    @Test func appleKeyUnknownIsNil() {
+        let table = PositionTable(["module:WiFi": 50])
+        #expect(PositionKey.appleKey(appleIdentifier: "com.apple.menuextra.sound", table: table) == nil)
+        #expect(PositionKey.appleKey(appleIdentifier: "com.other.thing", table: table) == nil)
+    }
 }
