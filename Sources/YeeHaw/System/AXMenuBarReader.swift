@@ -19,16 +19,21 @@ struct AXMenuBarReader: MenuBarReading {
         Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
     }
 
+    func keyPrefixes(of id: BundleID) async -> [String] {
+        let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first
+        return PositionKey.prefixes(bundleID: id, executableName: app?.executableURL?.lastPathComponent)
+    }
+
     @concurrent
     private static func readItems() async -> [MenuBarItem] {
         let apps = NSWorkspace.shared.runningApplications
         guard let agent = apps.first(where: { $0.bundleIdentifier == agentBundleID }) else { return [] }
-        let owners = apps.compactMap { app -> (pid_t, BundleID)? in
+        let owners = apps.compactMap { app -> (pid_t, BundleID, String)? in
             guard let id = app.bundleIdentifier, id != agentBundleID else { return nil }
-            return (app.processIdentifier, id)
+            return (app.processIdentifier, id, app.executableURL?.lastPathComponent ?? "")
         }
         let drawn = drawnItems(agentPID: agent.processIdentifier)
-        let extras = owners.flatMap { appExtras(pid: $0.0, bundleID: $0.1) }
+        let extras = owners.flatMap { appExtras(pid: $0.0, bundleID: $0.1, executableName: $0.2) }
         return ItemMatcher.match(drawn: drawn, extras: extras)
     }
 
@@ -72,7 +77,7 @@ struct AXMenuBarReader: MenuBarReading {
     // MARK: Owners
 
     /// The app's own view of its status items, in the app's order.
-    private static func appExtras(pid: pid_t, bundleID: BundleID) -> [AppExtra] {
+    private static func appExtras(pid: pid_t, bundleID: BundleID, executableName: String) -> [AppExtra] {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, appTimeout)
         guard let bar = element(app, kAXExtrasMenuBarAttribute) else { return [] }
@@ -84,7 +89,8 @@ struct AXMenuBarReader: MenuBarReading {
                 identifier: string(item, kAXIdentifierAttribute),
                 title: string(item, kAXTitleAttribute),
                 help: string(item, kAXHelpAttribute),
-                description: string(item, kAXDescriptionAttribute))
+                description: string(item, kAXDescriptionAttribute),
+                executableName: executableName)
         }
     }
 

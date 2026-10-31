@@ -8,32 +8,63 @@ import Testing
     ])
 
     @Test func keysPrefersExistingDuplicates() {
-        let keys = PositionKey.keys(bundleID: "com.google.drivefs", names: ["Google Drive"], indexInApp: 0, table: Self.drivefs)
+        let keys = PositionKey.keys(prefixes: ["com.google.drivefs"], names: ["Google Drive"], indexInApp: 0, table: Self.drivefs)
         #expect(keys == ["status:com.google.drivefs::Google Drive", "status:com.google.drivefs::Item-0"])
     }
 
     @Test func keysItemIndexOnly() {
-        let keys = PositionKey.keys(bundleID: "com.google.drivefs", names: [], indexInApp: 0, table: Self.drivefs)
+        let keys = PositionKey.keys(prefixes: ["com.google.drivefs"], names: [], indexInApp: 0, table: Self.drivefs)
         #expect(keys == ["status:com.google.drivefs::Item-0"])
     }
 
     @Test func keysUsesIdentifier() {
         let key = "status:com.malwarebytes.mbam.frontend.agent::statusBar.icon.alert"
         let table = PositionTable([key: 536])
-        let keys = PositionKey.keys(
-            bundleID: "com.malwarebytes.mbam.frontend.agent",
+        let keys = PositionKey.keys(prefixes: ["com.malwarebytes.mbam.frontend.agent"],
             names: ["statusBar.icon.alert"], indexInApp: 0, table: table)
         #expect(keys == [key])
     }
 
     @Test func keysNewWhenMissing() {
-        let keys = PositionKey.keys(bundleID: "com.zapps.yeehaw", names: [], indexInApp: 0, table: PositionTable([:]))
+        let keys = PositionKey.keys(prefixes: ["com.zapps.yeehaw"], names: [], indexInApp: 0, table: PositionTable([:]))
         #expect(keys == ["status:com.zapps.yeehaw::Item-0"])
     }
 
     @Test func keysNewUsesFirstName() {
-        let keys = PositionKey.keys(bundleID: "com.zapps.yeehaw", names: ["YeeHawStatusItem"], indexInApp: 0, table: PositionTable([:]))
+        let keys = PositionKey.keys(prefixes: ["com.zapps.yeehaw"], names: ["YeeHawStatusItem"], indexInApp: 0, table: PositionTable([:]))
         #expect(keys == ["status:com.zapps.yeehaw::YeeHawStatusItem"])
+    }
+
+    // Apps that aren't notarized are keyed by executable name (owner's table: status:YeeHaw::YeeHaw).
+    @Test func keysResolvesExecutableNamePrefix() {
+        let table = PositionTable(["status:YeeHaw::YeeHaw": 10])
+        let keys = PositionKey.keys(prefixes: ["com.zapps.yeehaw", "YeeHaw"], names: ["YeeHaw"], indexInApp: 0, table: table)
+        #expect(keys == ["status:YeeHaw::YeeHaw"])
+    }
+
+    @Test func keysReturnsEveryPrefixBundleFirst() {
+        let table = PositionTable([
+            "status:zMeet::zMeetStatusItem": 40,
+            "status:edu.umontana.zmeet::zMeetStatusItem": 40,
+            "status:zMeet::Item-0": 40,
+        ])
+        let keys = PositionKey.keys(
+            prefixes: ["edu.umontana.zmeet", "zMeet"], names: ["zMeetStatusItem"], indexInApp: 0, table: table)
+        #expect(keys == [
+            "status:edu.umontana.zmeet::zMeetStatusItem", "status:zMeet::zMeetStatusItem", "status:zMeet::Item-0",
+        ])
+    }
+
+    @Test func keysNewUsesFirstPrefix() {
+        let keys = PositionKey.keys(prefixes: ["com.zapps.yeehaw", "YeeHaw"], names: ["YeeHaw"], indexInApp: 0, table: PositionTable([:]))
+        #expect(keys == ["status:com.zapps.yeehaw::YeeHaw"])
+    }
+
+    @Test func prefixesAreBundleThenExecutableDeduped() {
+        #expect(PositionKey.prefixes(bundleID: "edu.umontana.zmeet", executableName: "zMeet") == ["edu.umontana.zmeet", "zMeet"])
+        #expect(PositionKey.prefixes(bundleID: "Nora", executableName: "Nora") == ["Nora"])
+        #expect(PositionKey.prefixes(bundleID: "com.example.a", executableName: nil) == ["com.example.a"])
+        #expect(PositionKey.prefixes(bundleID: "com.example.a", executableName: "") == ["com.example.a"])
     }
 
     @Test func constants() {

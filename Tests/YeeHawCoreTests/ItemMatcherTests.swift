@@ -57,6 +57,17 @@ import Testing
         #expect(items.map(\.id) == ["com.apple.menuextra.clock", "com.apple.menuextra.controlcenter", "com.apple.menuextra.wifi"])
     }
 
+    @Test func keyPrefixesAreBundleThenExecutableName() {
+        let drawn = [DrawnItem(x: 10, width: 20, label: "zMeet"), DrawnItem(x: 40, width: 20, label: "A"),
+                     DrawnItem(x: 70, width: 20, label: "Wi-Fi", appleIdentifier: "com.apple.menuextra.wifi")]
+        let extras = [
+            AppExtra(bundleID: "edu.umontana.zmeet", indexInApp: 0, x: 10, width: 20, executableName: "zMeet"),
+            AppExtra(bundleID: "com.example.a", indexInApp: 0, x: 40, width: 20),
+        ]
+        let items = ItemMatcher.match(drawn: drawn, extras: extras)
+        #expect(items.map(\.keyPrefixes) == [["edu.umontana.zmeet", "zMeet"], ["com.example.a"], []])
+    }
+
     @Test func keyNamesCollectsNonEmptyIdentifierTitleDescription() {
         let drawn = [DrawnItem(x: 10, width: 20, label: "Flame")]
         let extras = [AppExtra(bundleID: "com.example.fiddle", indexInApp: 0, x: 10, width: 20,

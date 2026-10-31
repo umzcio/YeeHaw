@@ -16,9 +16,12 @@ public struct AppExtra: Equatable, Sendable {
     public var indexInApp: Int
     public var x, width: Double
     public var identifier, title, help, description: String
+    /// The owning app's executable name, a second key prefix for apps that aren't notarized.
+    public var executableName: String
 
     public init(bundleID: BundleID, indexInApp: Int, x: Double, width: Double,
-                identifier: String = "", title: String = "", help: String = "", description: String = "") {
+                identifier: String = "", title: String = "", help: String = "", description: String = "",
+                executableName: String = "") {
         self.bundleID = bundleID
         self.indexInApp = indexInApp
         self.x = x
@@ -27,6 +30,7 @@ public struct AppExtra: Equatable, Sendable {
         self.title = title
         self.help = help
         self.description = description
+        self.executableName = executableName
     }
 }
 
@@ -38,11 +42,12 @@ public struct MenuBarItem: Equatable, Identifiable, Sendable {
     public var axIdentifier: String
     public var label: String
     public var keyNames: [String]    // non-empty identifier, title, description, in that order
+    public var keyPrefixes: [String] // PositionKey.prefixes of the owner; empty with no owning app
     public var x, width: Double
     public var isPinned: Bool        // clock, control center
 
     public init(id: String, bundleID: BundleID?, appleIdentifier: String?, indexInApp: Int,
-                axIdentifier: String, label: String, keyNames: [String],
+                axIdentifier: String, label: String, keyNames: [String], keyPrefixes: [String],
                 x: Double, width: Double, isPinned: Bool) {
         self.id = id
         self.bundleID = bundleID
@@ -51,6 +56,7 @@ public struct MenuBarItem: Equatable, Identifiable, Sendable {
         self.axIdentifier = axIdentifier
         self.label = label
         self.keyNames = keyNames
+        self.keyPrefixes = keyPrefixes
         self.x = x
         self.width = width
         self.isPinned = isPinned
@@ -74,7 +80,7 @@ public enum ItemMatcher {
             if let apple = d.appleIdentifier {
                 items.append(MenuBarItem(
                     id: apple, bundleID: nil, appleIdentifier: apple, indexInApp: 0,
-                    axIdentifier: "", label: d.label, keyNames: [],
+                    axIdentifier: "", label: d.label, keyNames: [], keyPrefixes: [],
                     x: d.x, width: d.width, isPinned: pinnedIdentifiers.contains(apple)))
             } else if let i = unused.firstIndex(where: {
                 abs($0.x - d.x) <= tolerance && abs($0.width - d.width) <= tolerance
@@ -84,11 +90,12 @@ public enum ItemMatcher {
                     id: "\(e.bundleID)#\(e.indexInApp)", bundleID: e.bundleID, appleIdentifier: nil,
                     indexInApp: e.indexInApp, axIdentifier: e.identifier, label: d.label,
                     keyNames: [e.identifier, e.title, e.description].filter { !$0.isEmpty },
+                    keyPrefixes: PositionKey.prefixes(bundleID: e.bundleID, executableName: e.executableName),
                     x: d.x, width: d.width, isPinned: false))
             } else {
                 items.append(MenuBarItem(
                     id: "unknown@\(Int(d.x))", bundleID: nil, appleIdentifier: nil, indexInApp: 0,
-                    axIdentifier: "", label: d.label, keyNames: [],
+                    axIdentifier: "", label: d.label, keyNames: [], keyPrefixes: [],
                     x: d.x, width: d.width, isPinned: false))
             }
         }

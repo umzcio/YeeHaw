@@ -2,21 +2,40 @@ public enum PositionKey {
     public static let controlCenter = "module:BentoBox-0"
     public static let clock = "module:Clock"
 
+    /// The key prefixes MenuBarAgent may file an app's items under: the bundle ID, and for apps
+    /// that aren't notarized (Allow-list location `adhocBinary`) the executable name. Bundle ID
+    /// first, empty and duplicate names dropped.
+    public static func prefixes(bundleID: BundleID, executableName: String?) -> [String] {
+        guard let executableName, !executableName.isEmpty, executableName != bundleID else { return [bundleID] }
+        return [bundleID, executableName]
+    }
+
     /// All table keys for one item. macOS may name a slot after the item's identifier, AX
-    /// description or title, or `Item-<indexInApp>`, so every candidate that exists in `table` is
-    /// returned (in candidate order) and all of them get the same value. If none exist, one new
-    /// key is returned, named after the first non-empty name, else `Item-<indexInApp>`.
-    public static func keys(bundleID: BundleID, names: [String], indexInApp: Int, table: PositionTable) -> [String] {
+    /// description or title, or `Item-<indexInApp>`, under any of the app's prefixes, so every
+    /// candidate that exists in `table` is returned (prefixes in order, names in candidate order
+    /// within each) and all of them get the same value. If none exist, one new key is returned:
+    /// the first prefix with the first non-empty name, else `Item-<indexInApp>`.
+    public static func keys(prefixes: [String], names: [String], indexInApp: Int, table: PositionTable) -> [String] {
+        guard let first = prefixes.first else { return [] }
         let itemName = "Item-\(indexInApp)"
         var candidates: [String] = []
         for name in names + [itemName] where !name.isEmpty && !candidates.contains(name) {
             candidates.append(name)
         }
-        let all = candidates.map { "status:\(bundleID)::\($0)" }
-        let existing = all.filter { table.values[$0] != nil }
+        var existing: [String] = []
+        for prefix in prefixes {
+            for name in candidates {
+                let key = "status:\(prefix)::\(name)"
+                if table.values[key] != nil, !existing.contains(key) { existing.append(key) }
+            }
+        }
         if !existing.isEmpty { return existing }
-        let first = names.first { !$0.isEmpty } ?? itemName
-        return ["status:\(bundleID)::\(first)"]
+        return ["status:\(first)::\(names.first { !$0.isEmpty } ?? itemName)"]
+    }
+
+    /// `keys(prefixes:names:indexInApp:table:)` for a drawn item.
+    public static func keys(for item: MenuBarItem, table: PositionTable) -> [String] {
+        keys(prefixes: item.keyPrefixes, names: item.keyNames, indexInApp: item.indexInApp, table: table)
     }
 
     /// The table key of an Apple item, or nil when it can't be resolved. Control Center and the

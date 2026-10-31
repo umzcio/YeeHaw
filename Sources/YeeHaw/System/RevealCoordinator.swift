@@ -7,13 +7,20 @@ import YeeHawCore
 /// revealed right next to YeeHaw's, pressed, and hidden again once the app is done with its menu.
 @MainActor
 final class RevealCoordinator {
-    /// How long a reveal stays open with no sign of use before it's ended anyway.
+    /// An inactivity timeout, not a hard limit: it restarts on the app's own activity (a menu or
+    /// window opening, a click inside its windows), so someone still working in a window the reveal
+    /// opened isn't cut off. The reveal ends after this long with no such activity (ruling R32).
     static let inactivityTimeout: Double = 30
     /// How long one AX press may block. An app busy tracking the menu it just opened can run past
     /// this and return `-25204`, so a timeout isn't treated as a failure.
     nonisolated static let pressTimeout: Float = 1.5
     /// After a failed press, how long to wait for a menu or window before trying the next method.
     static let pressGrace: Double = 0.3
+    /// How long to keep re-reading the app's extras bar when the revealed item isn't in it yet.
+    static let findTimeout: Double = 0.5
+    static let findInterval: Double = 0.1
+    /// Before retrying a failed `endReveal`.
+    static let endRetryDelay: Double = 1
     private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "reveal")
 
     private let controller: MenuBarController
@@ -30,10 +37,8 @@ final class RevealCoordinator {
     /// is open, further calls are ignored, so two reveals never share the controller's one slot.
     func open(_ id: BundleID, nextTo yeehaw: MenuBarItem) async {
         let start = ContinuousClock.now
-        let step: (String) -> Void = { [trace] text in
-            let elapsed = (ContinuousClock.now - start).components
-            let ms = elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000
-            let line = "reveal \(id) +\(ms) ms: \(text)"
+        let step: @MainActor (String) -> Void = { [trace] text in
+            let line = "reveal \(id) +\(Self.milliseconds(ContinuousClock.now - start)) ms: \(text)"
             Self.log.notice("\(line, privacy: .public)")
             trace(line)
         }
@@ -48,8 +53,10 @@ final class RevealCoordinator {
         do {
             item = try await controller.beginReveal(id, nextTo: yeehaw)
         } catch {
-            // The controller undoes its own failed reveal, so there's nothing to end.
+            // endReveal is a no-op with nothing pending, and finishes a reveal the controller
+            // couldn't undo itself (a failed write after the slot was taken, or a failed undo).
             step("beginReveal failed: \(error)")
+            await end(step)
             return
         }
         step("reveal done, drawn at x \(item.x) width \(item.width)")
@@ -62,9 +69,7 @@ final class RevealCoordinator {
         let session = RevealSession(pid: pid)
         if !session.isObserving { step("AX observer unavailable; only clicks and the timeout can end it") }
 
-        let pressed = await press(item, pid: pid, session: session)
-        step("press: \(pressed.summary)")
-        if pressed.worked {
+        if await press(item, pid: pid, session: session, step: step) {
             session.startWatching()
             step("close: \(await session.waitForClose())")
         }
@@ -72,13 +77,30 @@ final class RevealCoordinator {
         await end(step)
     }
 
-    private func end(_ step: (String) -> Void) async {
-        do {
-            try await controller.endReveal()
-            step("endReveal done")
-        } catch {
-            step("endReveal failed: \(error)")
-        }
+    /// `endReveal`, retried once after `endRetryDelay`. It runs in its own unstructured task so a
+    /// cancelled caller can't cut it short: `TaskSleeper` ignores cancellation, so the controller's
+    /// polls would race through, and the retry's sleep would be skipped.
+    private func end(_ step: @escaping @MainActor (String) -> Void) async {
+        let controller = controller
+        await Task { @MainActor in
+            do {
+                try await controller.endReveal()
+                step("endReveal done")
+                return
+            } catch {
+                step("endReveal failed: \(error); retrying in \(Int(Self.endRetryDelay)) s")
+            }
+            try? await Task.sleep(for: .seconds(Self.endRetryDelay))
+            do {
+                try await controller.endReveal()
+                step("endReveal done on retry")
+            } catch {
+                let message = "ERROR: endReveal failed twice (\(error)). The app may be left on and its "
+                    + "position unrestored; the pending reveal stays saved for the next launch to finish."
+                Self.log.fault("\(message, privacy: .public)")
+                step(message)
+            }
+        }.value
     }
 
     // MARK: Pressing
@@ -95,28 +117,42 @@ final class RevealCoordinator {
         case notFound
     }
 
-    /// AX press, then `AXShowMenu`, then a synthesized click. A failed method falls through only if
-    /// no menu or window appeared, since the app may have opened it while the call timed out.
-    private func press(_ item: MenuBarItem, pid: pid_t, session: RevealSession) async -> (summary: String, worked: Bool) {
-        var tried: [String] = []
+    /// AX press, then `AXShowMenu`, then a synthesized click, each logged with its duration and
+    /// result. A failed method falls through only if no menu or window appeared, since the app may
+    /// have opened it while the call timed out. Returns whether the press got through.
+    private func press(_ item: MenuBarItem, pid: pid_t, session: RevealSession,
+                       step: @MainActor (String) -> Void) async -> Bool {
         for method in PressMethod.allCases {
-            switch await Self.perform(method, pid: pid, x: item.x, width: item.width) {
+            let started = ContinuousClock.now
+            var result = await Self.perform(method, pid: pid, x: item.x, width: item.width)
+            // The app's extras bar can lag behind what's drawn; re-read it for a moment.
+            while case .notFound = result, ContinuousClock.now - started < .seconds(Self.findTimeout), !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.findInterval))
+                result = await Self.perform(method, pid: pid, x: item.x, width: item.width)
+            }
+            let took = Self.milliseconds(ContinuousClock.now - started)
+            switch result {
             case .notFound:
-                return ("no extras-bar element at x \(item.x) width \(item.width)", false)
+                step("press \(method.rawValue): no extras-bar element at x \(item.x) width \(item.width) after \(took) ms")
+                return false
             case .done:
-                return ((tried + ["\(method.rawValue) worked"]).joined(separator: "; "), true)
+                let outcome = method == .click ? "click posted" : "worked"
+                step("press \(method.rawValue): \(outcome) in \(took) ms; notifications so far: \(session.seenSummary)")
+                return true
             case .failed(let code):
                 if !session.surfaceOpened {
                     try? await Task.sleep(for: .seconds(Self.pressGrace))
                 }
+                step("press \(method.rawValue): returned \(code) after \(took) ms; "
+                     + "notifications by the grace check: \(session.seenSummary)")
                 if session.surfaceOpened {
-                    return ((tried + ["\(method.rawValue) returned \(code) but the app opened its menu or window"])
-                        .joined(separator: "; "), true)
+                    step("press \(method.rawValue): the app opened its menu or window anyway")
+                    return true
                 }
-                tried.append("\(method.rawValue) failed (\(code))")
             }
         }
-        return (tried.joined(separator: "; "), false)
+        step("press: every method failed")
+        return false
     }
 
     /// Re-reads the app's extras-bar children and acts on the one at the revealed item's frame.
@@ -140,7 +176,13 @@ final class RevealCoordinator {
             return error == .success ? .done : .failed(error.rawValue)
         case .click:
             let frame = AXMenuBarReader.frame(of: element)
-            return postClick(at: CGPoint(x: frame.midX, y: frame.midY)) ? .done : .failed(0)
+            // The pointer goes back where it was once the click is through.
+            guard let pointer = CGEvent(source: nil)?.location,
+                  postClick(at: CGPoint(x: frame.midX, y: frame.midY))
+            else { return .failed(0) }
+            try? await Task.sleep(for: .milliseconds(50))
+            CGWarpMouseCursorPosition(pointer)
+            return .done
         }
     }
 
@@ -156,19 +198,26 @@ final class RevealCoordinator {
         up.post(tap: .cghidEventTap)
         return true
     }
+
+    private static func milliseconds(_ duration: Duration) -> Int64 {
+        let parts = duration.components
+        return parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000
+    }
 }
 
 /// One reveal's close signals. The first one to arrive wins; `tearDown` removes them all.
 ///
 /// The app is done with its menu on: `AXMenuClosed` for its outermost menu; its popover or window
-/// losing focus (`AXFocusedWindowChanged`) or being destroyed (`AXUIElementDestroyed`); a global
-/// left mouse-down outside its windows; or `RevealCoordinator.inactivityTimeout` with none of the
-/// app's own activity (menus or windows opening, clicks inside its windows).
+/// losing focus (`AXFocusedWindowChanged`) or being destroyed (`AXUIElementDestroyed`); the app
+/// being deactivated (`AXApplicationDeactivated`, e.g. Cmd-Tab away); a global left mouse-down
+/// outside its windows; or `RevealCoordinator.inactivityTimeout` with none of the app's own
+/// activity (menus or windows opening, clicks inside its windows).
 @MainActor
 private final class RevealSession {
     private static let appNotifications = [
         kAXMenuOpenedNotification, kAXMenuClosedNotification,
         kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification,
+        kAXApplicationDeactivatedNotification,
     ]
     /// Bounds every AX call made on the main actor (adding and removing notifications).
     private static let messagingTimeout: Float = 0.5
@@ -184,6 +233,10 @@ private final class RevealSession {
     private var menuDepth = 0
     private var reason: String?
     private var waiter: CheckedContinuation<String, Never>?
+    /// Every AX notification received, in order, for the debug log.
+    private var seen: [String] = []
+
+    var seenSummary: String { "[" + seen.joined(separator: ", ") + "]" }
 
     var isObserving: Bool { observer != nil }
 
@@ -256,6 +309,7 @@ private final class RevealSession {
         if timer != nil { restartTimer() }
     }
 
+    /// Inactivity, not a hard limit (R32): `activity()` calls this again on the app's own activity.
     private func restartTimer() {
         timer?.cancel()
         timer = Task { [weak self] in
@@ -266,6 +320,7 @@ private final class RevealSession {
     }
 
     private func handle(_ name: String, _ element: AXUIElement) {
+        seen.append(name)
         guard reason == nil else { return }
         switch name {
         case kAXMenuOpenedNotification:
@@ -289,6 +344,8 @@ private final class RevealSession {
             }
         case kAXUIElementDestroyedNotification:
             if windows.contains(where: { CFEqual($0, element) }) { close("AXUIElementDestroyed") }
+        case kAXApplicationDeactivatedNotification:
+            close("AXApplicationDeactivated")
         default:
             break
         }

@@ -12,6 +12,7 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     private var _positions: [String: Double]
     private var _running: Set<BundleID>
     private var _drawn: [BundleID: [MenuBarItem]]
+    private let prefixes: [BundleID: [String]]
     private var _appleItems: [MenuBarItem]
     private var _frozenAllow: AllowSnapshot?
     private var _failing: Set<GrantedFile> = []
@@ -21,11 +22,13 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     private var _positionWrites = 0
 
     init(allow: [(BundleID, Bool)], positions: [String: Double] = [:], running: Set<BundleID>? = nil,
-         drawn: [BundleID: [MenuBarItem]] = [:], appleItems: [MenuBarItem] = []) throws {
+         drawn: [BundleID: [MenuBarItem]] = [:], appleItems: [MenuBarItem] = [],
+         prefixes: [BundleID: [String]] = [:]) throws {
         _allowBlob = try Self.blob(allow)
+        self.prefixes = prefixes
         _positions = positions
         _running = running ?? Set(allow.map(\.0))
-        var defaults = Dictionary(uniqueKeysWithValues: allow.map { ($0.0, [Self.item($0.0)]) })
+        var defaults = Dictionary(uniqueKeysWithValues: allow.map { ($0.0, [Self.item($0.0, prefixes: prefixes[$0.0])]) })
         defaults.merge(drawn) { _, new in new }
         _drawn = defaults
         _appleItems = appleItems
@@ -37,15 +40,16 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
         return try body(self)
     }
 
-    static func item(_ id: BundleID, index: Int = 0, names: [String] = [], x: Double = 100) -> MenuBarItem {
+    static func item(_ id: BundleID, index: Int = 0, names: [String] = [], x: Double = 100,
+                     prefixes: [String]? = nil) -> MenuBarItem {
         MenuBarItem(id: "\(id)#\(index)", bundleID: id, appleIdentifier: nil, indexInApp: index,
-                    axIdentifier: names.first ?? "", label: id, keyNames: names,
+                    axIdentifier: names.first ?? "", label: id, keyNames: names, keyPrefixes: prefixes ?? [id],
                     x: x, width: 20, isPinned: false)
     }
 
     static func appleItem(_ identifier: String, x: Double = 900) -> MenuBarItem {
         MenuBarItem(id: identifier, bundleID: nil, appleIdentifier: identifier, indexInApp: 0,
-                    axIdentifier: "", label: identifier, keyNames: [], x: x, width: 20, isPinned: false)
+                    axIdentifier: "", label: identifier, keyNames: [], keyPrefixes: [], x: x, width: 20, isPinned: false)
     }
 
     static func blob(_ entries: [(BundleID, Bool)]) throws -> Data {
@@ -131,6 +135,8 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     }
 
     func runningBundleIDs() async -> Set<BundleID> { locked { $0._running } }
+
+    func keyPrefixes(of id: BundleID) async -> [String] { prefixes[id] ?? [id] }
 }
 
 struct WriteFailed: Error {}
@@ -535,6 +541,69 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(system.positions["status:\(Self.a)::Item-0"] == 150)
         try await c.endReveal()
         #expect(system.positions == original)
+    }
+
+    // The owner's bug: YeeHaw isn't notarized, so its only key is under its executable name.
+    @Test func revealResolvesYeeHawByExecutableName() async throws {
+        let system = try FakeSystem(
+            allow: [(Self.a, false), (Self.yeehaw, true)],
+            positions: ["status:\(Self.a)::Item-0": 300, "status:YeeHaw::YeeHaw": 10, PositionKey.clock: 0],
+            prefixes: [Self.yeehaw: [Self.yeehaw, "YeeHaw"]])
+        let original = system.positions
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        let yeehawItem = FakeSystem.item(Self.yeehaw, names: ["YeeHaw"], prefixes: [Self.yeehaw, "YeeHaw"])
+        _ = try await c.beginReveal(Self.a, nextTo: yeehawItem)
+        #expect(system.positions["status:\(Self.a)::Item-0"] == 155)
+        try await c.endReveal()
+        #expect(system.positions == original)
+    }
+
+    @Test func revealMovesAndRestoresKeysUnderBothPrefixes() async throws {
+        let zmeet = "edu.umontana.zmeet"
+        let system = try FakeSystem(
+            allow: [(zmeet, false), (Self.yeehaw, true)],
+            positions: ["status:\(zmeet)::zMeetStatusItem": 300, "status:zMeet::zMeetStatusItem": 280,
+                        "status:\(Self.yeehaw)::Item-0": 10, PositionKey.clock: 0],
+            prefixes: [zmeet: [zmeet, "zMeet"]])
+        let original = system.positions
+        let rig = Self.rig(system, state: HidingState(hidden: [zmeet], journal: [zmeet]))
+        let c = rig.controller()
+        _ = try await c.beginReveal(zmeet, nextTo: FakeSystem.item(Self.yeehaw))
+        #expect(system.positions["status:\(zmeet)::zMeetStatusItem"] == 145)
+        #expect(system.positions["status:zMeet::zMeetStatusItem"] == 145)
+        #expect(c.state.pendingReveal?.originalPositions ==
+                ["status:\(zmeet)::zMeetStatusItem": 300, "status:zMeet::zMeetStatusItem": 280])
+        try await c.endReveal()
+        #expect(system.positions == original)
+    }
+
+    @Test func revealAfterRelaunchUsesExecutablePrefixWhileHidden() async throws {
+        let nora = "com.example.nora"
+        let system = try FakeSystem(
+            allow: [(nora, false), (Self.yeehaw, true)],
+            positions: ["status:Nora::Item-0": 400, "status:\(Self.yeehaw)::Item-0": 10, PositionKey.clock: 0],
+            prefixes: [nora: [nora, "Nora"]])
+        let original = system.positions
+        let store = FakeStore(HidingState(hidden: [nora], journal: [nora]), system: system)
+        let fresh = Rig(system: system, store: store).controller()
+        _ = try await fresh.beginReveal(nora, nextTo: FakeSystem.item(Self.yeehaw))
+        #expect(system.positions["status:Nora::Item-0"] == 205)
+        #expect(system.positions["status:\(nora)::Item-0"] == nil)
+        try await fresh.endReveal()
+        #expect(system.positions == original)
+    }
+
+    @Test func moveWritesKeysUnderEveryPrefix() throws {
+        let zmeet = "edu.umontana.zmeet"
+        let rig = Self.rig(try FakeSystem(
+            allow: [(zmeet, true), (Self.b, true)],
+            positions: ["status:\(zmeet)::zMeetStatusItem": 300, "status:zMeet::zMeetStatusItem": 300,
+                        "status:\(Self.b)::Item-0": 200, PositionKey.clock: 0]))
+        let item = FakeSystem.item(zmeet, names: ["zMeetStatusItem"], prefixes: [zmeet, "zMeet"])
+        try rig.controller().move(item, leftNeighbor: FakeSystem.item(Self.b), rightNeighbor: nil)
+        #expect(rig.system.positions["status:\(zmeet)::zMeetStatusItem"] == 100)
+        #expect(rig.system.positions["status:zMeet::zMeetStatusItem"] == 100)
     }
 
     @Test func revealReturnsIndexZeroItem() async throws {

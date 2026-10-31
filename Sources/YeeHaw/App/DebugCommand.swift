@@ -134,32 +134,32 @@ enum DebugCommand {
     private static func waitForIcon(grants: FileGrantStore, log: (String) -> Void) async -> MenuBarItem? {
         let reader = AXMenuBarReader()
         let positions = GrantedPreferencesFile(file: .positions, grants: grants)
-        let polls = Int((iconTimeout / iconPollInterval).rounded())
+        let deadline = ContinuousClock.now + .seconds(iconTimeout)
         var drawn: MenuBarItem?
         var keys: [String] = []
         var readError: Error?
-        for poll in 0...polls {
+        while true {
             drawn = await reader.items().first { $0.bundleID == yeehawBundleID }
             do {
                 let table = PositionTable(try positions.read(MenuBarController.positionsKey) as? [String: Double] ?? [:])
                 readError = nil
-                keys = table.values.keys.filter { $0.hasPrefix("status:\(yeehawBundleID)::") }.sorted()
-                if let drawn,
-                   let key = PositionKey.keys(bundleID: yeehawBundleID, names: drawn.keyNames,
-                                              indexInApp: drawn.indexInApp, table: table).first,
-                   table.values[key] != nil {
+                let prefixes = drawn?.keyPrefixes ?? [yeehawBundleID]
+                keys = table.values.keys.filter { key in prefixes.contains { key.hasPrefix("status:\($0)::") } }.sorted()
+                if let drawn, let key = PositionKey.keys(for: drawn, table: table).first, table.values[key] != nil {
                     log("YeeHaw icon ready at x \(format(drawn.x)) width \(format(drawn.width)), key \(key)")
                     return drawn
                 }
             } catch {
                 readError = error
             }
-            if poll < polls { try? await Task.sleep(for: .seconds(iconPollInterval)) }
+            guard ContinuousClock.now < deadline else { break }
+            try? await Task.sleep(for: .seconds(iconPollInterval))
         }
         if let readError {
             log("YeeHaw icon not ready: positions unreadable (\(readError)); nothing written")
         } else if let drawn {
-            log("YeeHaw icon drawn (names \(listed(drawn.keyNames)), index \(drawn.indexInApp)) but its "
+            log("YeeHaw icon drawn (prefixes \(listed(drawn.keyPrefixes)), names \(listed(drawn.keyNames)), "
+                + "index \(drawn.indexInApp)) but its "
                 + "position key is missing after \(format(iconTimeout)) s; YeeHaw keys: \(listed(keys)); nothing written")
         } else {
             log("YeeHaw icon not drawn after \(format(iconTimeout)) s; YeeHaw keys: \(listed(keys)); nothing written")

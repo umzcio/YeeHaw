@@ -150,10 +150,10 @@ public enum ControllerError: Error, Equatable {
 
     /// Places every key of `item` between its new neighbours. A no-op for items with no owning app.
     public func move(_ item: MenuBarItem, leftNeighbor: MenuBarItem?, rightNeighbor: MenuBarItem?) throws {
-        guard let id = item.bundleID else { return }
+        guard item.bundleID != nil else { return }
         try guarded {
             let table = PositionTable(try readPositions())
-            let keys = PositionKey.keys(bundleID: id, names: item.keyNames, indexInApp: item.indexInApp, table: table)
+            let keys = PositionKey.keys(for: item, table: table)
             let left = try leftNeighbor.map { try neighborKey($0, table) }
             let right = try rightNeighbor.map { try neighborKey($0, table) }
             try writePositions(table.placement(of: keys, leftNeighbor: left, rightNeighbor: right))
@@ -171,10 +171,12 @@ public enum ControllerError: Error, Equatable {
                 throw ControllerError.notTracked(id)
             }
             if state.pendingReveal != nil { try await finishReveal() }
+            // Asked before the read, so nothing suspends between reading the table and writing it.
+            let prefixes = await reader.keyPrefixes(of: id)
             let values = try readPositions()
             let table = PositionTable(values)
             let yeehawKey = try neighborKey(yeehaw, table)
-            let keys = Self.revealKeys(id, table)
+            let keys = Self.revealKeys(prefixes: prefixes, table)
 
             state.pendingReveal = PendingReveal(
                 bundleID: id, originalPositions: Dictionary(uniqueKeysWithValues: keys.map { ($0, values[$0]) }))
@@ -217,11 +219,13 @@ public enum ControllerError: Error, Equatable {
         save(state)
     }
 
-    /// Every existing key of the app (hiding is per app, so the whole app appears), else `Item-0`.
-    private static func revealKeys(_ id: BundleID, _ table: PositionTable) -> [String] {
-        let prefix = "status:\(id)::"
-        let existing = table.values.keys.filter { $0.hasPrefix(prefix) }.sorted()
-        return existing.isEmpty ? [prefix + "Item-0"] : existing
+    /// Every existing key of the app under any of its prefixes (hiding is per app, so the whole
+    /// app appears), else `Item-0` under the first prefix. The prefixes come from the reader, so
+    /// they're known even while the app is hidden and not drawn.
+    private static func revealKeys(prefixes: [String], _ table: PositionTable) -> [String] {
+        let starts = prefixes.map { "status:\($0)::" }
+        let existing = table.values.keys.filter { key in starts.contains { key.hasPrefix($0) } }.sorted()
+        return existing.isEmpty ? starts.prefix(1).map { $0 + "Item-0" } : existing
     }
 
     private static func switchedOn(_ actions: [AllowAction]) -> [BundleID] {
@@ -239,8 +243,8 @@ public enum ControllerError: Error, Equatable {
 
     private func neighborKey(_ item: MenuBarItem, _ table: PositionTable) throws -> String {
         let key: String?
-        if let id = item.bundleID {
-            key = PositionKey.keys(bundleID: id, names: item.keyNames, indexInApp: item.indexInApp, table: table).first
+        if item.bundleID != nil {
+            key = PositionKey.keys(for: item, table: table).first
         } else if let apple = item.appleIdentifier {
             key = PositionKey.appleKey(appleIdentifier: apple, table: table)
         } else {
