@@ -4,14 +4,19 @@ public enum ControllerError: Error, Equatable {
     case notTracked(BundleID)
     case notHonored(BundleID)
     case needsGrant(GrantedFile)
-    /// A move neighbour whose position key isn't in the table.
+    /// A move neighbour (or YeeHaw's own item) whose position key isn't in the table.
     case unresolvedNeighbor
     /// A preference file holds a value of the wrong type; YeeHaw won't overwrite it.
     case malformed(GrantedFile)
 }
 
 /// Joins the pure rules (Allow list, position table, reconciler) to the system through ports.
-/// State is saved before every flip, so a crash always leaves the journal correct.
+///
+/// Journal invariant: the journal is always a superset of the apps YeeHaw switched off that may
+/// still be off. So a switch-off is journaled and saved *before* the write, and a switch-on is
+/// removed from the journal only *after* the write succeeds.
+///
+/// Public async methods run one at a time, in call order, through an internal FIFO gate.
 @MainActor public final class MenuBarController {
     public static let allowKey = "trackedApplications"
     public static let positionsKey = "TrailingItemPreferredPositions"
@@ -27,11 +32,11 @@ public enum ControllerError: Error, Equatable {
     private let reader: MenuBarReading
     private let store: StateStoring
     private let sleeper: Sleeper
-    /// The Allow list as YeeHaw last wrote or reconciled it, so its own writes never count as
-    /// external changes.
+    /// The Allow values YeeHaw last read at launch or wrote itself, per app, so its own writes
+    /// never count as external changes and other apps' changes are never swallowed.
     private var lastSnapshot: AllowSnapshot = [:]
-    /// The last drawn item seen per app (preferring index 0), for naming keys while it's hidden.
-    private var knownItems: [BundleID: MenuBarItem] = [:]
+    private var gateBusy = false
+    private var gateWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(allowFile: PreferencesFile, positionFile: PreferencesFile, reader: MenuBarReading,
                 store: StateStoring, sleeper: Sleeper) {
@@ -46,46 +51,42 @@ public enum ControllerError: Error, Equatable {
     // MARK: Lifecycle
 
     /// Reconciles crash leftovers in one Allow write (no per-app wait), then restores any
-    /// reveal positions. `pendingReveal` stays saved until its positions are back.
+    /// reveal positions. Switched-on apps and `pendingReveal` stay saved until their writes land.
     public func launch() async throws {
-        try await guarded {
+        try await gated {
             let allow = try readAllow().snapshot
             lastSnapshot = allow
             let r = Reconciler.onLaunch(state, allow: allow)
-            var next = r.state
-            next.pendingReveal = state.pendingReveal
-            save(next)
+            var interim = r.state
+            interim.journal.formUnion(Self.switchedOn(r.actions))
+            interim.pendingReveal = state.pendingReveal
+            if interim != state { save(interim) }
             if !r.actions.isEmpty { try writeAllow(r.actions) }
             if !r.restorePositions.isEmpty { try writePositions(r.restorePositions) }
-            if state.pendingReveal != nil {
-                state.pendingReveal = nil
-                save(state)
-            }
-            await refresh()
+            if r.state != state { save(r.state) }
+            await reload()
         }
     }
 
-    /// Switches everything in the journal back on, in one write, without waiting.
+    /// Switches everything in the journal back on in one write, without waiting, then clears it.
     public func quit() throws {
         try guarded {
             let r = Reconciler.onQuit(state)
-            save(r.state)
             if !r.actions.isEmpty { try writeAllow(r.actions) }
+            if r.state != state { save(r.state) }
         }
     }
 
     public func refresh() async {
-        items = await reader.items()
-        for item in items {
-            guard let id = item.bundleID else { continue }
-            if item.indexInApp == 0 || knownItems[id] == nil { knownItems[id] = item }
-        }
+        await enterGate()
+        defer { leaveGate() }
+        await reload()
     }
 
     // MARK: Hiding
 
     public func hide(_ id: BundleID) async throws {
-        try await guarded {
+        try await gated {
             let allow = try readAllow().snapshot
             guard allow[id] != nil else { throw ControllerError.notTracked(id) }
             let r = Reconciler.hide(id, state, allow: allow)
@@ -97,11 +98,14 @@ public enum ControllerError: Error, Equatable {
     }
 
     public func show(_ id: BundleID) async throws {
-        try await guarded {
+        try await gated {
             let r = Reconciler.show(id, state)
-            if r.state != state { save(r.state) }
+            var interim = r.state
+            interim.journal = state.journal
+            if interim != state { save(interim) }
             guard !r.actions.isEmpty else { return }
             try writeAllow(r.actions)
+            save(r.state)
             try await waitIfRunning(id, drawn: true)
         }
     }
@@ -125,20 +129,20 @@ public enum ControllerError: Error, Equatable {
 
     /// Takes ownership of apps that are already off. Apps that are on or untracked are ignored.
     public func adopt(_ ids: [BundleID]) async throws {
-        try await guarded {
+        try await gated {
             let allow = try readAllow().snapshot
             save(Reconciler.adopt(ids.filter { allow[$0] == false }, state))
-            await refresh()
+            await reload()
         }
     }
 
     /// Call when the Allow file changed on disk. Only changes since YeeHaw's own last write count.
     public func allowListChanged() async throws {
-        try await guarded {
+        try await gated {
             let current = try readAllow().snapshot
             save(Reconciler.externalChange(state, before: lastSnapshot, after: current))
             lastSnapshot = current
-            await refresh()
+            await reload()
         }
     }
 
@@ -158,18 +162,19 @@ public enum ControllerError: Error, Equatable {
 
     // MARK: Reveal
 
-    /// Briefly draws a hidden app's item immediately left of YeeHaw's icon. The app stays in
-    /// `hidden` and the journal; `pendingReveal` is saved before anything is written.
+    /// Briefly draws a hidden app immediately left of YeeHaw's icon and returns its item (index 0
+    /// when drawn). Only apps YeeHaw hid can be revealed; they stay in `hidden` and the journal.
+    /// `pendingReveal` is saved before anything is written, and the reveal is undone if not honored.
     public func beginReveal(_ id: BundleID, nextTo yeehaw: MenuBarItem) async throws -> MenuBarItem {
-        try await guarded {
+        try await gated {
+            guard state.hidden.contains(id), state.journal.contains(id) else {
+                throw ControllerError.notTracked(id)
+            }
             if state.pendingReveal != nil { try await finishReveal() }
             let values = try readPositions()
             let table = PositionTable(values)
-            guard let yeehawID = yeehaw.bundleID,
-                  let yeehawKey = PositionKey.keys(bundleID: yeehawID, names: yeehaw.keyNames,
-                                                   indexInApp: yeehaw.indexInApp, table: table).first
-            else { throw ControllerError.unresolvedNeighbor }
-            let keys = PositionKey.keys(bundleID: id, names: knownItems[id]?.keyNames ?? [], indexInApp: 0, table: table)
+            let yeehawKey = try neighborKey(yeehaw, table)
+            let keys = Self.revealKeys(id, table)
 
             state.pendingReveal = PendingReveal(
                 bundleID: id, originalPositions: Dictionary(uniqueKeysWithValues: keys.map { ($0, values[$0]) }))
@@ -178,30 +183,58 @@ public enum ControllerError: Error, Equatable {
             let slot = table.slotValue(leftOf: yeehawKey)
             try writePositions(Dictionary(uniqueKeysWithValues: keys.map { ($0, slot) }))
             try writeAllow([.switchOn(id)])
-            guard let drawn = try await waitUntil(id, drawn: true) else { throw ControllerError.notHonored(id) }
-            return drawn
+            do {
+                try await waitUntil(id, drawn: true)
+            } catch ControllerError.notHonored(let failed) where failed == id {
+                try await finishReveal()
+                throw ControllerError.notHonored(id)
+            }
+            let drawn = items.filter { $0.bundleID == id }
+            guard let item = drawn.first(where: { $0.indexInApp == 0 }) ?? drawn.first else {
+                throw ControllerError.notHonored(id)
+            }
+            return item
         }
     }
 
-    /// Switches the revealed app off, waits until it's gone, then restores its positions.
+    /// Switches the revealed app off (unless it was shown meanwhile), waits until it's gone, then
+    /// restores its positions.
     public func endReveal() async throws {
-        try await guarded { try await finishReveal() }
+        try await gated { try await finishReveal() }
     }
 
     // MARK: Private
 
+    /// Ungated: callers already hold the gate.
     private func finishReveal() async throws {
         guard let pending = state.pendingReveal else { return }
-        try writeAllow([.switchOff(pending.bundleID)])
-        try await waitIfRunning(pending.bundleID, drawn: false)
+        if state.journal.contains(pending.bundleID) {
+            try writeAllow([.switchOff(pending.bundleID)])
+            try await waitIfRunning(pending.bundleID, drawn: false)
+        }
         try writePositions(pending.originalPositions)
         state.pendingReveal = nil
         save(state)
     }
 
+    /// Every existing key of the app (hiding is per app, so the whole app appears), else `Item-0`.
+    private static func revealKeys(_ id: BundleID, _ table: PositionTable) -> [String] {
+        let prefix = "status:\(id)::"
+        let existing = table.values.keys.filter { $0.hasPrefix(prefix) }.sorted()
+        return existing.isEmpty ? [prefix + "Item-0"] : existing
+    }
+
+    private static func switchedOn(_ actions: [AllowAction]) -> [BundleID] {
+        actions.compactMap { if case .switchOn(let id) = $0 { id } else { nil } }
+    }
+
     private func save(_ next: HidingState) {
         state = next
         store.save(state)
+    }
+
+    private func reload() async {
+        items = await reader.items()
     }
 
     private func neighborKey(_ item: MenuBarItem, _ table: PositionTable) throws -> String {
@@ -222,22 +255,20 @@ public enum ControllerError: Error, Equatable {
 
     private func waitIfRunning(_ id: BundleID, drawn: Bool) async throws {
         if await reader.runningBundleIDs().contains(id) {
-            _ = try await waitUntil(id, drawn: drawn)
+            try await waitUntil(id, drawn: drawn)
         } else {
-            await refresh()
+            await reload()
         }
     }
 
     /// Polls every `pollInterval` until the app's item appears (or disappears), for at most
     /// `honorTimeout`, counted in polls rather than wall time. No retry: throws `.notHonored`.
-    @discardableResult
-    private func waitUntil(_ id: BundleID, drawn: Bool) async throws -> MenuBarItem? {
+    private func waitUntil(_ id: BundleID, drawn: Bool) async throws {
         let polls = Int((Self.honorTimeout / Self.pollInterval).rounded())
         var slept = 0
         while true {
-            await refresh()
-            let match = items.first { $0.bundleID == id }
-            if (match != nil) == drawn { return match }
+            await reload()
+            if items.contains(where: { $0.bundleID == id }) == drawn { return }
             guard slept < polls else { throw ControllerError.notHonored(id) }
             slept += 1
             await sleeper.sleep(seconds: Self.pollInterval)
@@ -260,17 +291,27 @@ public enum ControllerError: Error, Equatable {
         }
     }
 
-    /// Reads fresh, applies every action, and writes the list back once.
+    /// Reads fresh, applies every action to entries that exist, and writes the list back once,
+    /// only if something changed (so a missing `trackedApplications` key is never created).
+    /// `lastSnapshot` is updated only for the apps written.
     private func writeAllow(_ actions: [AllowAction]) throws {
         var list = try readAllow()
+        let before = list.snapshot
+        var written: AllowSnapshot = [:]
         for action in actions {
+            let (id, allowed): (BundleID, Bool)
             switch action {
-            case .switchOn(let id): list.setAllowed(true, for: id)
-            case .switchOff(let id): list.setAllowed(false, for: id)
+            case .switchOn(let target): (id, allowed) = (target, true)
+            case .switchOff(let target): (id, allowed) = (target, false)
             }
+            guard let current = before[id] else { continue }
+            written[id] = allowed
+            if current != allowed { list.setAllowed(allowed, for: id) }
         }
-        try allowFile.write(Self.allowKey, try list.encoded())
-        lastSnapshot = list.snapshot
+        if written.contains(where: { before[$0.key] != $0.value }) {
+            try allowFile.write(Self.allowKey, try list.encoded())
+        }
+        lastSnapshot.merge(written) { _, new in new }
     }
 
     private func readPositions() throws -> [String: Double] {
@@ -281,10 +322,13 @@ public enum ControllerError: Error, Equatable {
         return dictionary
     }
 
-    /// Reads fresh, applies the changes (nil removes a key), and writes the whole dictionary back.
+    /// Reads fresh, applies the changes (nil removes a key), and writes the whole dictionary back
+    /// only if something changed.
     private func writePositions(_ changes: [String: Double?]) throws {
-        var values = try readPositions()
+        let before = try readPositions()
+        var values = before
         for (key, value) in changes { values[key] = value }
+        guard values != before else { return }
         try positionFile.write(Self.positionsKey, values)
     }
 
@@ -297,6 +341,31 @@ public enum ControllerError: Error, Equatable {
             state.needsGrant.remove(file)
             store.save(state)
         }
+    }
+
+    // MARK: Gate and grant handling
+
+    private func enterGate() async {
+        guard gateBusy else {
+            gateBusy = true
+            return
+        }
+        await withCheckedContinuation { gateWaiters.append($0) }
+    }
+
+    /// Hands the gate straight to the next waiter (FIFO), so nobody can cut in.
+    private func leaveGate() {
+        if gateWaiters.isEmpty {
+            gateBusy = false
+        } else {
+            gateWaiters.removeFirst().resume()
+        }
+    }
+
+    private func gated<T>(_ body: () async throws -> T) async throws -> T {
+        await enterGate()
+        defer { leaveGate() }
+        return try await guarded(body)
     }
 
     private func recordGrantFailure(_ error: Error) -> Error {

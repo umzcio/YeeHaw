@@ -15,6 +15,7 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     private var _appleItems: [MenuBarItem]
     private var _frozenAllow: AllowSnapshot?
     private var _failing: Set<GrantedFile> = []
+    private var _failingWrites: Set<GrantedFile> = []
     private var _log: [String] = []
     private var _allowWrites = 0
     private var _positionWrites = 0
@@ -73,6 +74,8 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     }
 
     func fail(_ file: GrantedFile) { locked { _ = $0._failing.insert(file) } }
+    /// Reads still work; writes to `file` throw `WriteFailed`.
+    func failWrites(_ file: GrantedFile) { locked { _ = $0._failingWrites.insert(file) } }
     func append(_ event: String) { locked { $0._log.append(event) } }
 
     /// A change made outside YeeHaw, e.g. in System Settings.
@@ -99,6 +102,7 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     func write(_ file: GrantedFile, _ key: String, _ value: Any) throws {
         try locked {
             if $0._failing.contains(file) { throw GrantError.needsGrant(file) }
+            if $0._failingWrites.contains(file) { throw WriteFailed() }
             switch (file, key) {
             case (.allowList, "trackedApplications"):
                 $0._allowBlob = try #require(value as? Data)
@@ -128,6 +132,8 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
 
     func runningBundleIDs() async -> Set<BundleID> { locked { $0._running } }
 }
+
+struct WriteFailed: Error {}
 
 struct FakeFile: PreferencesFile {
     let system: FakeSystem
@@ -273,6 +279,41 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(c.state.journal.isEmpty)
         #expect(rig.system.allowSnapshot[Self.a] == true)
         #expect(rig.system.allowWrites == 2)
+    }
+
+    // MARK: journal invariant (switch-on writes land before the journal forgets)
+
+    @Test func failedShowWriteKeepsAppJournaled() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true)]))
+        let c = rig.controller()
+        try await c.hide(Self.a)
+        rig.system.failWrites(.allowList)
+        await #expect(throws: WriteFailed.self) { try await c.show(Self.a) }
+        #expect(rig.store.load().journal == [Self.a])
+        #expect(c.state.journal == [Self.a])
+        #expect(rig.system.allowSnapshot[Self.a] == false)
+    }
+
+    @Test func failedQuitWriteKeepsJournal() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true)]))
+        let c = rig.controller()
+        try await c.hide(Self.a)
+        rig.system.failWrites(.allowList)
+        #expect(throws: WriteFailed.self) { try c.quit() }
+        #expect(rig.store.load().journal == [Self.a])
+        #expect(c.state.journal == [Self.a])
+    }
+
+    @Test func failedLaunchWriteKeepsSwitchOnsJournaled() async throws {
+        let rig = Self.rig(
+            try FakeSystem(allow: [(Self.a, true), (Self.b, false)]),
+            state: HidingState(hidden: [Self.a], journal: [Self.b]))
+        rig.system.failWrites(.allowList)
+        let c = rig.controller()
+        await #expect(throws: WriteFailed.self) { try await c.launch() }
+        // The switch-off of A was journaled before the write; B stays journaled until its write lands.
+        #expect(rig.store.load().journal == [Self.a, Self.b])
+        #expect(rig.store.load().hidden == [Self.a])
     }
 
     // MARK: grants
@@ -437,6 +478,129 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(rig.store.saveCount == 0)
     }
 
+    @Test func revealRefusesUserOwnedOffApp() async throws {
+        let system = try Self.revealSystem()
+        let rig = Self.rig(system)
+        let c = rig.controller()
+        await #expect(throws: ControllerError.notTracked(Self.a)) {
+            _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        }
+        #expect(system.allowWrites == 0)
+        #expect(system.positionWrites == 0)
+        #expect(rig.store.saveCount == 0)
+    }
+
+    @Test func showDuringRevealLeavesAppOn() async throws {
+        let system = try Self.revealSystem()
+        let original = system.positions
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        try await c.show(Self.a)
+        try await c.endReveal()
+        #expect(system.allowSnapshot[Self.a] == true)
+        #expect(system.positions == original)
+        #expect(c.state.hidden.isEmpty)
+        #expect(c.state.journal.isEmpty)
+        #expect(c.state.pendingReveal == nil)
+    }
+
+    @Test func revealAfterRelaunchUsesExistingNamedKeys() async throws {
+        let nord = "com.nordvpn.macos"
+        let nordKey = "status:\(nord)::nordMenuBarItem"
+        let system = try FakeSystem(
+            allow: [(nord, false), (Self.yeehaw, true)],
+            positions: [nordKey: 400, "status:\(Self.yeehaw)::Item-0": 10, PositionKey.clock: 0])
+        let original = system.positions
+        let store = FakeStore(HidingState(hidden: [nord], journal: [nord]), system: system)
+        let fresh = Rig(system: system, store: store).controller()
+        _ = try await fresh.beginReveal(nord, nextTo: FakeSystem.item(Self.yeehaw))
+        #expect(system.positions[nordKey] == 205)
+        #expect(system.positions["status:\(nord)::Item-0"] == nil)
+        try await fresh.endReveal()
+        #expect(system.positions == original)
+    }
+
+    @Test func revealMovesEveryKeyOfTheApp() async throws {
+        let system = try FakeSystem(
+            allow: [(Self.a, false), (Self.yeehaw, true)],
+            positions: ["status:\(Self.a)::Google Drive": 300, "status:\(Self.a)::Item-0": 290,
+                        "status:\(Self.yeehaw)::Item-0": 10, PositionKey.clock: 0])
+        let original = system.positions
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        // Midpoint between YeeHaw (10) and the next larger value (290).
+        #expect(system.positions["status:\(Self.a)::Google Drive"] == 150)
+        #expect(system.positions["status:\(Self.a)::Item-0"] == 150)
+        try await c.endReveal()
+        #expect(system.positions == original)
+    }
+
+    @Test func revealReturnsIndexZeroItem() async throws {
+        let system = try FakeSystem(
+            allow: [(Self.a, false), (Self.yeehaw, true)],
+            positions: ["status:\(Self.yeehaw)::Item-0": 10],
+            drawn: [Self.a: [FakeSystem.item(Self.a, index: 1, x: 50), FakeSystem.item(Self.a, index: 0, x: 80)]])
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        let drawn = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        #expect(drawn.indexInApp == 0)
+    }
+
+    @Test func revealRequiresYeeHawKey() async throws {
+        let system = try FakeSystem(allow: [(Self.a, false)], positions: ["status:\(Self.a)::Item-0": 300])
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        await #expect(throws: ControllerError.unresolvedNeighbor) {
+            _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        }
+        #expect(system.allowWrites == 0)
+        #expect(system.positionWrites == 0)
+        #expect(c.state.pendingReveal == nil)
+    }
+
+    @Test func revealNotHonoredIsUndone() async throws {
+        let system = try Self.revealSystem()
+        let original = system.positions
+        system.honorsWrites = false
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        await #expect(throws: ControllerError.notHonored(Self.a)) {
+            _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        }
+        #expect(system.positions == original)
+        #expect(system.allowSnapshot[Self.a] == false)
+        #expect(c.state.pendingReveal == nil)
+        #expect(rig.store.load().pendingReveal == nil)
+    }
+
+    @Test func overlappingRevealsKeepOriginalPositions() async throws {
+        let system = try Self.revealSystem()
+        try system.setExternally(Self.b, allowed: false)
+        let original = system.positions
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a, Self.b], journal: [Self.a, Self.b]))
+        let c = rig.controller()
+        let yeehawItem = FakeSystem.item(Self.yeehaw)
+        _ = try await c.beginReveal(Self.a, nextTo: yeehawItem)
+
+        async let first = c.beginReveal(Self.b, nextTo: yeehawItem)
+        async let second = c.beginReveal(Self.a, nextTo: yeehawItem)
+        _ = try await (first, second)
+
+        // Either call may run last; exactly one app is pending, with its true original positions.
+        let pending = try #require(c.state.pendingReveal)
+        let other = pending.bundleID == Self.a ? Self.b : Self.a
+        let key = "status:\(pending.bundleID)::Item-0"
+        #expect(pending.originalPositions == [key: original[key]])
+        #expect(system.allowSnapshot[pending.bundleID] == true)
+        #expect(system.allowSnapshot[other] == false)
+        #expect(system.positions["status:\(other)::Item-0"] == original["status:\(other)::Item-0"])
+        try await c.endReveal()
+        #expect(system.positions == original)
+        #expect(system.allowSnapshot == [Self.a: false, Self.b: false, Self.yeehaw: true])
+    }
+
     @Test func crashMidRevealRecoveredOnLaunch() async throws {
         let system = try Self.revealSystem()
         let original = system.positions
@@ -515,6 +679,41 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(c.state.journal.isEmpty)
         #expect(c.items.contains { $0.bundleID == Self.a })
         #expect(rig.store.load() == c.state)
+    }
+
+    @Test func externalSwitchOnSurvivesUnrelatedWrite() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true), (Self.b, true)]))
+        let c = rig.controller()
+        try await c.hide(Self.a)
+        try rig.system.setExternally(Self.a, allowed: true)
+        try await c.hide(Self.b)
+        try await c.allowListChanged()
+        #expect(c.state.hidden == [Self.b])
+        #expect(c.state.journal == [Self.b])
+    }
+
+    @Test func unchangedWritesAreSkipped() async throws {
+        let rig = Self.rig(
+            try FakeSystem(allow: [(Self.a, true)], positions: ["status:\(Self.a)::Item-0": 50]),
+            state: HidingState(journal: [Self.a]))
+        let c = rig.controller()
+        // A journaled app that's already on: the switch-on changes nothing, so nothing is written.
+        try await c.show(Self.a)
+        #expect(c.state.journal.isEmpty)
+        try c.quit()
+        try c.move(FakeSystem.item(Self.a), leftNeighbor: nil, rightNeighbor: nil)
+        let positionWrites = rig.system.positionWrites
+        try c.move(FakeSystem.item(Self.a), leftNeighbor: nil, rightNeighbor: nil)
+        #expect(rig.system.positionWrites == positionWrites)
+        #expect(rig.system.allowWrites == 0)
+    }
+
+    @Test func missingAllowKeyIsNeverCreated() async throws {
+        let rig = Self.rig(try FakeSystem(allow: []), state: HidingState(journal: [Self.a]))
+        let c = rig.controller()
+        try await c.launch()
+        try c.quit()
+        #expect(rig.system.allowWrites == 0)
     }
 
     // MARK: strip order, user-owned, adopt
