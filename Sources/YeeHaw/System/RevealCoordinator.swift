@@ -27,6 +27,9 @@ final class RevealCoordinator {
     private let trace: @MainActor (String) -> Void
     private var busy = false
 
+    /// Runs once the revealed item is drawn, before it's pressed (the strip photographs it here).
+    var onDrawn: (@MainActor (MenuBarItem) async -> Void)?
+
     /// `trace` receives each step with its timing; debug runs write it to probe.txt.
     init(controller: MenuBarController, trace: @escaping @MainActor (String) -> Void = { _ in }) {
         self.controller = controller
@@ -35,7 +38,9 @@ final class RevealCoordinator {
 
     /// Reveal → press → wait until the app is done with its menu → `endReveal`. While one reveal
     /// is open, further calls are ignored, so two reveals never share the controller's one slot.
-    func open(_ id: BundleID, nextTo yeehaw: MenuBarItem) async {
+    /// Returns `beginReveal`'s error when the reveal couldn't start, else nil.
+    @discardableResult
+    func open(_ id: BundleID, nextTo yeehaw: MenuBarItem) async -> Error? {
         let start = ContinuousClock.now
         let step: @MainActor (String) -> Void = { [trace] text in
             let line = "reveal \(id) +\(Self.milliseconds(ContinuousClock.now - start)) ms: \(text)"
@@ -44,7 +49,7 @@ final class RevealCoordinator {
         }
         guard !busy else {
             step("ignored, another reveal is open")
-            return
+            return nil
         }
         busy = true
         defer { busy = false }
@@ -57,14 +62,15 @@ final class RevealCoordinator {
             // couldn't undo itself (a failed write after the slot was taken, or a failed undo).
             step("beginReveal failed: \(error)")
             await end(step)
-            return
+            return error
         }
         step("reveal done, drawn at x \(item.x) width \(item.width)")
+        await onDrawn?(item)
 
         guard let pid = NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.processIdentifier else {
             step("app is not running")
             await end(step)
-            return
+            return nil
         }
         let session = RevealSession(pid: pid)
         if !session.isObserving { step("AX observer unavailable; only clicks and the timeout can end it") }
@@ -75,6 +81,7 @@ final class RevealCoordinator {
         }
         session.tearDown()
         await end(step)
+        return nil
     }
 
     /// `endReveal`, retried once after `endRetryDelay`. It runs in its own unstructured task so a

@@ -7,6 +7,10 @@ import YeeHawCore
 final class YeeHawApp: NSObject, NSApplicationDelegate {
     private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "app")
 
+    private var controller: MenuBarController?
+    private var statusItem: StatusItemController?
+    private var watcher: AllowListWatcher?
+
     static func main() {
         let app = NSApplication.shared
         let delegate = YeeHawApp()
@@ -25,5 +29,50 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
             return
         }
         Self.log.notice("YeeHaw started")
+
+        let grants = FileGrantStore()
+        let controller = MenuBarController(
+            allowFile: GrantedPreferencesFile(file: .allowList, grants: grants),
+            positionFile: GrantedPreferencesFile(file: .positions, grants: grants),
+            reader: AXMenuBarReader(), store: DefaultsStateStore(), sleeper: TaskSleeper())
+        let status = StatusItemController(
+            controller: controller,
+            reveal: RevealCoordinator(controller: controller),
+            // Stubs until the layout window and Settings exist (ruling R37).
+            openLayout: { Self.log.notice("Layout… chosen; the layout window isn't built yet") },
+            openSettings: { Self.log.notice("Settings… chosen; Settings isn't built yet") })
+        self.controller = controller
+        statusItem = status
+
+        Task {
+            do {
+                try await controller.launch()
+            } catch {
+                // A missing grant is recorded in state.needsGrant, which the strip's notice shows.
+                Self.log.error("Launch failed: \(error, privacy: .public)")
+            }
+            watcher = AllowListWatcher {
+                Task {
+                    do {
+                        try await controller.allowListChanged()
+                    } catch {
+                        Self.log.error("Allow list change not applied: \(error, privacy: .public)")
+                    }
+                }
+            }
+            await status.start(grants: grants)
+        }
+    }
+
+    /// Every ordinary quit (the menu's Quit YeeHaw, logout, a quit Apple event) goes through the
+    /// controller, which switches back on everything YeeHaw switched off. A second call, after
+    /// the menu's own, finds nothing to do. Debug runs exit before this and never get here.
+    func applicationWillTerminate(_ notification: Notification) {
+        guard let controller else { return }
+        do {
+            try controller.quit()
+        } catch {
+            Self.log.error("Quit could not switch hidden apps back on: \(error, privacy: .public)")
+        }
     }
 }

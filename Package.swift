@@ -8,6 +8,7 @@ let package = Package(
         .target(name: "YeeHawCore"),
         .executableTarget(name: "YeeHaw", dependencies: ["YeeHawCore"]),
         .testTarget(name: "YeeHawCoreTests", dependencies: ["YeeHawCore"]),
+        .testTarget(name: "YeeHawTests", dependencies: ["YeeHaw"]),
     ],
     swiftLanguageModes: [.v6]
 )

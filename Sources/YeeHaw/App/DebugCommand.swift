@@ -16,17 +16,13 @@ enum DebugCommand {
     case hide(BundleID)
     /// `--show <bundleID>`: launches the controller and shows the app.
     case show(BundleID)
-    /// `--reveal <bundleID>`: shows a placeholder YeeHaw icon and runs one reveal next to it.
+    /// `--reveal <bundleID>`: shows a stand-in YeeHaw icon and runs one reveal next to it.
     case reveal(BundleID)
     /// One of the bundle ID arguments was given without a bundle ID.
     case missingBundleID(flag: String)
 
     static let logURL = URL(fileURLWithPath: NSHomeDirectory())
         .appending(path: "Library/Logs/YeeHaw/probe.txt")
-    static let yeehawBundleID = "com.zapps.yeehaw"
-    /// How long `--reveal` waits for its placeholder icon to be drawn and get a position key.
-    static let iconTimeout: Double = 5
-    static let iconPollInterval: Double = 0.1
 
     init?(arguments: [String]) {
         if arguments.contains("--probe") {
@@ -102,7 +98,7 @@ enum DebugCommand {
         return ["\(verb) \(id): ok", "hidden: \(listed(controller.state.hidden))"]
     }
 
-    /// `--reveal`. Shows a placeholder YeeHaw icon, waits until it's drawn and has a position key,
+    /// `--reveal`. Shows a stand-in YeeHaw icon (the real glyph, without the strip), waits until it's drawn and has a position key,
     /// then runs one reveal next to it. Nothing is written until the icon is ready.
     @MainActor
     private static func reveal(_ id: BundleID, grants: FileGrantStore) async -> [String] {
@@ -110,11 +106,13 @@ enum DebugCommand {
 
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.autosaveName = "YeeHaw"
-        statusItem.button?.image = NSImage(systemSymbolName: "star.fill", accessibilityDescription: "YeeHaw")
+        statusItem.button?.image = StatusGlyph.image()
         defer { withExtendedLifetime(statusItem) {} }
 
         var lines: [String] = []
-        guard let yeehaw = await waitForIcon(grants: grants, log: { lines.append($0) }) else { return lines }
+        guard let yeehaw = await OwnIconLocator.waitUntilReady(grants: grants, log: { lines.append($0) }) else {
+            return lines
+        }
 
         let controller = makeController(grants: grants)
         do {
@@ -126,45 +124,6 @@ enum DebugCommand {
         let coordinator = RevealCoordinator(controller: controller) { lines.append($0) }
         await coordinator.open(id, nextTo: yeehaw)
         return lines
-    }
-
-    /// YeeHaw's drawn item once the position key `beginReveal` will resolve for it exists, or nil
-    /// (with the reason logged) after `iconTimeout`.
-    @MainActor
-    private static func waitForIcon(grants: FileGrantStore, log: (String) -> Void) async -> MenuBarItem? {
-        let reader = AXMenuBarReader()
-        let positions = GrantedPreferencesFile(file: .positions, grants: grants)
-        let deadline = ContinuousClock.now + .seconds(iconTimeout)
-        var drawn: MenuBarItem?
-        var keys: [String] = []
-        var readError: Error?
-        while true {
-            drawn = await reader.items().first { $0.bundleID == yeehawBundleID }
-            do {
-                let table = PositionTable(try positions.read(MenuBarController.positionsKey) as? [String: Double] ?? [:])
-                readError = nil
-                let prefixes = drawn?.keyPrefixes ?? [yeehawBundleID]
-                keys = table.values.keys.filter { key in prefixes.contains { key.hasPrefix("status:\($0)::") } }.sorted()
-                if let drawn, let key = PositionKey.keys(for: drawn, table: table).first, table.values[key] != nil {
-                    log("YeeHaw icon ready at x \(format(drawn.x)) width \(format(drawn.width)), key \(key)")
-                    return drawn
-                }
-            } catch {
-                readError = error
-            }
-            guard ContinuousClock.now < deadline else { break }
-            try? await Task.sleep(for: .seconds(iconPollInterval))
-        }
-        if let readError {
-            log("YeeHaw icon not ready: positions unreadable (\(readError)); nothing written")
-        } else if let drawn {
-            log("YeeHaw icon drawn (prefixes \(listed(drawn.keyPrefixes)), names \(listed(drawn.keyNames)), "
-                + "index \(drawn.indexInApp)) but its "
-                + "position key is missing after \(format(iconTimeout)) s; YeeHaw keys: \(listed(keys)); nothing written")
-        } else {
-            log("YeeHaw icon not drawn after \(format(iconTimeout)) s; YeeHaw keys: \(listed(keys)); nothing written")
-        }
-        return nil
     }
 
     @MainActor
@@ -213,11 +172,7 @@ enum DebugCommand {
         }
     }
 
-    private static func listed(_ values: [String]) -> String {
-        "[" + values.joined(separator: ", ") + "]"
-    }
+    private static func listed(_ values: [String]) -> String { OwnIconLocator.listed(values) }
 
-    private static func format(_ value: Double) -> String {
-        value.rounded() == value ? String(Int(value)) : String(format: "%.1f", value)
-    }
+    private static func format(_ value: Double) -> String { OwnIconLocator.format(value) }
 }
