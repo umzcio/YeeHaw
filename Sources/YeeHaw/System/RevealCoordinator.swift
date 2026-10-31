@@ -1,0 +1,349 @@
+import AppKit
+import ApplicationServices
+import os
+import YeeHawCore
+
+/// Opens a hidden app's menu from its real icon (spec "Clicking an icon", option B): the icon is
+/// revealed right next to YeeHaw's, pressed, and hidden again once the app is done with its menu.
+@MainActor
+final class RevealCoordinator {
+    /// How long a reveal stays open with no sign of use before it's ended anyway.
+    static let inactivityTimeout: Double = 30
+    /// How long one AX press may block. An app busy tracking the menu it just opened can run past
+    /// this and return `-25204`, so a timeout isn't treated as a failure.
+    nonisolated static let pressTimeout: Float = 1.5
+    /// After a failed press, how long to wait for a menu or window before trying the next method.
+    static let pressGrace: Double = 0.3
+    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "reveal")
+
+    private let controller: MenuBarController
+    private let trace: @MainActor (String) -> Void
+    private var busy = false
+
+    /// `trace` receives each step with its timing; debug runs write it to probe.txt.
+    init(controller: MenuBarController, trace: @escaping @MainActor (String) -> Void = { _ in }) {
+        self.controller = controller
+        self.trace = trace
+    }
+
+    /// Reveal → press → wait until the app is done with its menu → `endReveal`. While one reveal
+    /// is open, further calls are ignored, so two reveals never share the controller's one slot.
+    func open(_ id: BundleID, nextTo yeehaw: MenuBarItem) async {
+        let start = ContinuousClock.now
+        let step: (String) -> Void = { [trace] text in
+            let elapsed = (ContinuousClock.now - start).components
+            let ms = elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000
+            let line = "reveal \(id) +\(ms) ms: \(text)"
+            Self.log.notice("\(line, privacy: .public)")
+            trace(line)
+        }
+        guard !busy else {
+            step("ignored, another reveal is open")
+            return
+        }
+        busy = true
+        defer { busy = false }
+
+        let item: MenuBarItem
+        do {
+            item = try await controller.beginReveal(id, nextTo: yeehaw)
+        } catch {
+            // The controller undoes its own failed reveal, so there's nothing to end.
+            step("beginReveal failed: \(error)")
+            return
+        }
+        step("reveal done, drawn at x \(item.x) width \(item.width)")
+
+        guard let pid = NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.processIdentifier else {
+            step("app is not running")
+            await end(step)
+            return
+        }
+        let session = RevealSession(pid: pid)
+        if !session.isObserving { step("AX observer unavailable; only clicks and the timeout can end it") }
+
+        let pressed = await press(item, pid: pid, session: session)
+        step("press: \(pressed.summary)")
+        if pressed.worked {
+            session.startWatching()
+            step("close: \(await session.waitForClose())")
+        }
+        session.tearDown()
+        await end(step)
+    }
+
+    private func end(_ step: (String) -> Void) async {
+        do {
+            try await controller.endReveal()
+            step("endReveal done")
+        } catch {
+            step("endReveal failed: \(error)")
+        }
+    }
+
+    // MARK: Pressing
+
+    private enum PressMethod: String, CaseIterable {
+        case axPress = "AXPress"
+        case showMenu = "AXShowMenu"
+        case click = "synthesized click"
+    }
+
+    private enum PressResult: Sendable {
+        case done
+        case failed(Int32)
+        case notFound
+    }
+
+    /// AX press, then `AXShowMenu`, then a synthesized click. A failed method falls through only if
+    /// no menu or window appeared, since the app may have opened it while the call timed out.
+    private func press(_ item: MenuBarItem, pid: pid_t, session: RevealSession) async -> (summary: String, worked: Bool) {
+        var tried: [String] = []
+        for method in PressMethod.allCases {
+            switch await Self.perform(method, pid: pid, x: item.x, width: item.width) {
+            case .notFound:
+                return ("no extras-bar element at x \(item.x) width \(item.width)", false)
+            case .done:
+                return ((tried + ["\(method.rawValue) worked"]).joined(separator: "; "), true)
+            case .failed(let code):
+                if !session.surfaceOpened {
+                    try? await Task.sleep(for: .seconds(Self.pressGrace))
+                }
+                if session.surfaceOpened {
+                    return ((tried + ["\(method.rawValue) returned \(code) but the app opened its menu or window"])
+                        .joined(separator: "; "), true)
+                }
+                tried.append("\(method.rawValue) failed (\(code))")
+            }
+        }
+        return (tried.joined(separator: "; "), false)
+    }
+
+    /// Re-reads the app's extras-bar children and acts on the one at the revealed item's frame.
+    /// Runs off the main actor: AX calls block, and the app's notifications arrive on the main run
+    /// loop while they do.
+    @concurrent
+    private static func perform(_ method: PressMethod, pid: pid_t, x: Double, width: Double) async -> PressResult {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, AXMenuBarReader.appTimeout)
+        let extras = AXMenuBarReader.element(app, kAXExtrasMenuBarAttribute).map { AXMenuBarReader.children(of: $0) } ?? []
+        guard let element = extras.first(where: {
+            let frame = AXMenuBarReader.frame(of: $0)
+            return abs(frame.minX - x) <= ItemMatcher.tolerance && abs(frame.width - width) <= ItemMatcher.tolerance
+        }) else { return .notFound }
+
+        switch method {
+        case .axPress, .showMenu:
+            AXUIElementSetMessagingTimeout(element, pressTimeout)
+            let action = method == .axPress ? kAXPressAction : kAXShowMenuAction
+            let error = AXUIElementPerformAction(element, action as CFString)
+            return error == .success ? .done : .failed(error.rawValue)
+        case .click:
+            let frame = AXMenuBarReader.frame(of: element)
+            return postClick(at: CGPoint(x: frame.midX, y: frame.midY)) ? .done : .failed(0)
+        }
+    }
+
+    /// A left click at a point in global top-left coordinates (the same space as AX frames).
+    private nonisolated static func postClick(at point: CGPoint) -> Bool {
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
+                                 mouseCursorPosition: point, mouseButton: .left),
+              let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
+                               mouseCursorPosition: point, mouseButton: .left)
+        else { return false }
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        return true
+    }
+}
+
+/// One reveal's close signals. The first one to arrive wins; `tearDown` removes them all.
+///
+/// The app is done with its menu on: `AXMenuClosed` for its outermost menu; its popover or window
+/// losing focus (`AXFocusedWindowChanged`) or being destroyed (`AXUIElementDestroyed`); a global
+/// left mouse-down outside its windows; or `RevealCoordinator.inactivityTimeout` with none of the
+/// app's own activity (menus or windows opening, clicks inside its windows).
+@MainActor
+private final class RevealSession {
+    private static let appNotifications = [
+        kAXMenuOpenedNotification, kAXMenuClosedNotification,
+        kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification,
+    ]
+    /// Bounds every AX call made on the main actor (adding and removing notifications).
+    private static let messagingTimeout: Float = 0.5
+
+    private let pid: pid_t
+    private let app: AXUIElement
+    private var observer: AXObserver?
+    private var monitor: Any?
+    private var timer: Task<Void, Never>?
+    /// The app's popover or windows that appeared during the reveal.
+    private var windows: [AXUIElement] = []
+    /// Open menus, so closing a submenu doesn't count as closing the menu.
+    private var menuDepth = 0
+    private var reason: String?
+    private var waiter: CheckedContinuation<String, Never>?
+
+    var isObserving: Bool { observer != nil }
+
+    /// True once the press visibly did something: a menu or window opened, or it already closed.
+    var surfaceOpened: Bool { menuDepth > 0 || !windows.isEmpty || reason != nil }
+
+    /// Observes the app's AX notifications right away, so a menu that opens during the press is seen.
+    init(pid: pid_t) {
+        self.pid = pid
+        app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, Self.messagingTimeout)
+        var created: AXObserver?
+        guard AXObserverCreate(pid, Self.callback, &created) == .success, let created else { return }
+        for name in Self.appNotifications {
+            AXObserverAddNotification(created, app, name as CFString, refcon)
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .commonModes)
+        observer = created
+    }
+
+    /// Starts the outside-click monitor and the inactivity timer, once the press is done.
+    func startWatching() {
+        // Mouse-downs from before now (the synthesized click among them) don't count.
+        let since = ProcessInfo.processInfo.systemUptime
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            let timestamp = event.timestamp
+            let location = event.locationInWindow
+            MainActor.assumeIsolated {
+                guard timestamp >= since else { return }
+                self?.mouseDown(at: location)
+            }
+        }
+        restartTimer()
+    }
+
+    func waitForClose() async -> String {
+        if let reason { return reason }
+        return await withCheckedContinuation { waiter = $0 }
+    }
+
+    func tearDown() {
+        timer?.cancel()
+        timer = nil
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        if let observer {
+            for name in Self.appNotifications {
+                AXObserverRemoveNotification(observer, app, name as CFString)
+            }
+            for window in windows {
+                AXObserverRemoveNotification(observer, window, kAXUIElementDestroyedNotification as CFString)
+            }
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+        }
+        observer = nil
+        windows = []
+    }
+
+    // MARK: Signals
+
+    private func close(_ why: String) {
+        guard reason == nil else { return }
+        reason = why
+        waiter?.resume(returning: why)
+        waiter = nil
+    }
+
+    /// The app is still in use: push the inactivity timeout back (once watching has started).
+    private func activity() {
+        if timer != nil { restartTimer() }
+    }
+
+    private func restartTimer() {
+        timer?.cancel()
+        timer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(RevealCoordinator.inactivityTimeout))
+            guard !Task.isCancelled else { return }
+            self?.close("no activity for \(Int(RevealCoordinator.inactivityTimeout)) s")
+        }
+    }
+
+    private func handle(_ name: String, _ element: AXUIElement) {
+        guard reason == nil else { return }
+        switch name {
+        case kAXMenuOpenedNotification:
+            menuDepth += 1
+            activity()
+        case kAXMenuClosedNotification:
+            menuDepth = max(menuDepth - 1, 0)
+            if menuDepth == 0 { close("AXMenuClosed") } else { activity() }
+        case kAXWindowCreatedNotification:
+            track(element)
+            activity()
+        case kAXFocusedWindowChangedNotification:
+            if windows.contains(where: { CFEqual($0, element) }) {
+                activity()
+            } else if windows.isEmpty {
+                // Focus moving to a new popover or window is it opening, not closing.
+                track(element)
+                activity()
+            } else {
+                close("AXFocusedWindowChanged")
+            }
+        case kAXUIElementDestroyedNotification:
+            if windows.contains(where: { CFEqual($0, element) }) { close("AXUIElementDestroyed") }
+        default:
+            break
+        }
+    }
+
+    private func track(_ window: AXUIElement) {
+        guard !CFEqual(window, app), !windows.contains(where: { CFEqual($0, window) }) else { return }
+        windows.append(window)
+        if let observer {
+            AXUIElementSetMessagingTimeout(window, Self.messagingTimeout)
+            AXObserverAddNotification(observer, window, kAXUIElementDestroyedNotification as CFString, refcon)
+        }
+    }
+
+    private func mouseDown(at screenPoint: NSPoint) {
+        guard reason == nil else { return }
+        if appWindowsContain(screenPoint) {
+            activity()
+        } else {
+            close("mouse-down outside the app")
+        }
+    }
+
+    /// Whether a point (AppKit screen coordinates) is inside any on-screen window of the app,
+    /// its menus and popovers included.
+    private func appWindowsContain(_ screenPoint: NSPoint) -> Bool {
+        // CG window bounds use a top-left origin on the primary display.
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let point = CGPoint(x: screenPoint.x, y: primaryHeight - screenPoint.y)
+        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+        let windows = info as? [[String: Any]] ?? []
+        return windows.contains { window in
+            guard (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init) == pid,
+                  let bounds = window[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds)
+            else { return false }
+            return rect.contains(point)
+        }
+    }
+
+    // MARK: AX observer plumbing
+
+    /// The session outlives its observer: `tearDown` removes the run loop source before the
+    /// session can go away, so the unretained pointer is never dangling when a callback runs.
+    private var refcon: UnsafeMutableRawPointer { Unmanaged.passUnretained(self).toOpaque() }
+
+    private nonisolated static let callback: AXObserverCallback = { _, element, notification, refcon in
+        guard let refcon else { return }
+        let name = notification as String
+        // The source is on the main run loop, so callbacks arrive on the main thread and nothing
+        // here crosses threads.
+        nonisolated(unsafe) let session = refcon
+        nonisolated(unsafe) let element = element
+        MainActor.assumeIsolated {
+            Unmanaged<RevealSession>.fromOpaque(session).takeUnretainedValue().handle(name, element)
+        }
+    }
+}

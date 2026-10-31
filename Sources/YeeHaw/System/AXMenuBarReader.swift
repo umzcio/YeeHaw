@@ -88,7 +88,7 @@ struct AXMenuBarReader: MenuBarReading {
         }
     }
 
-    // MARK: AX helpers
+    // MARK: AX helpers (element, children and frame are shared with RevealCoordinator)
 
     private static func value(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
         var value: CFTypeRef?
@@ -100,17 +100,17 @@ struct AXMenuBarReader: MenuBarReading {
         value(element, attribute) as? String ?? ""
     }
 
-    private static func element(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+    static func element(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
         guard let value = value(element, attribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return (value as! AXUIElement)
     }
 
-    private static func children(of element: AXUIElement) -> [AXUIElement] {
+    static func children(of element: AXUIElement) -> [AXUIElement] {
         guard let array = value(element, kAXChildrenAttribute) as? [CFTypeRef] else { return [] }
         return array.compactMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? ($0 as! AXUIElement) : nil }
     }
 
-    private static func frame(of element: AXUIElement) -> CGRect {
+    static func frame(of element: AXUIElement) -> CGRect {
         var origin = CGPoint.zero
         var size = CGSize.zero
         if let position = axValue(element, kAXPositionAttribute) { AXValueGetValue(position, .cgPoint, &origin) }
