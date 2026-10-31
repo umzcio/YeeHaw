@@ -5,23 +5,26 @@ import Testing
     @Test func matchesByXAndWidth() {
         let drawn = [DrawnItem(x: 1579, width: 36, label: "DigUp"), DrawnItem(x: 1550, width: 31, label: "Flame")]
         let extras = [
-            AppExtra(bundleID: "com.example.digup", indexInApp: 0, x: 1579, width: 36),
+            AppExtra(bundleID: "com.example.digup", indexInApp: 2, x: 1579, width: 36, identifier: "digup-id"),
             AppExtra(bundleID: "com.example.fiddle", indexInApp: 0, x: 1550, width: 31),
         ]
         let items = ItemMatcher.match(drawn: drawn, extras: extras)
         #expect(items.map(\.bundleID) == ["com.example.fiddle", "com.example.digup"])
         #expect(items.map(\.label) == ["Flame", "DigUp"])
-        #expect(items.map(\.id) == ["com.example.fiddle#0", "com.example.digup#0"])
+        #expect(items.map(\.id) == ["com.example.fiddle#0", "com.example.digup#2"])
+        #expect(items[1].axIdentifier == "digup-id")
+        #expect(items[1].indexInApp == 2)
     }
 
     @Test func staleOverlappingFrameIsDropped() {
         let drawn = [DrawnItem(x: 1550, width: 31, label: "Flame")]
         let extras = [
-            AppExtra(bundleID: "com.example.fiddle", indexInApp: 0, x: 1550, width: 31),
             AppExtra(bundleID: "com.malwarebytes.mbam", indexInApp: 0, x: 1564, width: 24),
+            AppExtra(bundleID: "com.example.fiddle", indexInApp: 0, x: 1550, width: 31),
         ]
         let items = ItemMatcher.match(drawn: drawn, extras: extras)
         #expect(items.count == 1)
+        #expect(items[0].bundleID == "com.example.fiddle")
         #expect(items.allSatisfy { $0.bundleID != "com.malwarebytes.mbam" })
     }
 
@@ -70,5 +73,40 @@ import Testing
         #expect(items[0].appleIdentifier == nil)
         #expect(items[0].id == "unknown@1234")
         #expect(items[0].label == "Mystery")
+    }
+
+    @Test func sameXDifferentWidthIsDropped() {
+        let drawn = [DrawnItem(x: 1550, width: 31, label: "Flame")]
+        let extras = [AppExtra(bundleID: "com.example.fiddle", indexInApp: 0, x: 1550, width: 24)]
+        let items = ItemMatcher.match(drawn: drawn, extras: extras)
+        #expect(items.count == 1)
+        #expect(items[0].bundleID == nil)
+        #expect(items[0].id == "unknown@1550")
+    }
+
+    @Test func toleranceBoundary() {
+        let drawn = [DrawnItem(x: 100, width: 20, label: "A")]
+        let near = ItemMatcher.match(drawn: drawn, extras: [AppExtra(bundleID: "a", indexInApp: 0, x: 100.4, width: 20)])
+        #expect(near[0].bundleID == "a")
+        let far = ItemMatcher.match(drawn: drawn, extras: [AppExtra(bundleID: "a", indexInApp: 0, x: 100.6, width: 20)])
+        #expect(far[0].bundleID == nil)
+        let farWidth = ItemMatcher.match(drawn: drawn, extras: [AppExtra(bundleID: "a", indexInApp: 0, x: 100, width: 20.6)])
+        #expect(farWidth[0].bundleID == nil)
+    }
+
+    @Test func eachExtraMatchesOnce() {
+        let drawn = [DrawnItem(x: 50, width: 20, label: "A"), DrawnItem(x: 50, width: 20, label: "B")]
+        let extras = [AppExtra(bundleID: "a", indexInApp: 0, x: 50, width: 20)]
+        let items = ItemMatcher.match(drawn: drawn, extras: extras)
+        #expect(items.count == 2)
+        #expect(items.filter { $0.bundleID == "a" }.count == 1)
+        #expect(items.filter { $0.id == "unknown@50" }.count == 1)
+    }
+
+    @Test func keyNamesOrderIsIdentifierTitleDescription() {
+        let drawn = [DrawnItem(x: 10, width: 20, label: "")]
+        let extras = [AppExtra(bundleID: "a", indexInApp: 0, x: 10, width: 20,
+                               identifier: "Id", title: "Title", description: "Desc")]
+        #expect(ItemMatcher.match(drawn: drawn, extras: extras)[0].keyNames == ["Id", "Title", "Desc"])
     }
 }
