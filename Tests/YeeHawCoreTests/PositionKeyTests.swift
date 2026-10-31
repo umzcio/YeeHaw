@@ -2,12 +2,18 @@ import Testing
 @testable import YeeHawCore
 
 @Suite struct PositionKeyTests {
+    static let drivefs = PositionTable([
+        "status:com.google.drivefs::Google Drive": 577,
+        "status:com.google.drivefs::Item-0": 577,
+    ])
+
     @Test func keysPrefersExistingDuplicates() {
-        let table = PositionTable([
-            "status:com.google.drivefs::Google Drive": 577,
-            "status:com.google.drivefs::Item-0": 577,
-        ])
-        let keys = PositionKey.keys(bundleID: "com.google.drivefs", axIdentifier: "", indexInApp: 0, table: table)
+        let keys = PositionKey.keys(bundleID: "com.google.drivefs", names: ["Google Drive"], indexInApp: 0, table: Self.drivefs)
+        #expect(keys == ["status:com.google.drivefs::Google Drive", "status:com.google.drivefs::Item-0"])
+    }
+
+    @Test func keysItemIndexOnly() {
+        let keys = PositionKey.keys(bundleID: "com.google.drivefs", names: [], indexInApp: 0, table: Self.drivefs)
         #expect(keys == ["status:com.google.drivefs::Item-0"])
     }
 
@@ -16,18 +22,18 @@ import Testing
         let table = PositionTable([key: 536])
         let keys = PositionKey.keys(
             bundleID: "com.malwarebytes.mbam.frontend.agent",
-            axIdentifier: "statusBar.icon.alert", indexInApp: 0, table: table)
+            names: ["statusBar.icon.alert"], indexInApp: 0, table: table)
         #expect(keys == [key])
     }
 
     @Test func keysNewWhenMissing() {
-        let keys = PositionKey.keys(bundleID: "com.zapps.yeehaw", axIdentifier: "", indexInApp: 0, table: PositionTable([:]))
+        let keys = PositionKey.keys(bundleID: "com.zapps.yeehaw", names: [], indexInApp: 0, table: PositionTable([:]))
         #expect(keys == ["status:com.zapps.yeehaw::Item-0"])
     }
 
-    @Test func keysNewUsesIdentifierWhenPresent() {
-        let keys = PositionKey.keys(bundleID: "a.b", axIdentifier: "id", indexInApp: 2, table: PositionTable([:]))
-        #expect(keys == ["status:a.b::id"])
+    @Test func keysNewUsesFirstName() {
+        let keys = PositionKey.keys(bundleID: "com.zapps.yeehaw", names: ["YeeHawStatusItem"], indexInApp: 0, table: PositionTable([:]))
+        #expect(keys == ["status:com.zapps.yeehaw::YeeHawStatusItem"])
     }
 
     @Test func constants() {

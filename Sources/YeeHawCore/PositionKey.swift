@@ -2,12 +2,20 @@ public enum PositionKey {
     public static let controlCenter = "module:BentoBox-0"
     public static let clock = "module:Clock"
 
-    /// The table key for one item. An item's key is `status:<bundleID>::<name>` where name is the
-    /// AX identifier, or `Item-<indexInApp>` when there is none. The name match is exact, so the
-    /// existing key and the would-be new key are the same string; `table` is accepted so callers
-    /// stay unchanged if matching ever widens.
-    public static func keys(bundleID: BundleID, axIdentifier: String, indexInApp: Int, table: PositionTable) -> [String] {
-        let name = axIdentifier.isEmpty ? "Item-\(indexInApp)" : axIdentifier
-        return ["status:\(bundleID)::\(name)"]
+    /// All table keys for one item. macOS may name a slot after the item's identifier, AX
+    /// description or title, or `Item-<indexInApp>`, so every candidate that exists in `table` is
+    /// returned (in candidate order) and all of them get the same value. If none exist, one new
+    /// key is returned, named after the first non-empty name, else `Item-<indexInApp>`.
+    public static func keys(bundleID: BundleID, names: [String], indexInApp: Int, table: PositionTable) -> [String] {
+        let itemName = "Item-\(indexInApp)"
+        var candidates: [String] = []
+        for name in names + [itemName] where !name.isEmpty && !candidates.contains(name) {
+            candidates.append(name)
+        }
+        let all = candidates.map { "status:\(bundleID)::\($0)" }
+        let existing = all.filter { table.values[$0] != nil }
+        if !existing.isEmpty { return existing }
+        let first = names.first { !$0.isEmpty } ?? itemName
+        return ["status:\(bundleID)::\(first)"]
     }
 }

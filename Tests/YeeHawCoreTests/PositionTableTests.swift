@@ -23,7 +23,7 @@ import Testing
         #expect(result[Self.fiddle] == nil)
     }
 
-    @Test func farLeftUsesMaxPlus20() {
+    @Test func farLeftUsesMidpointWithMaxPlus20() {
         let result = Self.real.placement(of: [Self.digUp], leftNeighbor: nil, rightNeighbor: "status:com.google.drivefs::Item-0")
         // L = max (577) + 20 = 597; R = 577; midpoint 587.
         #expect(result == [Self.digUp: 587])
