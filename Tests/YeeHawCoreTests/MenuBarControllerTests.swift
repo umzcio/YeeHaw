@@ -918,4 +918,78 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(try c.userOwnedOff() == [Self.a])
         #expect(rig.system.allowWrites == 0)
     }
+
+    // MARK: placeOwnIcon
+
+    static func placementSystem(_ positions: [String: Double]) throws -> FakeSystem {
+        try FakeSystem(allow: [(yeehaw, true), (a, true)], positions: positions,
+                       prefixes: [yeehaw: [yeehaw, "YeeHaw"]])
+    }
+
+    @Test func placeOwnIconWritesItsKeysJustLeftOfControlCenter() async throws {
+        let system = try Self.placementSystem([
+            PositionKey.clock: 0, PositionKey.controlCenter: 122, "module:Sound": 144, "module:Battery": 148,
+            "status:YeeHaw::YeeHaw": 423, "status:\(Self.a)::Item-0": 300,
+        ])
+        let before = system.positions
+        try await Self.rig(system).controller().placeOwnIcon(Self.yeehaw, name: "YeeHaw")
+        #expect(system.positions["status:YeeHaw::YeeHaw"] == 133)
+        var others = system.positions
+        others["status:YeeHaw::YeeHaw"] = before["status:YeeHaw::YeeHaw"]
+        #expect(others == before)
+        #expect(system.positionWrites == 1)
+        #expect(system.allowWrites == 0)
+    }
+
+    @Test func placeOwnIconIgnoresItsOwnOldPlace() async throws {
+        // Already the next key left of Control Center: the slot is measured without it.
+        let system = try Self.placementSystem([
+            PositionKey.clock: 0, PositionKey.controlCenter: 122, "status:\(Self.yeehaw)::YeeHaw": 130,
+            "status:YeeHaw::YeeHaw": 130, "module:Battery": 148,
+        ])
+        try await Self.rig(system).controller().placeOwnIcon(Self.yeehaw, name: "YeeHaw")
+        #expect(system.positions["status:\(Self.yeehaw)::YeeHaw"] == 135)
+        #expect(system.positions["status:YeeHaw::YeeHaw"] == 135)
+    }
+
+    @Test func placeOwnIconCreatesItsKeyUnderTheBundlePrefix() async throws {
+        let system = try Self.placementSystem([PositionKey.clock: 0, PositionKey.controlCenter: 122, "module:Battery": 148])
+        try await Self.rig(system).controller().placeOwnIcon(Self.yeehaw, name: "YeeHaw")
+        #expect(system.positions["status:\(Self.yeehaw)::YeeHaw"] == 135)
+        #expect(system.positions["status:YeeHaw::YeeHaw"] == nil)
+    }
+
+    @Test func placeOwnIconAtTheLeftEndOfAnEmptyTable() async throws {
+        let system = try Self.placementSystem([PositionKey.clock: 0, PositionKey.controlCenter: 122])
+        try await Self.rig(system).controller().placeOwnIcon(Self.yeehaw, name: "YeeHaw")
+        #expect(system.positions["status:\(Self.yeehaw)::YeeHaw"] == 142)
+    }
+
+    @Test func placeOwnIconRefusesWithoutAControlCenterKey() async throws {
+        let system = try Self.placementSystem([PositionKey.clock: 0, "status:YeeHaw::YeeHaw": 423])
+        await #expect(throws: ControllerError.unresolvedNeighbor) {
+            try await Self.rig(system).controller().placeOwnIcon(Self.yeehaw, name: "YeeHaw")
+        }
+        #expect(system.positionWrites == 0)
+    }
+
+    @Test func placeOwnIconTwiceWritesOnce() async throws {
+        let system = try Self.placementSystem([
+            PositionKey.clock: 0, PositionKey.controlCenter: 122, "module:Battery": 148, "status:YeeHaw::YeeHaw": 423,
+        ])
+        let c = Self.rig(system).controller()
+        try await c.placeOwnIcon(Self.yeehaw, name: "YeeHaw")
+        try await c.placeOwnIcon(Self.yeehaw, name: "YeeHaw")
+        #expect(system.positionWrites == 1)
+    }
+
+    @Test func placeOwnIconRecordsAMissingGrant() async throws {
+        let system = try Self.placementSystem([PositionKey.controlCenter: 122])
+        system.fail(.positions)
+        let c = Self.rig(system).controller()
+        await #expect(throws: ControllerError.needsGrant(.positions)) {
+            try await c.placeOwnIcon(Self.yeehaw, name: "YeeHaw")
+        }
+        #expect(c.state.needsGrant == [.positions])
+    }
 }

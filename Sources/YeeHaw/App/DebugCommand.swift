@@ -5,6 +5,7 @@ import YeeHawCore
 
 /// Hands-on checks run from the command line. `--probe` and `--grant` only read (apart from saving
 /// a grant the user picks) and never start the controller; `--hide`, `--show` and `--reveal` do.
+/// `--onboarding-preview` shows the first-run window against the Mac as it is.
 /// Output goes to stdout and to `~/Library/Logs/YeeHaw/probe.txt`, since an app launched with
 /// `open` has no visible stdout.
 enum DebugCommand {
@@ -12,6 +13,10 @@ enum DebugCommand {
     case probe
     /// `--grant`: asks for both file grants in turn.
     case grant
+    /// `--onboarding-preview`: the onboarding window against live state (ruling R50). Steps already
+    /// satisfied show as done; nothing is written unless a step's button is clicked, and finishing
+    /// doesn't record onboarding as complete. The controller isn't launched.
+    case onboardingPreview
     /// `--hide <bundleID>`: launches the controller and hides the app.
     case hide(BundleID)
     /// `--show <bundleID>`: launches the controller and shows the app.
@@ -31,6 +36,10 @@ enum DebugCommand {
         }
         if arguments.contains("--grant") {
             self = .grant
+            return
+        }
+        if arguments.contains("--onboarding-preview") {
+            self = .onboardingPreview
             return
         }
         let flags: [(String, (BundleID) -> DebugCommand)] = [
@@ -60,6 +69,10 @@ enum DebugCommand {
             for file in [GrantedFile.allowList, .positions] {
                 lines.append("grant \(file.rawValue): \(await grants.requestGrant(for: file))")
             }
+        case .onboardingPreview:
+            let system = LiveOnboardingSystem(controller: Self.makeController(grants: grants), grants: grants)
+            let finished = await OnboardingWindowController.run(model: OnboardingModel(system: system))
+            lines = ["onboarding preview closed (finished: \(finished)); completion not recorded"]
         case .hide(let id):
             lines = await Self.setHidden(id, true, grants: grants)
         case .show(let id):
@@ -153,7 +166,11 @@ enum DebugCommand {
             lines.append("userOwnedOff: unavailable")
         }
         do {
-            _ = try GrantedPreferencesFile(file: .positions, grants: grants).read(MenuBarController.positionsKey)
+            let value = try GrantedPreferencesFile(file: .positions, grants: grants).read(MenuBarController.positionsKey)
+            // Left to right as drawn (a larger value sits further left), to check which key is
+            // Control Center: it's the key just left of the clock among drawn items.
+            let table = (value as? [String: Double] ?? [:]).sorted { $0.value > $1.value }
+            lines.append("positions: " + table.map { "\($0.key)=\(format($0.value))" }.joined(separator: ", "))
         } catch {
             needsGrant.append(.positions)
         }

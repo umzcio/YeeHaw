@@ -184,6 +184,25 @@ public enum ControllerError: Error, Equatable {
         }.map(\.id))
     }
 
+    /// Places YeeHaw's own icon immediately left of Control Center (first run, ruling R6): every
+    /// existing key of `id` under any of its prefixes gets `slotValue(leftOf: controlCenter)`,
+    /// measured without those keys; with none, `status:<first prefix>::<name>` is created, which
+    /// macOS uses when the icon is first drawn. Throws `.unresolvedNeighbor` when the table has no
+    /// Control Center key, rather than guessing a place.
+    public func placeOwnIcon(_ id: BundleID, name: String) async throws {
+        try await gated {
+            let prefixes = await reader.keyPrefixes(of: id)
+            let values = try readPositions()
+            guard values[PositionKey.controlCenter] != nil else { throw ControllerError.unresolvedNeighbor }
+            let starts = prefixes.map { "status:\($0)::" }
+            var keys = values.keys.filter { key in starts.contains { key.hasPrefix($0) } }.sorted()
+            if keys.isEmpty, let first = prefixes.first { keys = ["status:\(first)::\(name)"] }
+            let others = PositionTable(values.filter { !keys.contains($0.key) })
+            let slot = others.slotValue(leftOf: PositionKey.controlCenter)
+            try writePositions(Dictionary(uniqueKeysWithValues: keys.map { ($0, slot) }))
+        }
+    }
+
     // MARK: Reveal
 
     /// Briefly draws a hidden app immediately left of YeeHaw's icon and returns its item (index 0

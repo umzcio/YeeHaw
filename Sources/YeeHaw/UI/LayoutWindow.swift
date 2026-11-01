@@ -1,5 +1,4 @@
 import AppKit
-import os
 import SwiftUI
 import YeeHawCore
 
@@ -15,11 +14,8 @@ func showLayoutWindow(controller: MenuBarController, images: IconImageProvider,
 }
 
 /// The layout window (spec "The layout window", mockup B): a titled, closable window hosting
-/// `LayoutView`, one instance, brought to the front when opened again. YeeHaw is a menu bar app:
-/// while the window is open it becomes a regular app (in Command-Tab, with its own menus) and
-/// activates; when it closes it hands activation back and returns to the menu bar. The window is
-/// a non-activating panel, so it still comes to the front and takes the keyboard if macOS
-/// declines the activation (see `activate`).
+/// `LayoutView`, one instance, brought to the front when opened again. While it's open YeeHaw is
+/// a regular app (see `AppWindows`).
 ///
 /// It reflects outside changes: it re-reads the bar when it becomes key, when an app launches or
 /// quits, and when the Allow list changes on disk (`allowListChanged`).
@@ -27,7 +23,6 @@ func showLayoutWindow(controller: MenuBarController, images: IconImageProvider,
 final class LayoutWindowController: NSObject, NSWindowDelegate {
     /// The open (or last opened) window; it's kept and reused.
     static var current: LayoutWindowController?
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "layout")
     /// After an app launches or quits, how long to wait before re-reading the bar, so its icon
     /// has been drawn or removed.
     static let appChangeDelay: Duration = .milliseconds(800)
@@ -48,20 +43,12 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
     init(controller: MenuBarController, images: IconImageProvider, requestGrant: @escaping (GrantedFile) async -> Bool) {
         model = LayoutModel(controller: controller, images: images, requestGrant: requestGrant)
         spacing = SpacingModel(applier: SpacingApplier(hidden: { Set(controller.state.hidden) }))
-        window = LayoutPanelWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 260),
-            styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: true)
+        window = AuxiliaryPanel(width: 560, title: "Layout")
         super.init()
 
         let hosting = NSHostingController(rootView: LayoutView(model: model, spacing: spacing))
         hosting.sizingOptions = [.preferredContentSize]
         window.contentViewController = hosting
-        window.title = "Layout"
-        window.titlebarAppearsTransparent = true
-        window.isReleasedWhenClosed = false
-        window.isRestorable = false
-        window.tabbingMode = .disallowed
-        window.collectionBehavior.insert(.fullScreenNone)
         window.delegate = self
         model.onDraggingChange = { [weak self] dragging in self?.watchEscape(dragging) }
         // Apps quit and reopen during Apply; read the list again once it's done.
@@ -80,39 +67,11 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
             window.center()
             placed = true
         }
-        // Regardless: YeeHaw usually isn't the active app (see `activate`).
-        activate()
-        window.orderFrontRegardless()
-        window.makeKey()
+        // Regardless: YeeHaw usually isn't the active app (see `AppWindows.bringForward`).
+        AppWindows.bringForward(window, name: "Layout")
         if !wasVisible {
             startObserving()
             refresh()
-        }
-    }
-
-    /// Makes YeeHaw a regular app while the window is open, so it's in Command-Tab and has its
-    /// own menus, and brings it to the front.
-    ///
-    /// On 27.2 the plain request is refused when the window opens from the status menu
-    /// (WindowServer: "activation count being 0"), and so is a request made while the menu is
-    /// still closing. Asked again once the menu has gone, ignoring other apps (the user just chose
-    /// Layout…), it's granted. Should it ever be declined, the window, a non-activating panel,
-    /// still comes to the front and takes the keyboard.
-    private func activate() {
-        if NSApp.activationPolicy() != .regular {
-            NSApp.mainMenu = NSApp.mainMenu ?? Self.mainMenu()
-            NSApp.setActivationPolicy(.regular)
-        }
-        NSApp.activate()
-        Task { [weak self] in
-            try? await Task.sleep(for: Self.activationRetryDelay)
-            guard let self, self.window.isVisible else { return }
-            if NSWorkspace.shared.frontmostApplication != .current {
-                NSApp.activate(ignoringOtherApps: true)
-            }
-            try? await Task.sleep(for: .milliseconds(200))
-            let active = NSWorkspace.shared.frontmostApplication == .current
-            Self.log.notice("Layout window open; YeeHaw frontmost: \(active, privacy: .public)")
         }
     }
 
@@ -136,25 +95,6 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
         // Common modes: the timer keeps firing while the mouse is being tracked.
         RunLoop.main.add(timer, forMode: .common)
         escapeWatch = timer
-    }
-
-    /// How long after opening to ask for activation again: the status menu has closed by then.
-    static let activationRetryDelay: Duration = .milliseconds(150)
-
-    /// The menus YeeHaw shows while it's a regular app: Quit, and the window's Close.
-    private static func mainMenu() -> NSMenu {
-        let main = NSMenu()
-        let app = NSMenu(title: "YeeHaw")
-        app.addItem(withTitle: "Quit YeeHaw", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        let window = NSMenu(title: "Window")
-        window.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        for menu in [app, window] {
-            let item = NSMenuItem(title: menu.title, action: nil, keyEquivalent: "")
-            item.submenu = menu
-            main.addItem(item)
-        }
-        NSApp.windowsMenu = window
-        return main
     }
 
     /// The rows may grow to the width of the screen the window is on, less a margin, and the
@@ -230,39 +170,6 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
         stopObserving()
         model.windowClosed()
         spacing.windowClosed()
-        // Back to a plain menu bar app: hand activation to whatever was in front before, then
-        // leave Command-Tab and the Dock. Not `hide`, which would keep the strip from opening
-        // until YeeHaw is activated again.
-        DispatchQueue.main.async {
-            if !NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) {
-                NSApp.deactivate()
-                NSApp.setActivationPolicy(.accessory)
-            }
-        }
-    }
-}
-
-/// The layout window: a titled panel that looks and orders like a standard window but can be key
-/// without YeeHaw being the active app. YeeHaw has no main menu while it's a menu bar app, so
-/// Command-W is handled here.
-private final class LayoutPanelWindow: NSPanel {
-    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing: NSWindow.BackingStoreType,
-                  defer flag: Bool) {
-        super.init(contentRect: contentRect, styleMask: style, backing: backing, defer: flag)
-        isFloatingPanel = false
-        hidesOnDeactivate = false
-        becomesKeyOnlyIfNeeded = false
-    }
-
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-           event.charactersIgnoringModifiers == "w" {
-            performClose(nil)
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
+        AppWindows.windowClosing()
     }
 }

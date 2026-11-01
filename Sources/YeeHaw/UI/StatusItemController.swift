@@ -67,7 +67,8 @@ final class StatusItemController: NSObject {
 
     /// Call before `controller.launch()`: photographs the saved hidden apps that are drawn right
     /// now (after a quit switched them back on), before the launch hides them again (ruling I3).
-    func captureHiddenBeforeLaunch() async {
+    /// Static: it runs before YeeHaw's own icon is shown (`LaunchRules.steps`).
+    static func captureHiddenBeforeLaunch(controller: MenuBarController, icons: IconImageProvider) async {
         let hidden = Set(controller.state.hidden)
         guard !hidden.isEmpty, CGPreflightScreenCaptureAccess() else { return }
         await controller.refresh()
