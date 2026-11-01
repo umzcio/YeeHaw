@@ -28,8 +28,10 @@ struct HiddenGroup: Identifiable, Equatable {
 /// A problem shown inline at the bottom of the window.
 struct LayoutMessage: Equatable {
     let text: String
-    /// Whether "Fix…" (open Settings) would help.
-    let offersFix: Bool
+    /// The file to ask access to again, when "Fix…" would help.
+    var grant: GrantedFile? = nil
+
+    var offersFix: Bool { grant != nil }
 }
 
 /// The colours the tiles are painted in: the menu bar's own (sampled), so glyphs look exactly as
@@ -51,28 +53,49 @@ final class LayoutModel {
 
     private(set) var bar: [BarTile] = []
     private(set) var hidden: [HiddenGroup] = []
+    /// True from the start of an edit until the rows show what the bar holds after it. Drags and
+    /// other edits wait for it.
     private(set) var busy = false
     private(set) var tileStyle: TileStyle = .system
     var message: LayoutMessage?
+    /// The widest the rows may be before they scroll, from the screen the window is on.
+    var maxRowWidth: CGFloat = 1200
+    /// Whether the keyboard focus is drawn: only once a key was pressed in the window, not after a
+    /// click, the way macOS shows focus in lists.
+    var showsFocusRing = false
+    /// Counts the window's closes, so the view can drop any drag and focus it still holds.
+    private(set) var closes = 0
+    /// Counts Esc presses during a drag, so the view can cancel it (see `requestDragCancel`).
+    private(set) var dragCancels = 0
 
     @ObservationIgnored let controller: MenuBarController
     @ObservationIgnored let images: IconImageProvider
-    @ObservationIgnored let openSettings: () -> Void
+    @ObservationIgnored let requestGrant: (GrantedFile) async -> Bool
     @ObservationIgnored private let sampler = StripColorSampler()
     /// Set by the view while a tile is being dragged; reloads wait until the drag ends, so the
     /// rows don't change under the pointer.
-    @ObservationIgnored var isDragging = false
+    @ObservationIgnored var isDragging = false {
+        didSet { if isDragging != oldValue { onDraggingChange?(isDragging) } }
+    }
+    /// Told when a drag starts and ends (the window watches for Esc meanwhile).
+    @ObservationIgnored var onDraggingChange: ((Bool) -> Void)?
     /// The widest the rows have been since the window opened. Rows never narrow while it's open,
     /// so the window doesn't jump each time an icon is hidden or shown.
     @ObservationIgnored private var widestRow: CGFloat = 0
-    /// A reload asked for while an edit was running, done when it ends.
+    /// A rebuild of the rows from the controller, asked for while an edit or a drag was running.
     @ObservationIgnored private var reloadPending = false
+    /// A re-read of the bar, asked for while an edit, a drag or another re-read was running.
+    @ObservationIgnored private var refreshPending = false
     @ObservationIgnored private var refreshing = false
+    /// Drawn items whose position key isn't saved yet: they can't anchor a move (see
+    /// `MenuBarController.itemsWithoutPositions`).
+    @ObservationIgnored private var withoutPositions: Set<String> = []
 
-    init(controller: MenuBarController, images: IconImageProvider, openSettings: @escaping () -> Void) {
+    init(controller: MenuBarController, images: IconImageProvider,
+         requestGrant: @escaping (GrantedFile) async -> Bool = { _ in false }) {
         self.controller = controller
         self.images = images
-        self.openSettings = openSettings
+        self.requestGrant = requestGrant
         reload()
     }
 
@@ -82,11 +105,14 @@ final class LayoutModel {
     func reload() {
         let hiddenIDs = Set(controller.state.hidden)
         let tracked = controller.trackedApps
+        images.noteDrawn(controller.items)
+        withoutPositions = controller.itemsWithoutPositions()
         bar = LayoutRules.deduplicated(controller.items)
             .filter { item in item.bundleID.map { !hiddenIDs.contains($0) } ?? true }
             .map { item in
                 BarTile(item: item,
-                        capability: LayoutRules.capability(of: item, own: OwnIconLocator.bundleID, tracked: tracked),
+                        capability: LayoutRules.capability(of: item, own: OwnIconLocator.bundleID, tracked: tracked,
+                                                           appleMovable: !withoutPositions.contains(item.id)),
                         name: Self.name(of: item), image: images.image(for: item))
             }
         hidden = controller.state.hidden.map { id in
@@ -97,33 +123,38 @@ final class LayoutModel {
         }
     }
 
+    /// Whether `item` can anchor a move: it has an owner and a saved position.
+    func canAnchor(_ item: MenuBarItem) -> Bool {
+        LayoutRules.isOwned(item) && !withoutPositions.contains(item.id)
+    }
+
     /// Re-reads the bar, photographs what's drawn, samples the bar's colour and rebuilds the rows.
-    /// Deferred while an edit is running, since the edit reloads when it ends.
+    /// Asked for while an edit, a drag or another re-read is running, it runs once that ends.
     func refresh() async {
-        guard !busy, !isDragging else {
-            reloadPending = true
+        guard !busy, !isDragging, !refreshing else {
+            refreshPending = true
             return
         }
-        guard !refreshing else { return }
         refreshing = true
         defer { refreshing = false }
-        await controller.refresh()
-        await images.captureIfPermitted(controller.items)
-        await sampleBarColour()
-        guard !busy, !isDragging else {
-            reloadPending = true
-            return
-        }
-        withAnimation(Self.rowAnimation) { reload() }
+        repeat {
+            refreshPending = false
+            await controller.refresh()
+            await images.captureIfPermitted(controller.items)
+            await sampleBarColour()
+            guard !busy, !isDragging else {
+                // The re-read is stale by the time the edit or drag ends; read again then.
+                refreshPending = true
+                return
+            }
+            reloadPending = false
+            withAnimation(Self.rowAnimation) { reload() }
+        } while refreshPending
     }
 
     /// Call after the Allow list changed on disk and the controller has applied it.
     func allowListChanged() {
-        guard !busy, !isDragging else {
-            reloadPending = true
-            return
-        }
-        withAnimation(Self.rowAnimation) { reload() }
+        reloadWhenIdle()
     }
 
     /// The rows' width for content `natural` wide, never less than before while the window is open.
@@ -132,17 +163,44 @@ final class LayoutModel {
         return widestRow
     }
 
-    /// Call when the window closes: the next opening sizes the rows afresh.
+    /// Call when the window closes: the next opening sizes the rows afresh, and any drag ends.
     func windowClosed() {
         widestRow = 0
         message = nil
+        showsFocusRing = false
+        closes += 1
+        dragEnded()
     }
 
-    /// Call when a drag has ended: applies a reload that waited for it.
+    /// Call when Esc is pressed during a drag; the view springs the tile back.
+    func requestDragCancel() {
+        dragCancels += 1
+    }
+
+    /// Call when a drag has ended: applies a re-read or reload that waited for it.
     func dragEnded() {
-        guard reloadPending, !busy else { return }
+        isDragging = false
+        catchUp()
+    }
+
+    /// Rebuilds the rows now, or once the edit or drag under way has ended.
+    private func reloadWhenIdle() {
+        guard !busy, !isDragging else {
+            reloadPending = true
+            return
+        }
         reloadPending = false
         withAnimation(Self.rowAnimation) { reload() }
+    }
+
+    /// Runs what waited for an edit or a drag to end.
+    private func catchUp() {
+        guard !busy, !isDragging else { return }
+        if refreshPending {
+            Task { await refresh() }
+        } else if reloadPending {
+            reloadWhenIdle()
+        }
     }
 
     private func sampleBarColour() async {
@@ -160,14 +218,15 @@ final class LayoutModel {
     // MARK: Edits
 
     /// Moves `bar[from]` to insertion `to` of the Menu Bar row.
-    func move(from: Int, to: Int) {
-        guard bar.indices.contains(from), bar[from].capability.canDrag else { return }
+    @discardableResult
+    func move(from: Int, to: Int) -> Task<Void, Never>? {
+        guard !busy, bar.indices.contains(from), bar[from].capability.canDrag else { return nil }
         let to = LayoutRules.clampedInsertion(to, in: bar.map(\.item))
         let items = bar.map(\.item)
-        guard let neighbors = LayoutRules.moveNeighbors(from: from, to: to, in: items) else { return }
+        guard let neighbors = LayoutRules.moveNeighbors(from: from, to: to, in: items, anchors: canAnchor) else { return nil }
         let tile = bar[from]
         bar = LayoutRules.moved(bar.map(\.item), from: from, to: to).compactMap { item in bar.first { $0.id == item.id } }
-        perform("move \(tile.name)") { [controller] in
+        return perform("move \(tile.name)", announcing: "Moved \(tile.name)") { [controller] in
             try controller.move(tile.item, leftNeighbor: neighbors.left, rightNeighbor: neighbors.right)
             try await self.waitUntilApplied { items in
                 Self.isOrdered(tile.item.id, after: neighbors.left?.id, before: neighbors.right?.id, in: items)
@@ -176,10 +235,14 @@ final class LayoutModel {
     }
 
     /// Hides the app owning `bar[from]` and puts its group at insertion `at` of the Hidden row.
-    func hide(from: Int, at index: Int) {
-        guard bar.indices.contains(from), bar[from].capability.canHide, let id = bar[from].item.bundleID else { return }
-        let order = LayoutRules.hiddenOrder(controller.state.hidden, placing: id, at: index)
+    @discardableResult
+    func hide(from: Int, at index: Int) -> Task<Void, Never>? {
+        guard !busy, bar.indices.contains(from), bar[from].capability.canHide,
+              let id = bar[from].item.bundleID else { return nil }
+        let order = LayoutRules.hiddenOrder(hidden.map(\.id), placing: id, at: index)
         let name = StatusItemController.name(of: id)
+        // The group gets a tile per icon the app draws right now.
+        images.noteDrawn(controller.items)
         bar.removeAll { $0.item.bundleID == id }
         let icons = images.iconIndices(for: id)
         hidden = order.map { app in
@@ -187,62 +250,87 @@ final class LayoutModel {
                 id: app, name: name,
                 icons: icons.map { HiddenGroup.Icon(id: "\(app)#\($0)", image: images.image(for: app, indexInApp: $0)) })
         }
-        perform("hide \(name)") { [controller] in
+        return perform("hide \(name)", announcing: "Hid \(name)") { [controller] in
             try await controller.hide(id)
-            controller.reorderHidden(order)
+            // The Hidden row as it is now: other edits wait while this one runs.
+            controller.reorderHidden(self.hidden.map(\.id))
         }
     }
 
     /// Shows a hidden app and, if it doesn't come back at insertion `at` of the Menu Bar row,
     /// places its icons there.
-    func show(_ id: BundleID, at index: Int?) {
-        guard hidden.contains(where: { $0.id == id }) else { return }
+    @discardableResult
+    func show(_ id: BundleID, at index: Int?) -> Task<Void, Never>? {
+        guard !busy, hidden.contains(where: { $0.id == id }) else { return nil }
         let items = bar.map(\.item)
-        let target = index.map { LayoutRules.showNeighbors(at: LayoutRules.clampedInsertion($0, in: items), in: items) }
+        let target = index.map {
+            LayoutRules.showNeighbors(at: LayoutRules.clampedInsertion($0, in: items), in: items, anchors: canAnchor)
+        }
+        let anchors = canAnchor
         let name = StatusItemController.name(of: id)
         hidden.removeAll { $0.id == id }
-        perform("show \(name)") { [controller] in
+        return perform("show \(name)", announcing: "\(name) is back in the menu bar") { [controller] in
             try await controller.show(id)
             let drawn = LayoutRules.deduplicated(controller.items)
-            guard let target, !LayoutRules.isPlaced(id, between: target.left, and: target.right, in: drawn)
+            let own = drawn.filter { $0.bundleID == id }
+            // An app that isn't running draws nothing to place; it comes back where macOS puts it.
+            guard let target, !own.isEmpty,
+                  !LayoutRules.isPlaced(id, between: target.left, and: target.right, in: drawn, anchors: anchors)
             else { return }
             // Place the app's icons left to right, each just right of the one before.
             var left = target.left
-            for item in drawn.filter({ $0.bundleID == id }) {
+            for item in own {
                 try controller.move(item, leftNeighbor: left, rightNeighbor: target.right)
                 left = item
             }
             try await self.waitUntilApplied { items in
-                LayoutRules.isPlaced(id, between: target.left, and: target.right, in: items)
+                LayoutRules.isPlaced(id, between: target.left, and: target.right, in: items, anchors: anchors)
             }
         }
     }
 
     /// Moves the hidden app `id` to insertion `at` of the Hidden row (the strip's order).
     func reorderHidden(_ id: BundleID, at index: Int) {
+        guard !busy else { return }
         let order = LayoutRules.hiddenOrder(hidden.map(\.id), placing: id, at: index)
         guard order != hidden.map(\.id) else { return }
         hidden = order.compactMap { app in hidden.first { $0.id == app } }
         controller.reorderHidden(order)
     }
 
+    /// "Fix…": asks for the file again, and clears the message once it's granted.
+    func fix() {
+        guard let file = message?.grant else { return }
+        Task {
+            if await requestGrant(file) {
+                withAnimation(Self.rowAnimation) { message = nil }
+            }
+        }
+    }
+
     /// Runs one edit: marks the window busy, shows any failure inline, and finally rebuilds the
-    /// rows from what the controller and the bar really hold.
-    private func perform(_ what: String, _ edit: @escaping @MainActor () async throws -> Void) {
+    /// rows from what the controller and the bar really hold. The window stays busy until then,
+    /// so no drag or other edit starts on rows that are about to change.
+    private func perform(_ what: String, announcing done: String,
+                         _ edit: @escaping @MainActor () async throws -> Void) -> Task<Void, Never> {
         busy = true
         message = nil
-        Task {
+        return Task {
+            var failed = false
             do {
                 try await edit()
             } catch {
+                failed = true
                 Self.log.error("Layout could not \(what, privacy: .public): \(error, privacy: .public)")
                 withAnimation(Self.rowAnimation) { message = Self.message(for: error) }
             }
-            busy = false
-            reloadPending = false
             await controller.refresh()
             await images.captureIfPermitted(controller.items)
-            withAnimation(Self.rowAnimation) { reload() }
+            busy = false
+            refreshPending = false
+            reloadPending = true
+            reloadWhenIdle()
+            if !failed { AccessibilityNotification.Announcement(done).post() }
         }
     }
 
@@ -273,23 +361,19 @@ final class LayoutModel {
     static func message(for error: Error) -> LayoutMessage {
         switch error {
         case ControllerError.notHonored(let id):
-            LayoutMessage(text: "macOS didn’t update \(StatusItemController.name(of: id)) in time. Try again in a moment.",
-                          offersFix: false)
+            LayoutMessage(text: "macOS didn’t update \(StatusItemController.name(of: id)) in time. Try again in a moment.")
         case ControllerError.needsGrant(let file):
-            LayoutMessage(text: "YeeHaw needs access to macOS’s \(describe(file)) to change the menu bar.", offersFix: true)
+            LayoutMessage(text: "YeeHaw needs access to macOS’s \(describe(file)) to change the menu bar.", grant: file)
         case ControllerError.notTracked(let id):
-            LayoutMessage(text: "\(StatusItemController.name(of: id)) can’t be hidden yet. macOS hasn’t listed it in its menu bar settings.",
-                          offersFix: false)
+            LayoutMessage(text: "\(StatusItemController.name(of: id)) can’t be hidden yet. macOS hasn’t listed it in its menu bar settings.")
         case ControllerError.unresolvedNeighbor:
-            LayoutMessage(text: "macOS hasn’t saved a position for an icon there yet, so YeeHaw can’t place it.",
-                          offersFix: false)
+            LayoutMessage(text: "macOS hasn’t saved a position for an icon there yet, so YeeHaw can’t place it.")
         case ControllerError.malformed(let file):
-            LayoutMessage(text: "macOS’s \(describe(file)) holds something unexpected, so YeeHaw left it alone.",
-                          offersFix: false)
+            LayoutMessage(text: "macOS’s \(describe(file)) holds something unexpected, so YeeHaw left it alone.")
         case LayoutError.moveNotApplied:
-            LayoutMessage(text: "macOS didn’t apply the new order. The menu bar shows what it kept.", offersFix: false)
+            LayoutMessage(text: "macOS didn’t apply the new order. The menu bar shows what it kept.")
         default:
-            LayoutMessage(text: "That change didn’t go through.", offersFix: false)
+            LayoutMessage(text: "That change didn’t go through.")
         }
     }
 

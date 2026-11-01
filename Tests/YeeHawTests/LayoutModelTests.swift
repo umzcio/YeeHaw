@@ -25,7 +25,7 @@ import YeeHawCore
     }
 
     @Test func failuresReadAsInlineMessages() {
-        #expect(LayoutModel.message(for: ControllerError.needsGrant(.positions)).offersFix)
+        #expect(LayoutModel.message(for: ControllerError.needsGrant(.positions)).grant == .positions)
         #expect(!LayoutModel.message(for: ControllerError.unresolvedNeighbor).offersFix)
         #expect(LayoutModel.message(for: LayoutModel.LayoutError.moveNotApplied).text.contains("didn’t apply"))
     }

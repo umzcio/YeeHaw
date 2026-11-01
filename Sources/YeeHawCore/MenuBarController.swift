@@ -173,6 +173,17 @@ public enum ControllerError: Error, Equatable {
         }
     }
 
+    /// The ids of drawn items with an owner whose position key isn't in the table (the clock
+    /// always has one). They can't anchor a move, and an Apple one can't be moved. Empty when the
+    /// table can't be read: the edit itself then reports why.
+    public func itemsWithoutPositions() -> Set<String> {
+        guard let values = try? readPositions() else { return [] }
+        let table = PositionTable(values)
+        return Set(items.filter { item in
+            (item.bundleID != nil || item.appleIdentifier != nil) && (try? neighborKey(item, table)) == nil
+        }.map(\.id))
+    }
+
     // MARK: Reveal
 
     /// Briefly draws a hidden app immediately left of YeeHaw's icon and returns its item (index 0

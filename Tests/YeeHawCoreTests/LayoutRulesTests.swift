@@ -146,6 +146,73 @@ import Testing
         #expect(LayoutRules.isPlaced(Self.own, between: nil, and: Self.bar[1], in: Self.bar))
     }
 
+    @Test func unownedItemsBetweenTheNeighboursDontStopAPlacement() {
+        let a = Self.app(Self.a, x: 0), b = Self.app(Self.b, x: 90)
+        // A, unknown, C, B: C sits between its neighbours A and B; the unknown item doesn't count.
+        let shown = [a, Self.unknown(x: 30), Self.app(Self.c, x: 60), b]
+        #expect(LayoutRules.isPlaced(Self.c, between: a, and: b, in: shown))
+        // C not back yet: still not placed.
+        #expect(!LayoutRules.isPlaced(Self.c, between: a, and: b, in: [a, Self.unknown(x: 30), b]))
+    }
+
+    @Test func itemsThatCantAnchorAreSkippedAndIgnored() throws {
+        let wifi = Self.bar[3], b = Self.bar[4], own = Self.bar[0]
+        // Wi-Fi has no position key: it can't anchor, so a drop beside it uses the next item over.
+        let anchors: (MenuBarItem) -> Bool = { LayoutRules.isOwned($0) && $0.id != wifi.id }
+        let n = LayoutRules.showNeighbors(at: 4, in: Self.bar, anchors: anchors)
+        #expect(n.left?.id == "\(Self.a)#1")
+        #expect(n.right?.id == b.id)
+        let m = try #require(LayoutRules.moveNeighbors(from: 4, to: 3, in: Self.bar, anchors: anchors))
+        #expect(m.left?.id == "\(Self.a)#1")
+        #expect(m.right?.id == "com.apple.menuextra.controlcenter")
+        // ... and it doesn't stop A counting as placed between own and B.
+        #expect(LayoutRules.isPlaced(Self.a, between: own, and: b, in: Self.bar, anchors: anchors))
+    }
+
+    // MARK: drop targets
+
+    @Test func dropsOutsideTheRowsOrBesideThemselvesGoNowhere() {
+        #expect(LayoutRules.dropTarget(over: nil, insertion: 2, source: .bar(1), bar: Self.bar, refusal: nil) == nil)
+        #expect(LayoutRules.dropTarget(over: .bar, insertion: 2, source: .bar(2), bar: Self.bar, refusal: nil) == nil)
+        #expect(LayoutRules.dropTarget(over: .bar, insertion: 3, source: .bar(2), bar: Self.bar, refusal: nil) == nil)
+        #expect(LayoutRules.dropTarget(over: .hidden, insertion: 1, source: .hidden(1), bar: Self.bar, refusal: nil) == nil)
+        #expect(LayoutRules.dropTarget(over: .hidden, insertion: 2, source: .hidden(1), bar: Self.bar, refusal: nil) == nil)
+    }
+
+    @Test func barDropsAreClampedLeftOfThePinnedItems() {
+        #expect(LayoutRules.dropTarget(over: .bar, insertion: 7, source: .bar(0), bar: Self.bar, refusal: nil) == .bar(5))
+        #expect(LayoutRules.dropTarget(over: .bar, insertion: 7, source: .hidden(0), bar: Self.bar, refusal: nil) == .bar(5))
+        #expect(LayoutRules.dropTarget(over: .bar, insertion: 0, source: .bar(3), bar: Self.bar, refusal: nil) == .bar(0))
+    }
+
+    @Test func tilesThatCantHideAreRefusedOverTheHiddenRow() {
+        #expect(LayoutRules.dropTarget(over: .hidden, insertion: 0, source: .bar(3), bar: Self.bar, refusal: .apple)
+            == .refused(.apple))
+        #expect(LayoutRules.dropTarget(over: .hidden, insertion: 0, source: .bar(4), bar: Self.bar, refusal: nil)
+            == .hidden(0))
+        #expect(LayoutRules.dropTarget(over: .hidden, insertion: 3, source: .hidden(0), bar: Self.bar, refusal: nil)
+            == .hidden(3))
+    }
+
+    // MARK: making room
+
+    @Test func tilesMakeRoomForADropFromAnotherRow() {
+        // Held over insertion 2 of a row it isn't from: everything from 2 on moves one slot right.
+        #expect((0..<4).map { LayoutRules.slotShift(of: $0, from: nil, to: 2) } == [0, 0, 1, 1])
+        #expect((0..<4).map { LayoutRules.slotShift(of: $0, from: nil, to: nil) } == [0, 0, 0, 0])
+    }
+
+    @Test func aTileMovedWithinItsRowLeavesNoHoleBehind() {
+        // [A, B, S, C, D] with S (2) held before A: A and B move right into S's place.
+        #expect((0..<5).map { LayoutRules.slotShift(of: $0, from: 2, to: 0) } == [1, 1, 0, 0, 0])
+        // Held before D (4): C moves left into S's place.
+        #expect((0..<5).map { LayoutRules.slotShift(of: $0, from: 2, to: 4) } == [0, 0, 0, -1, 0])
+        // Held at the end: C and D move left.
+        #expect((0..<5).map { LayoutRules.slotShift(of: $0, from: 2, to: 5) } == [0, 0, 0, -1, -1])
+        // Beside itself: nothing moves.
+        #expect((0..<5).map { LayoutRules.slotShift(of: $0, from: 2, to: 3) } == [0, 0, 0, 0, 0])
+    }
+
     // MARK: hidden row
 
     @Test func hidingAnAppInsertsItsWholeGroupAtTheDrop() {

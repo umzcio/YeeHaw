@@ -2,90 +2,49 @@ import AppKit
 import SwiftUI
 import YeeHawCore
 
-/// Sizes shared by the rows, the tiles and the window.
-enum LayoutMetrics {
-    static let tileHeight: CGFloat = 34
-    static let tileMinWidth: CGFloat = 34
-    /// Space either side of a glyph that's wider than the square tile allows.
-    static let glyphPadding: CGFloat = 9
-    /// Tallest a glyph is drawn; smaller glyphs are never scaled up.
-    static let maxGlyphHeight: CGFloat = 18
-    static let tileRadius: CGFloat = 8
-    static let tileSpacing: CGFloat = 6
-    /// Space between an app group's tiles, and the group's backing around them.
-    static let groupSpacing: CGFloat = 2
-    static let groupInset: CGFloat = 3
-    static let rowPadding: CGFloat = 7
-    static let rowRadius: CGFloat = tileRadius + rowPadding
-    static let rowHeight: CGFloat = tileHeight + 2 * rowPadding
-    static let minRowWidth: CGFloat = 460
-    static let windowPadding: CGFloat = 20
-    /// How far tiles part around the insertion marker.
-    static let insertionGap: CGFloat = 12
-    static let markerWidth: CGFloat = 3
-    static let liftScale: CGFloat = 1.1
-    static let liftRotation: Double = -3
-
-    static func glyphSize(_ size: NSSize) -> CGSize {
-        guard size.height > maxGlyphHeight, size.height > 0 else { return size }
-        return CGSize(width: size.width * maxGlyphHeight / size.height, height: maxGlyphHeight)
-    }
-
-    static func tileWidth(_ image: NSImage) -> CGFloat {
-        max(tileMinWidth, glyphSize(image.size).width + 2 * glyphPadding)
-    }
-
-    static func groupWidth(_ group: HiddenGroup) -> CGFloat {
-        let tiles = group.icons.reduce(0) { $0 + tileWidth($1.image) }
-            + groupSpacing * CGFloat(max(group.icons.count - 1, 0))
-        return group.icons.count > 1 ? tiles + 2 * groupInset : tiles
-    }
-
-    /// A row's width for its content: its tiles, the spacing between them and its padding.
-    static func rowWidth(_ widths: [CGFloat]) -> CGFloat {
-        widths.reduce(0, +) + tileSpacing * CGFloat(max(widths.count - 1, 0)) + 2 * rowPadding
-    }
-}
-
 /// A drag in progress, from pickup until the tile has settled into its new place.
-struct LayoutDrag: Equatable {
+struct LayoutDrag {
     enum Source: Equatable {
         case bar(String)
         case hidden(BundleID)
     }
 
-    enum Target: Equatable {
-        case bar(Int)
-        case hidden(Int)
-        /// Over the Hidden row with a tile that can't be hidden.
-        case refused(HideRefusal)
-    }
-
-    /// What the floating copy draws. Kept here because the source leaves the model on a drop
-    /// between rows.
-    enum Face: Equatable {
-        case tile(NSImage)
-        case group(HiddenGroup)
-    }
+    typealias Target = LayoutRules.DropTarget
 
     let source: Source
-    let face: Face
+    /// The dragged tile's (or group's) index in its row at pickup.
+    let index: Int
     /// The frame key of the dragged tile or group, and its frame at pickup.
     let key: String
     let origin: CGRect
     /// The pointer's offset from the dragged view's centre at pickup.
     let grab: CGSize
-    /// Insertion midpoints and row frames at pickup. Fixed for the whole drag, so tiles parting
-    /// around the marker never move the insertion point.
-    let barMidpoints: [CGFloat]
-    let hiddenMidpoints: [CGFloat]
+    /// A Menu Bar tile's glyph.
+    let image: NSImage?
+    /// The app's icons as a hidden group: the dragged group itself, or every tile of the dragged
+    /// Menu Bar tile's app (they all go into Hidden together).
+    let group: HiddenGroup
+    /// Frame keys of the dragged tile's app's other Menu Bar tiles.
+    let siblings: Set<String>
+    /// Why a Menu Bar tile can't go into Hidden, if it can't.
+    let refusal: HideRefusal?
+    /// The rows' tile frames (model order) and row frames at pickup. Fixed for the whole drag, so
+    /// tiles making room never move the insertion point.
+    let barFrames: [CGRect]
+    let hiddenFrames: [CGRect]
     let barRow: CGRect
     let hiddenRow: CGRect
+    /// How wide the slot the held tile needs is, over each row.
+    let barWidth: CGFloat
+    let hiddenWidth: CGFloat
     var location: CGPoint
     var target: Target?
     var lifted = false
-    var cancelled = false
-    /// Set once dropped: the frame the tile springs to, and the key of the view it becomes.
+    /// The floating copy shows the whole app (held over Hidden, which takes all its icons).
+    var showsGroup = false
+    /// Dropped, cancelled or abandoned: from here on the tile only settles.
+    var dropped = false
+    /// The frame the tile springs to, and the key of the view it becomes.
     var settleFrame: CGRect?
     var settleKey: String?
     /// Fades the tile out as it settles (it lands where nothing is drawn yet).
@@ -93,6 +52,34 @@ struct LayoutDrag: Equatable {
 
     var center: CGPoint {
         CGPoint(x: location.x - grab.width, y: location.y - grab.height)
+    }
+
+    var ruleSource: LayoutRules.DropSource {
+        switch source {
+        case .bar: .bar(index)
+        case .hidden: .hidden(index)
+        }
+    }
+
+    /// The held tile's index in `row` when it's from that row.
+    func from(_ row: LayoutRules.DropRow) -> Int? {
+        switch (source, row) {
+        case (.bar, .bar), (.hidden, .hidden): index
+        default: nil
+        }
+    }
+
+    /// The insertion the tiles of `row` make room at, if the held tile is over it.
+    func insertion(in row: LayoutRules.DropRow) -> Int? {
+        guard !dropped else { return nil }
+        switch (target, row) {
+        case (.bar(let i)?, .bar), (.hidden(let i)?, .hidden): return i
+        default: return nil
+        }
+    }
+
+    var isRefused: Bool {
+        if case .refused = target { true } else { false }
     }
 }
 
@@ -121,11 +108,15 @@ struct LayoutView: View {
     static let hiddenRowKey = "row:hidden"
 
     let model: LayoutModel
-    /// The widest the rows may be before they scroll.
-    let maxRowWidth: CGFloat
 
     @State private var frames: [String: CGRect] = [:]
     @State private var drag: LayoutDrag?
+    /// True while a drag gesture is live. It resets even when the gesture is cancelled without an
+    /// end (its view went away), which `abandonDrag` turns into a spring back.
+    @GestureState private var gestureLive = false
+    /// A gesture whose drag was cancelled (Esc) while the button is still down: it mustn't start
+    /// another drag before it ends.
+    @State private var spentGesture = false
     @FocusState private var focus: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -141,7 +132,7 @@ struct LayoutView: View {
                 .frame(width: rowWidth, alignment: .topLeading)
                 .padding(.top, 12)
             if let message = model.message {
-                MessageBanner(message: message, width: rowWidth, onFix: model.openSettings) {
+                MessageBanner(message: message, width: rowWidth, onFix: model.fix) {
                     withAnimation(LayoutModel.rowAnimation) { model.message = nil }
                 }
                 .padding(.top, 14)
@@ -155,6 +146,20 @@ struct LayoutView: View {
         .onPreferenceChange(FrameKey.self) { frames = $0 }
         .overlay(alignment: .topLeading) { dragOverlay }
         .onExitCommand { cancelDrag() }
+        .onChange(of: model.dragCancels) { cancelDrag() }
+        .onChange(of: gestureLive) { _, live in
+            // After the gesture's own end has run: only a gesture that ended without one is left.
+            if !live {
+                spentGesture = false
+                DispatchQueue.main.async { abandonDrag() }
+            }
+        }
+        .onChange(of: model.closes) {
+            drag = nil
+            focus = nil
+            NSCursor.arrow.set()
+        }
+        .onAppear { focus = nil }
         .fixedSize()
     }
 
@@ -179,7 +184,7 @@ struct LayoutView: View {
 
     /// Why the dragged tile can't go into Hidden, while it's over the Hidden row.
     private var refusal: String? {
-        guard let drag, drag.settleFrame == nil, case .refused(let reason)? = drag.target,
+        guard let drag, !drag.dropped, case .refused(let reason)? = drag.target,
               case .bar(let id) = drag.source, let tile = model.bar.first(where: { $0.id == id }) else { return nil }
         return Self.refusalText(reason, name: tile.name)
     }
@@ -206,16 +211,17 @@ struct LayoutView: View {
     private var rowWidth: CGFloat {
         let bar = LayoutMetrics.rowWidth(model.bar.map { LayoutMetrics.tileWidth($0.image) })
         let hidden = LayoutMetrics.rowWidth(model.hidden.map(LayoutMetrics.groupWidth))
-        return min(model.rowWidth(natural: max(bar, hidden, LayoutMetrics.minRowWidth)), maxRowWidth)
+        return min(model.rowWidth(natural: max(bar, hidden, LayoutMetrics.minRowWidth)), model.maxRowWidth)
     }
 
     private var barRow: some View {
-        let parting = barParting
+        let from = drag?.from(.bar), to = drag?.insertion(in: .bar)
+        let step = (drag?.barWidth ?? 0) + LayoutMetrics.tileSpacing
         return RowWell(width: rowWidth, state: rowState(for: .bar), contentWidth: barContentWidth) {
             HStack(spacing: LayoutMetrics.tileSpacing) {
                 ForEach(Array(model.bar.enumerated()), id: \.element.id) { index, tile in
                     barTile(tile)
-                        .offset(x: parting.map { index >= $0 ? LayoutMetrics.insertionGap / 2 : -LayoutMetrics.insertionGap / 2 } ?? 0)
+                        .offset(x: CGFloat(LayoutRules.slotShift(of: index, from: from, to: to)) * step)
                 }
             }
         }
@@ -225,19 +231,22 @@ struct LayoutView: View {
     }
 
     private var hiddenRow: some View {
-        let parting = hiddenParting
+        let from = drag?.from(.hidden), to = drag?.insertion(in: .hidden)
+        let step = (drag?.hiddenWidth ?? 0) + LayoutMetrics.tileSpacing
         return RowWell(width: rowWidth, state: rowState(for: .hidden), contentWidth: hiddenContentWidth) {
             if model.hidden.isEmpty {
                 Text("Drag icons here to hide them")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(width: rowWidth - 2 * LayoutMetrics.rowPadding, height: LayoutMetrics.tileHeight)
-                    .opacity(drag?.target == .hidden(0) ? 0 : 1)
+                    // Out of the way of the slot and the held tile while anything is over the row.
+                    .opacity(isOverHidden ? 0 : 1)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isOverHidden)
             } else {
                 HStack(spacing: LayoutMetrics.tileSpacing) {
                     ForEach(Array(model.hidden.enumerated()), id: \.element.id) { index, group in
                         hiddenGroup(group)
-                            .offset(x: parting.map { index >= $0 ? LayoutMetrics.insertionGap / 2 : -LayoutMetrics.insertionGap / 2 } ?? 0)
+                            .offset(x: CGFloat(LayoutRules.slotShift(of: index, from: from, to: to)) * step)
                     }
                 }
             }
@@ -245,6 +254,14 @@ struct LayoutView: View {
         .reportFrame(Self.hiddenRowKey)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Hidden")
+    }
+
+    private var isOverHidden: Bool {
+        guard let drag, !drag.dropped else { return false }
+        switch drag.target {
+        case .hidden?, .refused?: return true
+        default: return false
+        }
     }
 
     private var barContentWidth: CGFloat {
@@ -255,21 +272,8 @@ struct LayoutView: View {
         LayoutMetrics.rowWidth(model.hidden.map(LayoutMetrics.groupWidth))
     }
 
-    /// The insertion index the bar row's tiles part around, if any.
-    private var barParting: Int? {
-        if case .bar(let index) = drag?.target, drag?.settleFrame == nil { return index }
-        return nil
-    }
-
-    private var hiddenParting: Int? {
-        if case .hidden(let index) = drag?.target, drag?.settleFrame == nil, !model.hidden.isEmpty { return index }
-        return nil
-    }
-
-    private enum Row { case bar, hidden }
-
-    private func rowState(for row: Row) -> RowWellState {
-        guard let drag, drag.settleFrame == nil, !drag.cancelled else { return .idle }
+    private func rowState(for row: LayoutRules.DropRow) -> RowWellState {
+        guard let drag, !drag.dropped else { return .idle }
         switch (row, drag.target) {
         case (.bar, .bar?), (.hidden, .hidden?): return .accepting
         case (.hidden, .refused?): return .refusing
@@ -283,14 +287,14 @@ struct LayoutView: View {
         let key = Self.barKey(tile.id)
         return TileFace(image: tile.image, style: model.tileStyle, dimmed: !tile.capability.canDrag)
             .phase(phase(of: key))
-            .focusRing(focus == key)
+            .focusRing(focus == key && model.showsFocusRing)
             .reportFrame(key)
             .contentShape(RoundedRectangle(cornerRadius: LayoutMetrics.tileRadius, style: .continuous))
             .gesture(dragGesture(.bar(tile.id), key: key), including: tile.capability.canDrag && !model.busy ? .all : .none)
             .pointerStyle(tile.capability.canDrag ? .grabIdle : nil)
-            // Like buttons: in the Tab order only with Keyboard Navigation on, so opening the
-            // window doesn't put a focus ring on the first tile.
-            .focusable(true, interactions: .activate)
+            // Focusable by click as well as Tab, like the items of a collection; the ring shows
+            // only once a key is pressed (`LayoutModel.showsFocusRing`).
+            .focusable(true, interactions: .edit)
             .focusEffectDisabled()
             .focused($focus, equals: key)
             .onKeyPress(phases: .down) { press in barKey(press, tile) }
@@ -300,38 +304,37 @@ struct LayoutView: View {
             .accessibilityLabel(tile.name)
             .accessibilityValue(accessibilityValue(for: tile.capability))
             .accessibilityHint(tile.capability.canDrag ? "Use the actions to move it" : "")
-            .modifier(BarTileActions(model: model, tile: tile, move: { moveBarTile(tile, by: $0) },
-                                     hide: { hideBarTile(tile) }))
+            .modifier(BarTileActions(tile: tile, move: { moveBarTile(tile, by: $0) }, hide: { hideBarTile(tile) }))
     }
 
     private func hiddenGroup(_ group: HiddenGroup) -> some View {
         let key = Self.hiddenKey(group.id)
         return GroupFace(group: group, style: model.tileStyle)
             .phase(phase(of: key))
-            .focusRing(focus == key, radius: LayoutMetrics.tileRadius + (group.icons.count > 1 ? LayoutMetrics.groupInset : 0))
+            .focusRing(focus == key && model.showsFocusRing,
+                       radius: LayoutMetrics.tileRadius + (group.icons.count > 1 ? LayoutMetrics.groupInset : 0))
             .reportFrame(key)
             .contentShape(RoundedRectangle(cornerRadius: LayoutMetrics.tileRadius, style: .continuous))
             .gesture(dragGesture(.hidden(group.id), key: key), including: model.busy ? .none : .all)
             .pointerStyle(.grabIdle)
-            // Like buttons: in the Tab order only with Keyboard Navigation on, so opening the
-            // window doesn't put a focus ring on the first tile.
-            .focusable(true, interactions: .activate)
+            .focusable(true, interactions: .edit)
             .focusEffectDisabled()
             .focused($focus, equals: key)
             .onKeyPress(phases: .down) { press in hiddenKey(press, group) }
             .help(group.name)
             .contextMenu {
-                Button("Show in Menu Bar") { model.show(group.id, at: nil) }
+                Button("Show in Menu Bar") { showGroup(group) }
+                    .disabled(model.busy)
                 Divider()
                 Button("Move Left") { moveHiddenGroup(group, by: -1) }
-                    .disabled(model.hidden.first?.id == group.id)
+                    .disabled(model.busy || model.hidden.first?.id == group.id)
                 Button("Move Right") { moveHiddenGroup(group, by: 1) }
-                    .disabled(model.hidden.last?.id == group.id)
+                    .disabled(model.busy || model.hidden.last?.id == group.id)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(group.name)
             .accessibilityValue(group.icons.count > 1 ? "Hidden, \(group.icons.count) icons" : "Hidden")
-            .accessibilityAction(named: "Show in Menu Bar") { model.show(group.id, at: nil) }
+            .accessibilityAction(named: "Show in Menu Bar") { showGroup(group) }
             .accessibilityAction(named: "Move Left") { moveHiddenGroup(group, by: -1) }
             .accessibilityAction(named: "Move Right") { moveHiddenGroup(group, by: 1) }
     }
@@ -340,13 +343,14 @@ struct LayoutView: View {
     private func barMenu(_ tile: BarTile) -> some View {
         if tile.capability.canHide {
             Button("Hide") { hideBarTile(tile) }
+                .disabled(model.busy)
             Divider()
         }
         if tile.capability.canDrag {
             Button("Move Left") { moveBarTile(tile, by: -1) }
-                .disabled(model.bar.first?.id == tile.id)
+                .disabled(model.busy || model.bar.first?.id == tile.id)
             Button("Move Right") { moveBarTile(tile, by: 1) }
-                .disabled(!canMoveRight(tile))
+                .disabled(model.busy || !canMoveRight(tile))
         } else {
             Text(help(for: tile))
         }
@@ -354,8 +358,13 @@ struct LayoutView: View {
 
     private func phase(of key: String) -> TilePhase {
         guard let drag else { return .resting }
-        if drag.settleFrame != nil { return key == drag.key || key == drag.settleKey ? .invisible : .resting }
-        return key == drag.key ? .socket : .resting
+        if drag.dropped { return key == drag.key || key == drag.settleKey ? .invisible : .resting }
+        guard key == drag.key || (drag.showsGroup && drag.siblings.contains(key)) else { return .resting }
+        // Over a new place in its own row, the row closes up around the slot (`slotShift`).
+        switch (drag.source, drag.target) {
+        case (.bar, .bar?), (.hidden, .hidden?): return key == drag.key ? .invisible : .socket
+        default: return .socket
+        }
     }
 
     private func help(for tile: BarTile) -> String {
@@ -376,7 +385,7 @@ struct LayoutView: View {
         }
     }
 
-    // MARK: Keyboard
+    // MARK: Keyboard and actions
 
     /// Left and Right move the focus; Up and Down switch rows. With Command they move the icon:
     /// Command-Left/Right reorder, Command-Down hides.
@@ -402,9 +411,7 @@ struct LayoutView: View {
         switch press.key {
         case .leftArrow where command: moveHiddenGroup(group, by: -1)
         case .rightArrow where command: moveHiddenGroup(group, by: 1)
-        case .upArrow where command:
-            focus = nil
-            model.show(group.id, at: nil)
+        case .upArrow where command: showGroup(group)
         case .leftArrow: focus = model.hidden[safe: index - 1].map { Self.hiddenKey($0.id) } ?? focus
         case .rightArrow: focus = model.hidden[safe: index + 1].map { Self.hiddenKey($0.id) } ?? focus
         case .upArrow: focus = model.bar.first.map { Self.barKey($0.id) } ?? focus
@@ -422,16 +429,30 @@ struct LayoutView: View {
         guard tile.capability.canDrag, !model.busy, let index = model.bar.firstIndex(where: { $0.id == tile.id }) else { return }
         let to = step < 0 ? index - 1 : index + 2
         guard to >= 0, LayoutRules.clampedInsertion(to, in: model.bar.map(\.item)) == to else { return }
-        withAnimation(LayoutModel.rowAnimation) { model.move(from: index, to: to) }
+        withAnimation(LayoutModel.rowAnimation) { _ = model.move(from: index, to: to) }
     }
 
+    /// Hides the tile's app; a focused tile hands the focus to the app's new hidden group.
     private func hideBarTile(_ tile: BarTile) {
-        guard tile.capability.canHide, !model.busy, let index = model.bar.firstIndex(where: { $0.id == tile.id }) else { return }
-        withAnimation(LayoutModel.rowAnimation) { model.hide(from: index, at: model.hidden.count) }
+        guard tile.capability.canHide, !model.busy, let app = tile.item.bundleID,
+              let index = model.bar.firstIndex(where: { $0.id == tile.id }) else { return }
+        let hadFocus = focus == Self.barKey(tile.id)
+        withAnimation(LayoutModel.rowAnimation) { _ = model.hide(from: index, at: model.hidden.count) }
+        if hadFocus { focus = Self.hiddenKey(app) }
+    }
+
+    /// Shows the group's app; a focused group hands the focus to its neighbour in Hidden, or the
+    /// first Menu Bar tile when it was the last.
+    private func showGroup(_ group: HiddenGroup) {
+        guard !model.busy, let index = model.hidden.firstIndex(where: { $0.id == group.id }) else { return }
+        let hadFocus = focus == Self.hiddenKey(group.id)
+        let next = model.hidden[safe: index + 1] ?? model.hidden[safe: index - 1]
+        withAnimation(LayoutModel.rowAnimation) { _ = model.show(group.id, at: nil) }
+        if hadFocus { focus = next.map { Self.hiddenKey($0.id) } ?? model.bar.first.map { Self.barKey($0.id) } }
     }
 
     private func moveHiddenGroup(_ group: HiddenGroup, by step: Int) {
-        guard let index = model.hidden.firstIndex(where: { $0.id == group.id }) else { return }
+        guard !model.busy, let index = model.hidden.firstIndex(where: { $0.id == group.id }) else { return }
         let to = step < 0 ? index - 1 : index + 2
         guard to >= 0, to <= model.hidden.count else { return }
         withAnimation(LayoutModel.rowAnimation) { model.reorderHidden(group.id, at: to) }
@@ -441,98 +462,116 @@ struct LayoutView: View {
 
     private func dragGesture(_ source: LayoutDrag.Source, key: String) -> some Gesture {
         DragGesture(minimumDistance: 3, coordinateSpace: .named(Self.space))
+            .updating($gestureLive) { _, live, _ in live = true }
             .onChanged { value in
-                if drag == nil { begin(source, key: key, at: value.startLocation) }
-                guard var current = drag, current.key == key, current.settleFrame == nil, !current.cancelled else { return }
+                if drag == nil, !spentGesture { begin(source, key: key, at: value.startLocation) }
+                guard var current = drag, current.key == key, !current.dropped else { return }
                 current.location = value.location
                 current.target = target(for: value.location, in: current)
+                (current.isRefused ? NSCursor.operationNotAllowed : NSCursor.closedHand).set()
                 if current.target != drag?.target {
+                    if case .hidden? = current.target { current.showsGroup = true } else { current.showsGroup = false }
                     withAnimation(reduceMotion ? nil : .spring(duration: 0.28, bounce: 0.2)) { drag = current }
                 } else {
                     drag = current
                 }
             }
-            .onEnded { value in
-                guard let current = drag, current.key == key, current.settleFrame == nil else { return }
+            .onEnded { _ in
+                guard let current = drag, current.key == key, !current.dropped else { return }
                 drop(current)
             }
     }
 
     private func begin(_ source: LayoutDrag.Source, key: String, at start: CGPoint) {
-        guard let origin = frames[key] else { return }
-        let face: LayoutDrag.Face
+        guard !model.busy, let origin = frames[key] else { return }
+        let barFrames = model.bar.compactMap { frames[Self.barKey($0.id)] }
+        let hiddenFrames = model.hidden.compactMap { frames[Self.hiddenKey($0.id)] }
+        // Frames lag the model by a layout pass; a drag needs all of them.
+        guard barFrames.count == model.bar.count, hiddenFrames.count == model.hidden.count else { return }
+        let index: Int, image: NSImage?, group: HiddenGroup, siblings: [BarTile], refusal: HideRefusal?
         switch source {
         case .bar(let id):
-            guard let tile = model.bar.first(where: { $0.id == id }) else { return }
-            face = .tile(tile.image)
+            guard let i = model.bar.firstIndex(where: { $0.id == id }) else { return }
+            let tile = model.bar[i]
+            let app = tile.item.bundleID
+            let tiles = app.map { app in model.bar.filter { $0.item.bundleID == app } } ?? [tile]
+            (index, image, refusal) = (i, tile.image, tile.capability.hideRefusal)
+            siblings = tiles.filter { $0.id != id }
+            group = HiddenGroup(id: app ?? tile.id, name: tile.name,
+                                icons: tiles.map { HiddenGroup.Icon(id: $0.id, image: $0.image) })
         case .hidden(let app):
-            guard let group = model.hidden.first(where: { $0.id == app }) else { return }
-            face = .group(group)
+            guard let i = model.hidden.firstIndex(where: { $0.id == app }) else { return }
+            (index, image, refusal, siblings, group) = (i, nil, nil, [], model.hidden[i])
         }
+        let iconSpan = LayoutMetrics.span(group.icons.map { LayoutMetrics.tileWidth($0.image) },
+                                          spacing: LayoutMetrics.tileSpacing)
         focus = nil
         model.message = nil
         model.isDragging = true
         drag = LayoutDrag(
-            source: source, face: face, key: key, origin: origin,
+            source: source, index: index, key: key, origin: origin,
             grab: CGSize(width: start.x - origin.midX, height: start.y - origin.midY),
-            barMidpoints: model.bar.compactMap { frames[Self.barKey($0.id)]?.midX },
-            hiddenMidpoints: model.hidden.compactMap { frames[Self.hiddenKey($0.id)]?.midX },
+            image: image, group: group, siblings: Set(siblings.map { Self.barKey($0.id) }), refusal: refusal,
+            barFrames: barFrames, hiddenFrames: hiddenFrames,
             barRow: frames[Self.barRowKey] ?? .zero, hiddenRow: frames[Self.hiddenRowKey] ?? .zero,
+            barWidth: image == nil ? iconSpan : origin.width,
+            hiddenWidth: image == nil ? origin.width : LayoutMetrics.groupWidth(group),
             location: start)
+        NSCursor.closedHand.set()
         withAnimation(reduceMotion ? nil : .spring(duration: 0.25, bounce: 0.35)) { drag?.lifted = true }
     }
 
     /// Where a drop at `point` would go, or nil for nowhere (outside the rows, or back where it was).
     private func target(for point: CGPoint, in drag: LayoutDrag) -> LayoutDrag.Target? {
         let reach: (CGRect) -> CGRect = { $0.insetBy(dx: -24, dy: -14) }
-        let items = model.bar.map(\.item)
-        if reach(drag.barRow).contains(point) {
-            let index = LayoutRules.clampedInsertion(
-                LayoutRules.insertionIndex(forX: Double(point.x), midpoints: drag.barMidpoints.map(Double.init)), in: items)
-            if case .bar(let id) = drag.source, let from = model.bar.firstIndex(where: { $0.id == id }),
-               LayoutRules.moveNeighbors(from: from, to: index, in: items) == nil { return nil }
-            return .bar(index)
-        }
-        if reach(drag.hiddenRow).contains(point) {
-            if case .bar(let id) = drag.source, let tile = model.bar.first(where: { $0.id == id }),
-               let refusal = tile.capability.hideRefusal { return .refused(refusal) }
-            let index = LayoutRules.insertionIndex(forX: Double(point.x), midpoints: drag.hiddenMidpoints.map(Double.init))
-            if case .hidden(let id) = drag.source, let from = model.hidden.firstIndex(where: { $0.id == id }),
-               index == from || index == from + 1 { return nil }
-            return .hidden(index)
-        }
-        return nil
+        let row: LayoutRules.DropRow? = reach(drag.barRow).contains(point) ? .bar
+            : reach(drag.hiddenRow).contains(point) ? .hidden : nil
+        let frames = row == .bar ? drag.barFrames : drag.hiddenFrames
+        let insertion = LayoutRules.insertionIndex(forX: Double(point.x), midpoints: frames.map { Double($0.midX) })
+        return LayoutRules.dropTarget(over: row, insertion: insertion, source: drag.ruleSource,
+                                      bar: model.bar.map(\.item), refusal: drag.refusal, anchors: model.canAnchor)
     }
 
     private func drop(_ dropped: LayoutDrag) {
         var settled = dropped
         settled.target = nil
-        // No marker or parting from here on, before the rows change under the old target.
-        drag = settled
+        settled.dropped = true
+        // The rows close up and change in one animation: the tiles that made room are already
+        // where the new order puts them, so nothing jumps.
         let animation = LayoutModel.rowAnimation
-        switch (dropped.source, dropped.cancelled ? nil : dropped.target) {
+        switch (dropped.source, dropped.target) {
         case (.bar(let id), .bar(let index)?):
-            guard let from = model.bar.firstIndex(where: { $0.id == id }) else { return finish() }
-            withAnimation(animation) { model.move(from: from, to: index) }
             settled.settleKey = Self.barKey(id)
+            withAnimation(animation) {
+                drag = settled
+                if let from = model.bar.firstIndex(where: { $0.id == id }) { model.move(from: from, to: index) }
+            }
         case (.bar(let id), .hidden(let index)?):
             guard let from = model.bar.firstIndex(where: { $0.id == id }),
-                  let app = model.bar[from].item.bundleID else { return finish() }
-            withAnimation(animation) { model.hide(from: from, at: index) }
+                  let app = model.bar[from].item.bundleID else { return cancelDrag() }
             settled.settleKey = Self.hiddenKey(app)
+            withAnimation(animation) {
+                drag = settled
+                model.hide(from: from, at: index)
+            }
         case (.hidden(let app), .hidden(let index)?):
-            withAnimation(animation) { model.reorderHidden(app, at: index) }
             settled.settleKey = Self.hiddenKey(app)
+            withAnimation(animation) {
+                drag = settled
+                model.reorderHidden(app, at: index)
+            }
         case (.hidden(let app), .bar(let index)?):
-            // The icons come back once macOS draws them; the tile fades into the gap meanwhile.
-            settled.settleFrame = markerFrame(for: .bar(index), in: dropped) ?? dropped.origin
+            // The icons come back once macOS draws them; the tile fades into its slot meanwhile.
+            settled.settleFrame = slotFrame(for: dropped.target, in: dropped) ?? dropped.origin
             settled.fadesOnSettle = true
-            withAnimation(animation) { model.show(app, at: index) }
+            settled.showsGroup = false
+            withAnimation(animation) {
+                drag = settled
+                model.show(app, at: index)
+            }
         default:
-            settled.settleFrame = dropped.origin
-            settled.settleKey = dropped.key
+            return cancelDrag()
         }
-        drag = settled
         // The new layout's frames arrive with the next layout pass.
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(30))
@@ -540,13 +579,14 @@ struct LayoutView: View {
         }
     }
 
-    /// Springs the floating tile into its new place, then ends the drag.
-    private func settle() {
-        guard var current = drag else { return }
+    /// Springs the floating tile into its new place, then ends the drag. `start` is the drag to
+    /// settle when it isn't in `drag` yet, so its other changes animate with the spring.
+    private func settle(_ start: LayoutDrag? = nil) {
+        guard var current = start ?? drag else { return }
         if current.settleFrame == nil {
             current.settleFrame = current.settleKey.flatMap { frames[$0] } ?? current.origin
         }
-        let frame = current.settleFrame!
+        let frame = current.settleFrame ?? current.origin
         // Keep the frame's centre but the tile's own size: a group lands centred on its slot.
         current.location = CGPoint(x: frame.midX + current.grab.width, y: frame.midY + current.grab.height)
         current.lifted = false
@@ -559,15 +599,28 @@ struct LayoutView: View {
 
     private func finish() {
         drag = nil
-        model.isDragging = false
+        NSCursor.arrow.set()
         model.dragEnded()
     }
 
+    /// Esc, or a drop that goes nowhere: the tile springs straight back to where it came from.
+    /// The gesture's later end is ignored.
     private func cancelDrag() {
-        guard var current = drag, current.settleFrame == nil else { return }
-        current.cancelled = true
+        guard var current = drag, !current.dropped else { return }
         current.target = nil
-        withAnimation(reduceMotion ? nil : .spring(duration: 0.25)) { drag = current }
+        current.dropped = true
+        current.showsGroup = false
+        current.settleFrame = current.origin
+        current.settleKey = current.key
+        if gestureLive { spentGesture = true }
+        settle(current)
+    }
+
+    /// The gesture went away without ending (its view was removed): treated as a cancel, so the
+    /// drag never stays stuck.
+    private func abandonDrag() {
+        guard let current = drag, !current.dropped else { return }
+        cancelDrag()
     }
 
     // MARK: Drag overlay
@@ -575,11 +628,9 @@ struct LayoutView: View {
     @ViewBuilder
     private var dragOverlay: some View {
         ZStack(alignment: .topLeading) {
-            if let drag, let marker = drag.settleFrame == nil ? markerFrame(for: drag.target, in: drag) : nil {
-                Capsule()
-                    .fill(Color.accentColor)
-                    .frame(width: marker.width, height: marker.height)
-                    .position(x: marker.midX, y: marker.midY)
+            if let drag, !drag.dropped, let slot = slotFrame(for: drag.target, in: drag) {
+                GhostSlot(size: slot.size)
+                    .position(x: slot.midX, y: slot.midY)
                     .transition(.opacity)
                     .accessibilityHidden(true)
             }
@@ -595,53 +646,58 @@ struct LayoutView: View {
     @ViewBuilder
     private func floatingTile(_ drag: LayoutDrag) -> some View {
         let lift = drag.lifted && !reduceMotion
+        let refused = drag.isRefused
+        let radius = LayoutMetrics.tileRadius + (drag.showsGroup || drag.image == nil ? LayoutMetrics.groupInset : 0)
         Group {
-            switch drag.face {
-            case .tile(let image): TileFace(image: image, style: model.tileStyle, dimmed: false)
-            case .group(let group): GroupFace(group: group, style: model.tileStyle)
+            if let image = drag.image, !drag.showsGroup {
+                TileFace(image: image, style: model.tileStyle, dimmed: false)
+            } else {
+                GroupFace(group: drag.group, style: model.tileStyle)
             }
         }
         .overlay {
-            RoundedRectangle(cornerRadius: LayoutMetrics.tileRadius + 1, style: .continuous)
-                .strokeBorder(Color.accentColor, lineWidth: 2)
+            RoundedRectangle(cornerRadius: radius + 1, style: .continuous)
+                .strokeBorder(refused ? Color.secondary.opacity(0.5) : Color.accentColor, lineWidth: refused ? 1 : 2)
                 .padding(-1)
                 .opacity(drag.lifted ? 1 : 0)
         }
+        .overlay(alignment: .topTrailing) {
+            if refused {
+                Image(systemName: "nosign")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 18, height: 18)
+                    .background(Color(nsColor: .systemGray), in: Circle())
+                    .overlay { Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1) }
+                    .offset(x: 7, y: -7)
+                    .transition(.scale(scale: 0.5).combined(with: .opacity))
+            }
+        }
+        .opacity(refused ? 0.85 : 1)
         .scaleEffect(lift ? LayoutMetrics.liftScale : 1)
         .rotationEffect(.degrees(lift ? LayoutMetrics.liftRotation : 0))
         .shadow(color: .black.opacity(drag.lifted ? 0.28 : 0), radius: drag.lifted ? 12 : 0, y: drag.lifted ? 8 : 0)
         .opacity(drag.fadesOnSettle && !drag.lifted ? 0 : 1)
     }
 
-    /// Where the insertion marker sits for `target`: centred in the gap the tiles part to make.
-    private func markerFrame(for target: LayoutDrag.Target?, in drag: LayoutDrag) -> CGRect? {
-        let row: CGRect, keys: [String], index: Int
+    /// The slot the held tile would land in for `target`: the room the row's tiles make
+    /// (`LayoutRules.slotShift`), at the tile's height, centred in the row.
+    private func slotFrame(for target: LayoutDrag.Target?, in drag: LayoutDrag) -> CGRect? {
+        let row: LayoutRules.DropRow, insertion: Int
         switch target {
-        case .bar(let i)?:
-            (row, keys, index) = (drag.barRow, model.bar.map { Self.barKey($0.id) }, i)
-        case .hidden(let i)?:
-            (row, keys, index) = (drag.hiddenRow, model.hidden.map { Self.hiddenKey($0.id) }, i)
-        default:
-            return nil
+        case .bar(let i)?: (row, insertion) = (.bar, i)
+        case .hidden(let i)?: (row, insertion) = (.hidden, i)
+        default: return nil
         }
-        // Taller than a lifted tile, so it shows above and below the tile hovering over it.
-        let height = LayoutMetrics.rowHeight - 4
-        // Frames can lag the model by a layout pass, so a missing one just means no marker yet.
-        let slot = min(max(index, 0), keys.count)
-        let left = slot > 0 ? frames[keys[slot - 1]] : nil
-        let right = slot < keys.count ? frames[keys[slot]] : nil
-        let reach = LayoutMetrics.tileSpacing / 2 + LayoutMetrics.insertionGap / 2
-        let x: CGFloat
-        switch (left, right) {
-        case let (left?, right?): x = (left.maxX + right.minX) / 2
-        case let (left?, nil): x = left.maxX + reach
-        case let (nil, right?): x = right.minX - reach
-        case (nil, nil):
-            guard keys.isEmpty else { return nil }
-            x = row.minX + LayoutMetrics.rowPadding + LayoutMetrics.markerWidth
-        }
-        return CGRect(x: x - LayoutMetrics.markerWidth / 2, y: row.midY - height / 2,
-                      width: LayoutMetrics.markerWidth, height: height)
+        let rowFrame = row == .bar ? drag.barRow : drag.hiddenRow
+        let spans = (row == .bar ? drag.barFrames : drag.hiddenFrames).map { (minX: $0.minX, maxX: $0.maxX) }
+        let width = row == .bar ? drag.barWidth : drag.hiddenWidth
+        let x = LayoutGeometry.slotMinX(insertion: insertion, from: drag.from(row), spans: spans, width: width,
+                                        spacing: LayoutMetrics.tileSpacing,
+                                        rowStart: rowFrame.minX + LayoutMetrics.rowPadding)
+        let clamped = min(x, rowFrame.maxX - LayoutMetrics.rowPadding - width)
+        return CGRect(x: clamped, y: rowFrame.midY - LayoutMetrics.tileHeight / 2,
+                      width: width, height: LayoutMetrics.tileHeight)
     }
 
     static func refusalText(_ refusal: HideRefusal, name: String) -> String {
@@ -650,253 +706,5 @@ struct LayoutView: View {
         case .own: "YeeHaw’s own icon stays in the menu bar."
         case .notTrackedYet: "\(name) isn’t hideable yet. macOS hasn’t listed it in its menu bar settings."
         }
-    }
-}
-
-// MARK: - Pieces
-
-private extension Array {
-    subscript(safe index: Int) -> Element? {
-        indices.contains(index) ? self[index] : nil
-    }
-}
-
-/// How a tile draws while a drag is under way.
-enum TilePhase {
-    case resting
-    /// The dragged tile's empty place.
-    case socket
-    /// Where the dragged tile is landing; the floating copy draws it until it's settled.
-    case invisible
-}
-
-private struct PhaseModifier: ViewModifier {
-    let phase: TilePhase
-
-    func body(content: Content) -> some View {
-        content
-            .opacity(phase == .resting ? 1 : 0)
-            .background {
-                if phase == .socket {
-                    RoundedRectangle(cornerRadius: LayoutMetrics.tileRadius, style: .continuous)
-                        .fill(Color.primary.opacity(0.06))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: LayoutMetrics.tileRadius, style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                        }
-                }
-            }
-    }
-}
-
-private struct FocusRingModifier: ViewModifier {
-    let focused: Bool
-    let radius: CGFloat
-
-    func body(content: Content) -> some View {
-        content.overlay {
-            RoundedRectangle(cornerRadius: radius + 3, style: .continuous)
-                .strokeBorder(Color(nsColor: .keyboardFocusIndicatorColor), lineWidth: 3)
-                .padding(-3)
-                .opacity(focused ? 1 : 0)
-        }
-    }
-}
-
-private extension View {
-    func phase(_ phase: TilePhase) -> some View { modifier(PhaseModifier(phase: phase)) }
-
-    func focusRing(_ focused: Bool, radius: CGFloat = LayoutMetrics.tileRadius) -> some View {
-        modifier(FocusRingModifier(focused: focused, radius: radius))
-    }
-}
-
-/// VoiceOver actions for a Menu Bar tile, matching what it may do.
-private struct BarTileActions: ViewModifier {
-    let model: LayoutModel
-    let tile: BarTile
-    let move: (Int) -> Void
-    let hide: () -> Void
-
-    func body(content: Content) -> some View {
-        if tile.capability.canHide {
-            content
-                .accessibilityAction(named: "Hide") { hide() }
-                .accessibilityAction(named: "Move Left") { move(-1) }
-                .accessibilityAction(named: "Move Right") { move(1) }
-        } else if tile.capability.canDrag {
-            content
-                .accessibilityAction(named: "Move Left") { move(-1) }
-                .accessibilityAction(named: "Move Right") { move(1) }
-        } else {
-            content
-        }
-    }
-}
-
-/// One icon, drawn the way the menu bar draws it: its glyph on a tile of the bar's colour.
-struct TileFace: View {
-    let image: NSImage
-    let style: TileStyle
-    let dimmed: Bool
-    @Environment(\.colorSchemeContrast) private var contrast
-
-    var body: some View {
-        let glyph = LayoutMetrics.glyphSize(image.size)
-        RoundedRectangle(cornerRadius: LayoutMetrics.tileRadius, style: .continuous)
-            .fill(fill)
-            .overlay {
-                RoundedRectangle(cornerRadius: LayoutMetrics.tileRadius, style: .continuous)
-                    .strokeBorder(edge, lineWidth: contrast == .increased ? 1 : 0.5)
-            }
-            .overlay {
-                Image(nsImage: image)
-                    .renderingMode(image.isTemplate ? .template : .original)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: glyph.width, height: glyph.height)
-                    .foregroundStyle(ink)
-                    // A fixed item keeps its tile; only its glyph recedes.
-                    .opacity(dimmed ? (contrast == .increased ? 0.7 : 0.45) : 1)
-            }
-            .frame(width: LayoutMetrics.tileWidth(image), height: LayoutMetrics.tileHeight)
-    }
-
-    private var fill: Color {
-        switch style {
-        case .bar(let fill, _): Color(.sRGB, red: fill.red, green: fill.green, blue: fill.blue)
-        case .system: Color(nsColor: .quaternarySystemFill)
-        }
-    }
-
-    private var ink: Color {
-        switch style {
-        case .bar(_, let ink): ink.color
-        case .system: .primary
-        }
-    }
-
-    /// A hairline that keeps the tile's edge visible against the row, whatever the bar's colour.
-    private var edge: Color {
-        let strength = contrast == .increased ? 0.45 : 0.14
-        switch style {
-        case .bar(_, .white): return .white.opacity(strength)
-        case .bar(_, .black): return .black.opacity(strength)
-        case .system: return .primary.opacity(strength)
-        }
-    }
-}
-
-/// A hidden app's tiles, kept together on a shared backing when there are several.
-struct GroupFace: View {
-    let group: HiddenGroup
-    let style: TileStyle
-
-    var body: some View {
-        HStack(spacing: LayoutMetrics.groupSpacing) {
-            ForEach(group.icons) { icon in
-                TileFace(image: icon.image, style: style, dimmed: false)
-            }
-        }
-        .padding(group.icons.count > 1 ? LayoutMetrics.groupInset : 0)
-        .background {
-            if group.icons.count > 1 {
-                RoundedRectangle(cornerRadius: LayoutMetrics.tileRadius + LayoutMetrics.groupInset, style: .continuous)
-                    .fill(Color.primary.opacity(0.08))
-            }
-        }
-    }
-}
-
-/// Whether a drop would land in a row.
-private enum RowWellState { case idle, accepting, refusing }
-
-/// A faint shade in light mode and a faint lift in dark mode, like a grouped settings box.
-private let rowWellColor = Color(nsColor: NSColor(name: "YeeHawLayoutWell") { appearance in
-    appearance.bestMatch(from: [.darkAqua, .vibrantDark, .accessibilityHighContrastDarkAqua]) != nil
-        ? NSColor(white: 1, alpha: 0.06) : NSColor(white: 0, alpha: 0.04)
-})
-
-/// A row's rounded well. It lights up with the accent colour when a drop would land in it, and
-/// dims behind a dashed edge when the dragged tile can't go there.
-private struct RowWell<Content: View>: View {
-    let width: CGFloat
-    let state: RowWellState
-    let contentWidth: CGFloat
-    @ViewBuilder let content: Content
-    @Environment(\.colorSchemeContrast) private var contrast
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: LayoutMetrics.rowRadius, style: .continuous)
-        ScrollView(.horizontal, showsIndicators: false) {
-            content
-                .padding(LayoutMetrics.rowPadding)
-                .frame(minWidth: width, alignment: .leading)
-        }
-        .scrollDisabled(contentWidth <= width)
-        .opacity(state == .refusing ? 0.35 : 1)
-        .frame(width: width, height: LayoutMetrics.rowHeight)
-        .background {
-            shape.fill(rowWellColor)
-            shape.fill(Color.accentColor.opacity(state == .accepting ? 0.08 : 0))
-        }
-        .overlay { edge(shape) }
-        .clipShape(shape)
-    }
-
-    @ViewBuilder
-    private func edge(_ shape: RoundedRectangle) -> some View {
-        switch state {
-        case .accepting:
-            shape.strokeBorder(Color.accentColor, lineWidth: 1.5)
-        case .refusing:
-            shape.strokeBorder(Color.secondary.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-        case .idle:
-            shape.strokeBorder(contrast == .increased ? Color.primary.opacity(0.5) : Color(nsColor: .separatorColor),
-                               lineWidth: contrast == .increased ? 1 : 0.5)
-        }
-    }
-}
-
-/// A problem with an edit, shown under the rows until dismissed or the next edit.
-private struct MessageBanner: View {
-    let message: LayoutMessage
-    let width: CGFloat
-    let onFix: () -> Void
-    let onDismiss: () -> Void
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .symbolRenderingMode(.multicolor)
-                .accessibilityHidden(true)
-            Text(message.text)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if message.offersFix {
-                Button("Fix…", action: onFix)
-                    .controlSize(.small)
-            }
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16, height: 16)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Dismiss")
-            .accessibilityLabel("Dismiss")
-        }
-        .font(.callout)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .frame(width: width)
-        .background(Color.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.yellow.opacity(0.35), lineWidth: 0.5)
-        }
-        .accessibilityElement(children: .combine)
     }
 }

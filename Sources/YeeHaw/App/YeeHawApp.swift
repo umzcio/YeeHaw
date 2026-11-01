@@ -42,7 +42,9 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
             controller: controller,
             reveal: RevealCoordinator(controller: controller),
             icons: icons,
-            openLayout: { showLayoutWindow(controller: controller, images: icons, openSettings: openSettings) },
+            openLayout: {
+                showLayoutWindow(controller: controller, images: icons) { await grants.requestGrant(for: $0) }
+            },
             openSettings: openSettings)
         self.controller = controller
         statusItem = status

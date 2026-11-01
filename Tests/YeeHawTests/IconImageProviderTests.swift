@@ -89,6 +89,34 @@ func crop(width: Int = 60, height: Int = 78, ink: CGRect, color: CGColor = .whit
         #expect(image.size == NSSize(width: 13, height: 15))
     }
 
+    static func drawn(_ id: BundleID, index: Int) -> MenuBarItem {
+        MenuBarItem(id: "\(id)#\(index)", bundleID: id, appleIdentifier: nil, indexInApp: index, axIdentifier: "",
+                    label: id, keyNames: [], keyPrefixes: [id], x: Double(index) * 30, width: 20, isPinned: false)
+    }
+
+    @Test func aHiddenAppGetsATilePerIconItLastDrew() throws {
+        let directory = try Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // A stale photograph of a third icon the app no longer draws.
+        try Data().write(to: directory.appending(path: "com.example.app-2.png"))
+        let provider = IconImageProvider(directory: directory)
+        provider.noteDrawn([Self.drawn("com.example.app", index: 0), Self.drawn("com.example.app", index: 1),
+                            Self.drawn("com.example.other", index: 0)])
+        #expect(provider.iconIndices(for: "com.example.app") == [0, 1])
+        #expect(provider.iconIndices(for: "com.example.other") == [0])
+        // Remembered across launches, without Screen Recording.
+        #expect(IconImageProvider(directory: directory).iconIndices(for: "com.example.app") == [0, 1])
+    }
+
+    @Test func withoutARecordThePhotographsDecide() throws {
+        let directory = try Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data().write(to: directory.appending(path: "com.example.app-0.png"))
+        try Data().write(to: directory.appending(path: "com.example.app-1.png"))
+        #expect(IconImageProvider(directory: directory).iconIndices(for: "com.example.app") == [0, 1])
+        #expect(IconImageProvider(directory: directory).iconIndices(for: "com.example.none") == [0])
+    }
+
     @Test func fallsBackToAnEighteenPointAppIcon() throws {
         let directory = try Self.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

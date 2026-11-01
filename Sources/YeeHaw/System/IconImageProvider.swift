@@ -23,8 +23,12 @@ final class IconImageProvider {
     /// can be photographed again whenever they're needed.
     private var appleCaptures: [String: NSImage] = [:]
 
-    init(directory: URL = IconImageProvider.defaultDirectory) {
+    /// Whether `captureIfPermitted` photographs at all; off in tests, which have no menu bar.
+    private let capturesScreen: Bool
+
+    init(directory: URL = IconImageProvider.defaultDirectory, capturesScreen: Bool = true) {
         self.directory = directory
+        self.capturesScreen = capturesScreen
     }
 
     /// `<bundleID>-<indexInApp>`, with anything outside `[A-Za-z0-9.-]` replaced by `_`, so a key
@@ -45,9 +49,10 @@ final class IconImageProvider {
         return image(for: id, indexInApp: item.indexInApp)
     }
 
-    /// The icon indices of a hidden app that have a saved photograph, at least `[0]`: one layout
-    /// tile per icon the app drew when it was last seen.
+    /// The icons a hidden app drew when it was last seen, at least `[0]`: one layout tile each.
+    /// They come from `noteDrawn`; for an app never noted, from the saved photographs.
     func iconIndices(for id: BundleID) -> [Int] {
+        if let noted = drawnIndices[id], !noted.isEmpty { return noted }
         let found = (0..<Self.maxIconsPerApp).filter { index in
             let key = Self.cacheKey(bundleID: id, indexInApp: index)
             if let cached = captures[key] { return cached != nil }
@@ -55,6 +60,32 @@ final class IconImageProvider {
         }
         return found.isEmpty ? [0] : found
     }
+
+    /// Records which icons each app in `items` draws, so a hidden app shows as many tiles as it
+    /// drew, with or without Screen Recording. `items` must hold every drawn item of each app in
+    /// it (a full read of the bar), or an app would be noted with fewer icons than it has.
+    func noteDrawn(_ items: [MenuBarItem]) {
+        var seen: [BundleID: Set<Int>] = [:]
+        for item in items {
+            guard let id = item.bundleID, id != OwnIconLocator.bundleID else { continue }
+            seen[id, default: []].insert(item.indexInApp)
+        }
+        var next = drawnIndices
+        for (id, indices) in seen { next[id] = indices.sorted() }
+        guard next != drawnIndices else { return }
+        drawnIndices = next
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try JSONEncoder().encode(next).write(to: drawnIndicesURL, options: .atomic)
+        } catch {
+            Self.log.error("Cannot save icon counts: \(error, privacy: .public)")
+        }
+    }
+
+    /// Each app's drawn icon indices as last noted, saved next to the photographs.
+    private lazy var drawnIndices: [BundleID: [Int]] =
+        (try? JSONDecoder().decode([BundleID: [Int]].self, from: Data(contentsOf: drawnIndicesURL))) ?? [:]
+    private var drawnIndicesURL: URL { directory.appending(path: "DrawnIcons.json", directoryHint: .notDirectory) }
 
     /// The most icons looked up per app; no app on record draws more than a handful.
     static let maxIconsPerApp = 8
@@ -69,7 +100,7 @@ final class IconImageProvider {
     /// ScreenCaptureKit shot of each `MenuBarAgent` bar. Does nothing unless Screen Recording is
     /// already granted; it never prompts.
     func captureIfPermitted(_ items: [MenuBarItem]) async {
-        guard CGPreflightScreenCaptureAccess() else { return }
+        guard capturesScreen, CGPreflightScreenCaptureAccess() else { return }
         let targets = items.filter {
             ($0.bundleID != nil && $0.bundleID != OwnIconLocator.bundleID) || $0.appleIdentifier != nil
         }

@@ -428,6 +428,25 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(rig.system.positionWrites == 0)
     }
 
+    @Test func itemsWithoutPositionsAreTheOwnedOnesWithNoKey() async throws {
+        var clock = FakeSystem.appleItem("com.apple.menuextra.clock", x: 990)
+        clock.isPinned = true
+        let unknown = MenuBarItem(id: "unknown@40", bundleID: nil, appleIdentifier: nil, indexInApp: 0,
+                                  axIdentifier: "", label: "", keyNames: [], keyPrefixes: [], x: 40, width: 20,
+                                  isPinned: false)
+        let rig = Self.rig(try FakeSystem(
+            allow: [(Self.a, true), (Self.b, true)],
+            positions: ["status:\(Self.a)::Item-0": 200, "module:WiFi": 300],
+            drawn: [Self.b: [FakeSystem.item(Self.b, x: 300)]],
+            appleItems: [FakeSystem.appleItem("com.apple.menuextra.wifi"),
+                         FakeSystem.appleItem("com.apple.menuextra.mystery", x: 950), clock, unknown]))
+        let c = rig.controller()
+        await c.refresh()
+        #expect(c.itemsWithoutPositions() == ["\(Self.b)#0", "com.apple.menuextra.mystery"])
+        rig.system.fail(.positions)
+        #expect(c.itemsWithoutPositions() == [])
+    }
+
     @Test func moveOfPinnedOrUnownedItemIsNoOp() throws {
         let rig = Self.rig(try FakeSystem(
             allow: [(Self.a, true)],
