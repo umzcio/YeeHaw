@@ -5,8 +5,7 @@ import YeeHawCore
 /// YeeHaw's own menu bar icon and the strip it opens (spec "Your menu bar icon", "The strip").
 ///
 /// A plain click toggles the strip. Right-click, Control-click and Option-click show the small
-/// menu (Layout…, Settings…, Quit YeeHaw), which the strip's "…" button also shows, in case 27.2
-/// stops delivering right-clicks to status items (ruling R36).
+/// menu (Layout…, Settings…, Quit YeeHaw); right-clicks were verified to arrive on 27.2 (R44).
 @MainActor
 final class StatusItemController: NSObject {
     /// The status item's autosave name. It keeps YeeHaw's existing position key (R29).
@@ -53,7 +52,6 @@ final class StatusItemController: NSObject {
         }
         buildMenu()
         strip = StripPanel(
-            menu: menu,
             onSelect: { [weak self] id in self?.select(id) },
             onFix: { [weak self] in
                 self?.strip.dismiss()

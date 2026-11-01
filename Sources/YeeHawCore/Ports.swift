@@ -21,6 +21,15 @@ public protocol MenuBarReading: Sendable {
     /// `PositionKey.prefixes` for the app, drawn or not (the executable name comes from the
     /// running app); just the bundle ID when it isn't running.
     func keyPrefixes(of id: BundleID) async -> [String]
+    /// What is drawn right now for one app, left to right. A reader can answer this much faster
+    /// than `items()`, by reading only the drawn bar and that app's own items; reveals poll it.
+    func items(of id: BundleID) async -> [MenuBarItem]
+}
+
+extension MenuBarReading {
+    public func items(of id: BundleID) async -> [MenuBarItem] {
+        await items().filter { $0.bundleID == id }
+    }
 }
 
 public protocol Sleeper: Sendable { func sleep(seconds: Double) async }

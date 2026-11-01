@@ -24,6 +24,9 @@ public enum ControllerError: Error, Equatable {
     public static let pollInterval: Double = 0.05
 
     public private(set) var state: HidingState
+    /// Receives a line at each step of a reveal (positions and Allow written, item drawn), for
+    /// the debug log's timing.
+    public var revealTrace: ((String) -> Void)?
     /// What the store last held, so an unchanged state is never written again.
     private var stored: HidingState
     /// Last read, drawn only.
@@ -190,8 +193,10 @@ public enum ControllerError: Error, Equatable {
             let slot = table.slotValue(leftOf: yeehawKey)
             try writePositions(Dictionary(uniqueKeysWithValues: keys.map { ($0, slot) }))
             try writeAllow([.switchOn(id)])
+            revealTrace?("positions and Allow written")
             do {
-                try await waitUntil(id, drawn: true)
+                let polls = try await waitUntil(id, drawn: true, fast: true)
+                revealTrace?("drawn after \(polls) poll(s)")
             } catch ControllerError.notHonored(let failed) where failed == id {
                 try await finishReveal()
                 throw ControllerError.notHonored(id)
@@ -217,7 +222,7 @@ public enum ControllerError: Error, Equatable {
         guard let pending = state.pendingReveal else { return }
         if state.journal.contains(pending.bundleID) {
             try writeAllow([.switchOff(pending.bundleID)])
-            try await waitIfRunning(pending.bundleID, drawn: false)
+            try await waitIfRunning(pending.bundleID, drawn: false, fast: true)
         }
         try writePositions(pending.originalPositions)
         state.pendingReveal = nil
@@ -265,9 +270,9 @@ public enum ControllerError: Error, Equatable {
         return key
     }
 
-    private func waitIfRunning(_ id: BundleID, drawn: Bool) async throws {
+    private func waitIfRunning(_ id: BundleID, drawn: Bool, fast: Bool = false) async throws {
         if await reader.runningBundleIDs().contains(id) {
-            try await waitUntil(id, drawn: drawn)
+            try await waitUntil(id, drawn: drawn, fast: fast)
         } else {
             await reload()
         }
@@ -275,12 +280,23 @@ public enum ControllerError: Error, Equatable {
 
     /// Polls every `pollInterval` until the app's item appears (or disappears), for at most
     /// `honorTimeout`, counted in polls rather than wall time. No retry: throws `.notHonored`.
-    private func waitUntil(_ id: BundleID, drawn: Bool) async throws {
+    /// Returns how many polls it took.
+    ///
+    /// `fast` (reveals, where the wait is on screen) polls only the app's own drawn items and
+    /// patches them into `items`; other items keep their last read positions until the next full
+    /// read. Otherwise every poll is a full read.
+    @discardableResult
+    private func waitUntil(_ id: BundleID, drawn: Bool, fast: Bool = false) async throws -> Int {
         let polls = Int((Self.honorTimeout / Self.pollInterval).rounded())
         var slept = 0
         while true {
-            await reload()
-            if items.contains(where: { $0.bundleID == id }) == drawn { return }
+            if fast {
+                let own = await reader.items(of: id).filter { $0.bundleID == id }
+                items = (items.filter { $0.bundleID != id } + own).sorted { $0.x < $1.x }
+            } else {
+                await reload()
+            }
+            if items.contains(where: { $0.bundleID == id }) == drawn { return slept + 1 }
             guard slept < polls else { throw ControllerError.notHonored(id) }
             slept += 1
             await sleeper.sleep(seconds: Self.pollInterval)

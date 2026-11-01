@@ -13,7 +13,7 @@ final class RevealCoordinator {
     static let inactivityTimeout: Double = 30
     /// How long one AX press may block. An app busy tracking the menu it just opened can run past
     /// this and return `-25204`, so a timeout isn't treated as a failure.
-    nonisolated static let pressTimeout: Float = 1.5
+    nonisolated static let pressTimeout: Float = 0.2
     /// After a failed press, how long to wait for a menu or window before trying the next method.
     static let pressGrace: Double = 0.3
     /// How long to keep re-reading the app's extras bar when the revealed item isn't in it yet.
@@ -63,6 +63,8 @@ final class RevealCoordinator {
         }
         busy = true
         defer { busy = false }
+        controller.revealTrace = { text in MainActor.assumeIsolated { step(text) } }
+        defer { controller.revealTrace = nil }
 
         let item: MenuBarItem
         do {
@@ -83,6 +85,7 @@ final class RevealCoordinator {
             return .revealed
         }
         let session = RevealSession(pid: pid)
+        session.onFirstSurface = { what in step("\(what) (first menu or window on screen)") }
         if !session.isObserving { step("AX observer unavailable; only clicks and the timeout can end it") }
 
         if await press(item, pid: pid, session: session, step: step) {
@@ -255,6 +258,9 @@ private final class RevealSession {
 
     var seenSummary: String { "[" + seen.joined(separator: ", ") + "]" }
 
+    /// Called once, with the notification's name, when the app's first menu or window appears.
+    var onFirstSurface: ((String) -> Void)?
+
     var isObserving: Bool { observer != nil }
 
     /// True once the press visibly did something: a menu or window opened, or it already closed.
@@ -338,6 +344,10 @@ private final class RevealSession {
 
     private func handle(_ name: String, _ element: AXUIElement) {
         seen.append(name)
+        if [kAXMenuOpenedNotification, kAXWindowCreatedNotification].contains(name), let first = onFirstSurface {
+            onFirstSurface = nil
+            first(name)
+        }
         guard reason == nil else { return }
         switch name {
         case kAXMenuOpenedNotification:

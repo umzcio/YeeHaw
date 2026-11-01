@@ -24,6 +24,22 @@ struct AXMenuBarReader: MenuBarReading {
         return PositionKey.prefixes(bundleID: id, executableName: app?.executableURL?.lastPathComponent)
     }
 
+    func items(of id: BundleID) async -> [MenuBarItem] {
+        await Self.readItems(of: id)
+    }
+
+    /// The drawn bar plus one app's extras, so a reveal's poll doesn't message every app.
+    @concurrent
+    private static func readItems(of id: BundleID) async -> [MenuBarItem] {
+        let apps = NSWorkspace.shared.runningApplications
+        guard let agent = apps.first(where: { $0.bundleIdentifier == agentBundleID }),
+              let owner = apps.first(where: { $0.bundleIdentifier == id }) else { return [] }
+        let drawn = drawnItems(agentPID: agent.processIdentifier)
+        let extras = appExtras(pid: owner.processIdentifier, bundleID: id,
+                               executableName: owner.executableURL?.lastPathComponent ?? "")
+        return ItemMatcher.match(drawn: drawn, extras: extras).filter { $0.bundleID == id }
+    }
+
     @concurrent
     private static func readItems() async -> [MenuBarItem] {
         let apps = NSWorkspace.shared.runningApplications

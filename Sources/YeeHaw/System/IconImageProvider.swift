@@ -8,8 +8,8 @@ import YeeHawCore
 /// capture the app's icon stands in.
 @MainActor
 final class IconImageProvider {
-    /// Edge of the app-icon fallback, in points: menu bar size.
-    static let fallbackSize: CGFloat = 18
+    /// Edge of the app-icon fallback, in points: a menu bar glyph's size.
+    static let fallbackSize: CGFloat = 16
     private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "glyphs")
     static let defaultDirectory = URL.applicationSupportDirectory.appending(path: "YeeHaw/Glyphs", directoryHint: .isDirectory)
 
@@ -174,8 +174,8 @@ final class IconImageProvider {
 
 /// Turns a raw crop of a menu bar item into a strip tile image.
 enum GlyphImage {
-    /// Tallest tile image, in points; taller glyphs are scaled down.
-    static let maxHeight: CGFloat = 22
+    /// Tallest tile image, in points (a menu bar glyph); taller glyphs are scaled down.
+    static let maxHeight: CGFloat = 16
     /// Alpha (0...255) above which a pixel counts as part of the glyph's bounding box.
     static let inkAlpha: UInt8 = 10
     /// Alpha below which a pixel counts as clear background (about 5%).
