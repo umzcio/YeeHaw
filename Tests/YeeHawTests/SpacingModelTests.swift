@@ -151,6 +151,42 @@ import YeeHawCore
         #expect(model.title == "Apply and Restart 1 App")
     }
 
+    @Test func appsLaunchedAfterAnOutsideChangeAreNotMarked() {
+        // YeeHaw stored 8; then the keys were deleted outside YeeHaw (`defaults delete`), and
+        // Fiddle and zStats opened afterwards at 16, before YeeHaw looked again.
+        let mac = Self.macAtEight()
+        mac.preferences = [:]
+        mac.now += 600
+        let model = Self.model(mac)
+        model.setApps([Self.app("Fiddle", launched: mac.now - 60), Self.app("zStats", launched: mac.now - 30)])
+        #expect(model.current == 16)
+        #expect(model.candidates.map(\.spacingAtLaunch) == [nil, nil])
+        #expect(model.candidates.map { model.note(for: $0) } == [nil, nil])
+        #expect(model.candidates.map(\.ticked) == [false, false])
+        #expect(!model.canApply)
+        #expect(mac.history?.latest == 16)
+        // Back at 8, both are ticked: as far as YeeHaw knows they draw 16.
+        model.value = 8
+        #expect(model.candidates.map { model.note(for: $0) } == [nil, nil])
+        #expect(model.candidates.map(\.ticked) == [true, true])
+    }
+
+    @Test func reReadingNoticesAnOutsideChange() {
+        let mac = Self.macAtEight()
+        let model = Self.model(mac)
+        model.setApps([Self.app("Fiddle", launched: mac.now + 60)])
+        #expect(model.candidates[0].spacingAtLaunch == 8)
+        // The keys are deleted outside YeeHaw while the window is open.
+        mac.preferences = [:]
+        mac.now += 600
+        model.reloadCurrent()
+        #expect(model.current == 16)
+        #expect(model.value == 16)
+        #expect(model.candidates[0].spacingAtLaunch == nil)
+        #expect(model.note(for: model.candidates[0]) == nil)
+        #expect(!model.candidates[0].ticked)
+    }
+
     @Test func strayPaddingKeyEnablesApplyAtTheDefault() {
         let mac = FakeSpacingMac()
         mac.preferences = ["NSStatusItemSelectionPadding": 4]

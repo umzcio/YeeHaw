@@ -117,6 +117,7 @@ final class SpacingModel {
         current = stored.value
         value = stored.value
         needsCleanup = !stored.isCanonical(for: stored.value)
+        _ = applier.reconcileHistory()
     }
 
     var isApplying: Bool { progress != nil }
@@ -157,7 +158,7 @@ final class SpacingModel {
     /// and reopen then, and the list stays as it was when Apply began.
     func setApps(_ apps: [RunningMenuBarApp]) {
         guard !isApplying else { return }
-        let history = applier.history
+        let history = applier.reconcileHistory()
         candidates = SpacingPlan.candidates(apps, own: OwnIconLocator.bundleID).map { candidate in
             SpacingCandidate(app: candidate.app, ticked: false,
                              spacingAtLaunch: SpacingHistory.spacing(atLaunch: candidate.app.launchDate, history: history))
@@ -172,10 +173,16 @@ final class SpacingModel {
     }
 
     /// Re-reads the stored value (another app may have changed it), keeping the slider where the
-    /// user put it unless it still sat at the old value.
+    /// user put it unless it still sat at the old value. After an outside change, what each
+    /// listed app picked up at launch is re-derived from the restarted history.
     func reloadCurrent() {
         guard !isApplying else { return }
         let stored = applier.storedState()
+        let history = applier.reconcileHistory()
+        for index in candidates.indices {
+            let launched = SpacingHistory.spacing(atLaunch: candidates[index].app.launchDate, history: history)
+            if candidates[index].spacingAtLaunch != launched { candidates[index].spacingAtLaunch = launched }
+        }
         let followSlider = value == current
         current = stored.value
         needsCleanup = !stored.isCanonical(for: stored.value)

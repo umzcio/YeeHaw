@@ -72,7 +72,9 @@ public struct StoredSpacing: Equatable, Sendable {
 }
 
 /// The spacings YeeHaw has stored and when, so it can tell which running apps launched before
-/// the last change and still draw the old spacing.
+/// the last change and still draw the old spacing. Only YeeHaw's own changes are recorded; one
+/// made outside it (`defaults write`, `defaults delete`) is noticed when the stored value no
+/// longer matches `latest`, and the history starts again from then (`reconciled`).
 public struct SpacingHistory: Codable, Equatable, Sendable {
     public struct Change: Codable, Equatable, Sendable {
         public var date: Date
@@ -85,9 +87,26 @@ public struct SpacingHistory: Codable, Equatable, Sendable {
     /// The spacing before the oldest change kept.
     public private(set) var before: Int
     public private(set) var changes: [Change] = []
+    /// When the history starts: an app launched earlier draws an unknown spacing. Nil when it
+    /// reaches back to YeeHaw's first change, before which every app had `before`.
+    public private(set) var since: Date?
 
-    public init(before: Int) {
+    public init(before: Int, since: Date? = nil) {
         self.before = before
+        self.since = since
+    }
+
+    /// The spacing the history says is stored now.
+    public var latest: Int {
+        changes.last?.value ?? before
+    }
+
+    /// `history` if it still matches the `stored` value, else a fresh one starting at `date`
+    /// with that value: something outside YeeHaw changed the spacing at an unknown time, so
+    /// apps launched before `date` draw an unknown spacing.
+    public static func reconciled(_ history: SpacingHistory?, stored: Int, at date: Date) -> SpacingHistory? {
+        guard let history, history.latest != stored else { return history }
+        return SpacingHistory(before: stored, since: date)
     }
 
     public mutating func record(_ value: Int, at date: Date) {
@@ -103,10 +122,13 @@ public struct SpacingHistory: Codable, Equatable, Sendable {
     }
 
     /// The spacing an app launched at `date` picked up, as far as YeeHaw knows: nil when YeeHaw
-    /// has never changed it (every app has what's stored), and the oldest known value when the
-    /// launch date is unknown.
+    /// has never changed it (every app has what's stored) or the app launched before the history
+    /// starts, and the oldest known value when the launch date is unknown.
     public static func spacing(atLaunch date: Date?, history: SpacingHistory?) -> Int? {
         guard let history else { return nil }
+        if let since = history.since {
+            guard let date, date >= since else { return nil }
+        }
         guard let date else { return history.before }
         return history.spacing(atLaunch: date)
     }

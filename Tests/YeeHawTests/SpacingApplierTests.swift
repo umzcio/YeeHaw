@@ -185,6 +185,20 @@ final class FakeSpacingMac {
         #expect(mac.history == nil)
     }
 
+    @Test func applyAfterAnOutsideChangeRecordsOntoAFreshHistory() async {
+        // YeeHaw stored 8, then `defaults write -g NSStatusItemSpacing 4` changed it outside.
+        let mac = FakeSpacingMac()
+        var history = SpacingHistory(before: 16)
+        history.record(8, at: mac.now)
+        mac.history = history
+        mac.preferences = ["NSStatusItemSpacing": 4, "NSStatusItemSelectionPadding": 4]
+        mac.now += 600
+        _ = await Self.applier(mac).apply(12, relaunch: [])
+        #expect(mac.history?.before == 4)
+        #expect(mac.history?.since == mac.now)
+        #expect(mac.history?.changes.map(\.value) == [12])
+    }
+
     @Test func recordsEachChangeOfValue() async {
         let mac = FakeSpacingMac()
         let applier = Self.applier(mac)
@@ -195,7 +209,7 @@ final class FakeSpacingMac {
         // Restarting at the same value isn't a change.
         _ = await applier.apply(8, relaunch: [])
         #expect(mac.history?.changes.count == 1)
-        #expect(applier.history == mac.history)
+        #expect(applier.reconcileHistory() == mac.history)
     }
 
     // MARK: Restarting

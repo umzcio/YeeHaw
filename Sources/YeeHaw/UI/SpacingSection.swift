@@ -237,7 +237,6 @@ private struct SpacingAppRow: View {
         .toggleStyle(.checkbox)
         .padding(.horizontal, Self.horizontalPadding)
         .frame(height: height)
-        .accessibilityValue(note ?? "")
         .accessibilityHint(candidate.app.hasVisibleWindows
                            ? "Restarting it closes its windows and interrupts what’s open in them." : "")
     }

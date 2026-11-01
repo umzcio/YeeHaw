@@ -113,7 +113,17 @@ final class SpacingApplier {
         !storedState().isCanonical(for: value)
     }
 
-    var history: SpacingHistory? { system.loadHistory() }
+    /// The spacings YeeHaw has stored, and when. If the stored value no longer matches (it was
+    /// changed outside YeeHaw), the history starts again from now and is saved that way.
+    func reconcileHistory() -> SpacingHistory? {
+        let history = system.loadHistory()
+        let stored = storedState().value
+        guard let fresh = SpacingHistory.reconciled(history, stored: stored, at: system.now()),
+              fresh != history else { return history }
+        Self.log.notice("Spacing: changed outside YeeHaw to \(stored, privacy: .public); history starts again")
+        system.saveHistory(fresh)
+        return fresh
+    }
 
     /// The user showed the app, or it quit: its windows count again.
     func forgetHidden(_ pid: Int32) {
@@ -136,6 +146,7 @@ final class SpacingApplier {
             Self.log.error("Spacing: refused to restart \(app.bundleID, privacy: .public) at \(app.bundlePath, privacy: .public)")
         }
         var result = Result()
+        let history = reconcileHistory()
         let stored = storedState()
         let writes = stored.writes(for: value)
         if !writes.isEmpty {
@@ -146,7 +157,7 @@ final class SpacingApplier {
             }
             result.wrote = true
             if value != stored.value {
-                var history = system.loadHistory() ?? SpacingHistory(before: stored.value)
+                var history = history ?? SpacingHistory(before: stored.value)
                 history.record(value, at: system.now())
                 system.saveHistory(history)
             }

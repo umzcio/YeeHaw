@@ -105,6 +105,43 @@ import Testing
         #expect(history.spacing(atLaunch: Self.t0 - 1) == (29 - SpacingHistory.limit) % 32)
     }
 
+    @Test func historyThatMatchesTheStoredValueIsKept() {
+        var history = SpacingHistory(before: 16)
+        history.record(8, at: Self.t0)
+        #expect(history.latest == 8)
+        #expect(SpacingHistory.reconciled(history, stored: 8, at: Self.t0 + 60) == history)
+        #expect(SpacingHistory.reconciled(nil, stored: 8, at: Self.t0 + 60) == nil)
+    }
+
+    @Test func aChangeMadeOutsideYeeHawStartsAFreshHistory() {
+        // YeeHaw stored 8 at t0; then `defaults delete` put the Mac back at 16, noticed at t0 + 60.
+        var history = SpacingHistory(before: 16)
+        history.record(8, at: Self.t0)
+        let fresh = SpacingHistory.reconciled(history, stored: 16, at: Self.t0 + 60)
+        #expect(fresh?.latest == 16)
+        #expect(fresh?.changes.isEmpty == true)
+        #expect(fresh?.since == Self.t0 + 60)
+        // When the outside change happened is unknown, so apps that launched before it was
+        // noticed draw an unknown spacing; apps launched after have the stored one.
+        #expect(SpacingHistory.spacing(atLaunch: Self.t0 + 30, history: fresh) == nil)
+        #expect(SpacingHistory.spacing(atLaunch: Self.t0 - 30, history: fresh) == nil)
+        #expect(SpacingHistory.spacing(atLaunch: nil, history: fresh) == nil)
+        #expect(SpacingHistory.spacing(atLaunch: Self.t0 + 90, history: fresh) == 16)
+        // A later change YeeHaw makes is tracked from there.
+        var later = fresh!
+        later.record(4, at: Self.t0 + 120)
+        #expect(SpacingHistory.spacing(atLaunch: Self.t0 + 90, history: later) == 16)
+        #expect(SpacingHistory.spacing(atLaunch: Self.t0 + 150, history: later) == 4)
+        #expect(SpacingHistory.spacing(atLaunch: Self.t0 + 30, history: later) == nil)
+    }
+
+    @Test func historyWithoutAStartDecodesFromTheOldFormat() throws {
+        let old = Data(#"{"before":16,"changes":[{"date":0,"value":8}]}"#.utf8)
+        let history = try JSONDecoder().decode(SpacingHistory.self, from: old)
+        #expect(history.since == nil)
+        #expect(history.latest == 8)
+    }
+
     @Test func historyRoundTrips() throws {
         var history = SpacingHistory(before: 16)
         history.record(8, at: Self.t0)
