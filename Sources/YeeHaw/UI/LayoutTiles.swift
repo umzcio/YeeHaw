@@ -38,13 +38,31 @@ enum LayoutMetrics {
     }
 
     static func groupWidth(_ group: HiddenGroup) -> CGFloat {
-        let tiles = span(group.icons.map { tileWidth($0.image) }, spacing: groupSpacing)
-        return group.icons.count > 1 ? tiles + 2 * groupInset : tiles
+        groupWidth(group.icons.map { tileWidth($0.image) })
+    }
+
+    /// A hidden group's width for tiles `widths` wide: one tile alone, or several on a backing.
+    static func groupWidth(_ widths: [CGFloat]) -> CGFloat {
+        let tiles = span(widths, spacing: groupSpacing)
+        return widths.count > 1 ? tiles + 2 * groupInset : tiles
     }
 
     /// A row's width for its content: its tiles, the spacing between them and its padding.
     static func rowWidth(_ widths: [CGFloat]) -> CGFloat {
         span(widths, spacing: tileSpacing) + 2 * rowPadding
+    }
+
+    /// The rows' width with room for one incoming slot in either of them, so a slot opening
+    /// mid-drag never pushes a row's trailing tiles (the clock among them) past the well's edge,
+    /// and the well never resizes under the pointer. `bar` and `hidden` are the rows' tile and
+    /// group widths; `barIncoming` the widths hidden groups take when shown into the bar, and
+    /// `hiddenIncoming` the widths the bar's hideable apps take as a hidden group.
+    static func rowWidthWithHeadroom(bar: [CGFloat], hidden: [CGFloat], barIncoming: [CGFloat],
+                                     hiddenIncoming: [CGFloat], minimum: CGFloat = minRowWidth) -> CGFloat {
+        func room(_ incoming: [CGFloat]) -> CGFloat {
+            incoming.max().map { $0 + tileSpacing } ?? 0
+        }
+        return max(rowWidth(bar) + room(barIncoming), rowWidth(hidden) + room(hiddenIncoming), minimum)
     }
 }
 

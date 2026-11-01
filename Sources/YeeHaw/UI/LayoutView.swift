@@ -208,10 +208,25 @@ struct LayoutView: View {
         }
     }
 
+    /// Both rows share one width, with room for a slot to open in either during a drag (the
+    /// slots' widths match the ones `startDrag` gives the held tile).
     private var rowWidth: CGFloat {
-        let bar = LayoutMetrics.rowWidth(model.bar.map { LayoutMetrics.tileWidth($0.image) })
-        let hidden = LayoutMetrics.rowWidth(model.hidden.map(LayoutMetrics.groupWidth))
-        return min(model.rowWidth(natural: max(bar, hidden, LayoutMetrics.minRowWidth)), model.maxRowWidth)
+        let shown = model.hidden.map { group in
+            LayoutMetrics.span(group.icons.map { LayoutMetrics.tileWidth($0.image) }, spacing: LayoutMetrics.tileSpacing)
+        }
+        // An app hides as one group of all its tiles.
+        var hideable: [String: [CGFloat]] = [:], order: [String] = []
+        for tile in model.bar where tile.capability.hideRefusal == nil {
+            let app = tile.item.bundleID ?? tile.id
+            if hideable[app] == nil { order.append(app) }
+            hideable[app, default: []].append(LayoutMetrics.tileWidth(tile.image))
+        }
+        let hidden = order.map { LayoutMetrics.groupWidth(hideable[$0, default: []]) }
+        let natural = LayoutMetrics.rowWidthWithHeadroom(
+            bar: model.bar.map { LayoutMetrics.tileWidth($0.image) },
+            hidden: model.hidden.map(LayoutMetrics.groupWidth),
+            barIncoming: shown, hiddenIncoming: hidden)
+        return min(model.rowWidth(natural: natural), model.maxRowWidth)
     }
 
     private var barRow: some View {

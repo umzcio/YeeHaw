@@ -146,3 +146,36 @@ private final class StubBar: MenuBarReading, PreferencesFile, StateStoring, Slee
         #expect(LayoutGeometry.slotMinX(insertion: 3, from: 0, spans: Self.spans, width: 30, spacing: 6, rowStart: 7) == 82)
     }
 }
+
+@Suite struct LayoutMetricsHeadroomTests {
+    /// Bar tiles 40 and 120 wide (natural 40 + 6 + 120 + 14 = 180); one hidden group 80 wide
+    /// (natural 94). A group shown into the bar takes 70; an app hidden from the bar takes 46.
+    @Test func theRowsLeaveRoomForOneIncomingSlotInEitherRow() {
+        // The bar with the widest group shown into it: 180 + 70 + 6 = 256, under the minimum.
+        #expect(LayoutMetrics.rowWidthWithHeadroom(bar: [40, 120], hidden: [80], barIncoming: [70, 30],
+                                                   hiddenIncoming: [46], minimum: 200) == 256)
+        // Nothing incoming fits under the minimum: the minimum wins.
+        #expect(LayoutMetrics.rowWidthWithHeadroom(bar: [40, 120], hidden: [80], barIncoming: [70],
+                                                   hiddenIncoming: [46], minimum: 300) == 300)
+    }
+
+    @Test func theHiddenRowCanBeTheOneThatNeedsTheRoom() {
+        // Hidden natural 4 × 100 + 3 × 6 + 14 = 432, plus the widest app (120) and spacing: 558.
+        #expect(LayoutMetrics.rowWidthWithHeadroom(bar: [40], hidden: [100, 100, 100, 100], barIncoming: [30],
+                                                   hiddenIncoming: [46, 120], minimum: 200) == 558)
+    }
+
+    @Test func aRowWithNothingThatCanComeInGetsNoHeadroom() {
+        // No hidden groups to show and no app that can be hidden: just the natural widths.
+        #expect(LayoutMetrics.rowWidthWithHeadroom(bar: [40, 120], hidden: [], barIncoming: [],
+                                                   hiddenIncoming: [], minimum: 100) == 180)
+    }
+}
+
+@Suite struct LayoutMetricsGroupWidthTests {
+    @Test func aLoneTileHasNoBackingAndSeveralShareOne() {
+        #expect(LayoutMetrics.groupWidth([40]) == 40)
+        // 40 + 2 + 30, plus the backing's inset either side.
+        #expect(LayoutMetrics.groupWidth([40, 30]) == 78)
+    }
+}
