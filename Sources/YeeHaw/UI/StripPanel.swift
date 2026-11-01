@@ -1,4 +1,5 @@
 import AppKit
+import os
 import SwiftUI
 import YeeHawCore
 
@@ -22,6 +23,7 @@ final class StripPanel: NSPanel {
     /// Closest the strip comes to a screen edge.
     nonisolated static let screenInset: CGFloat = 8
 
+    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "strip")
     private let model: StripModel
     private let hosting: NSHostingView<StripView>
     private var monitors: [Any] = []
@@ -39,13 +41,10 @@ final class StripPanel: NSPanel {
     /// Why the strip closes.
     enum DismissReason { case requested, outsideClick, resignedKey }
 
-    /// `onClose` runs once each time a shown strip starts to close.
-    init(menu: NSMenu, onSelect: @escaping (BundleID) -> Void, onFix: @escaping () -> Void,
-         onClose: @escaping () -> Void) {
+    init(menu: NSMenu, onSelect: @escaping (BundleID) -> Void, onFix: @escaping () -> Void) {
         model = StripModel(onSelect: onSelect, onFix: onFix)
         hosting = NSHostingView(rootView: StripView(model: model))
         hosting.sizingOptions = []
-        self.onClose = onClose
         secondaryMenu = menu
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         isFloatingPanel = true
@@ -62,7 +61,6 @@ final class StripPanel: NSPanel {
         model.onMore = { [weak self] anchor in self?.popUpMenu(below: anchor) }
     }
 
-    private let onClose: () -> Void
     private let secondaryMenu: NSMenu
 
     override var canBecomeKey: Bool { true }
@@ -82,7 +80,7 @@ final class StripPanel: NSPanel {
     /// YeeHaw's icon in screen coordinates, kept fully on `screen` (the status button's screen).
     func show(below anchor: NSRect, items: [StripEntry], notice: String? = nil, screen: NSScreen? = nil) {
         generation += 1
-        iconRect = anchor
+        iconRect = Self.iconHitRect(anchor)
         let target = screen ?? NSScreen.screens.first { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) }
             ?? NSScreen.main
         let visible = target?.visibleFrame ?? anchor
@@ -117,17 +115,36 @@ final class StripPanel: NSPanel {
     func dismiss(_ reason: DismissReason = .requested) {
         guard isShown else { return }
         isShown = false
+        Self.log.info("Strip closing: \(String(describing: reason), privacy: .public)")
         if reason != .requested { lastAutoDismissal = .now }
         stopMonitoring()
         generation += 1
         let closing = generation
-        onClose()
         withAnimation(.easeIn(duration: 0.12)) {
             model.presented = false
         } completion: { [weak self] in
             guard let self, self.generation == closing else { return }
             self.orderOut(nil)
         }
+    }
+
+    /// How far past the button's frame a click still counts as a click on the icon: MenuBarAgent's
+    /// hit area includes the padding between items, and `NSRect.contains` excludes the max edges.
+    nonisolated static let iconHitSlop: CGFloat = 4
+
+    /// The screen area whose clicks belong to YeeHaw's icon: its frame widened by `iconHitSlop`
+    /// and run up to the top of the screen.
+    nonisolated static func iconHitRect(_ anchor: NSRect) -> NSRect {
+        NSRect(x: anchor.minX - iconHitSlop, y: anchor.minY - iconHitSlop,
+               width: anchor.width + 2 * iconHitSlop, height: anchor.height + 2 * iconHitSlop + 100)
+    }
+
+    /// A Quartz global point (top-left origin of the primary display) in AppKit screen
+    /// coordinates (bottom-left origin).
+    nonisolated static func appKitScreenPoint(_ quartz: CGPoint?, primaryHeight: CGFloat? = nil) -> NSPoint? {
+        guard let quartz else { return nil }
+        let height = primaryHeight ?? CGDisplayBounds(CGMainDisplayID()).height
+        return NSPoint(x: quartz.x, y: height - quartz.y)
     }
 
     /// The visible strip's size (without the transparent margins) for the model's contents.
@@ -155,8 +172,11 @@ final class StripPanel: NSPanel {
     private func startMonitoring() {
         // Clicks in other apps, except on YeeHaw's own icon, whose button toggles the strip.
         if let monitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] _ in
-                let location = NSEvent.mouseLocation
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] event in
+                // Where the click happened, not where the pointer is by the time this runs.
+                // `locationInWindow` is relative to another app's window here, so the global
+                // Quartz location (top-left origin) is flipped into AppKit screen coordinates.
+                let location = Self.appKitScreenPoint(event.cgEvent?.location) ?? NSEvent.mouseLocation
                 MainActor.assumeIsolated {
                     guard let self, !self.iconRect.contains(location) else { return }
                     self.dismiss(.outsideClick)

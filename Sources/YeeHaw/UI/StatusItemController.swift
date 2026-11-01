@@ -30,7 +30,6 @@ final class StatusItemController: NSObject {
     /// Set when a click in the strip found no drawn YeeHaw icon to reveal next to.
     private var ownIconMissing = false
     private var refreshTask: Task<Void, Never>?
-    private var highlight: HighlightKeeper!
     /// A click on the icon within this long after the strip closed by itself is the click that
     /// closed it (ruling I2), so it leaves the strip closed instead of reopening it.
     nonisolated static let reopenGuard: Duration = .milliseconds(300)
@@ -59,11 +58,7 @@ final class StatusItemController: NSObject {
             onFix: { [weak self] in
                 self?.strip.dismiss()
                 self?.openSettings()
-            },
-            onClose: { [weak self] in self?.highlight.stop() })
-        highlight = HighlightKeeper(
-            isHighlighted: { [weak self] in self?.statusItem.button?.isHighlighted ?? false },
-            setHighlighted: { [weak self] in self?.statusItem.button?.highlight($0) })
+            })
         // Photograph a revealed item while it's drawn; a hidden one can't be photographed later.
         reveal.onDrawn = { [icons] item in await icons.captureIfPermitted([item]) }
     }
@@ -168,7 +163,6 @@ final class StatusItemController: NSObject {
         guard let button = statusItem.button, let window = button.window else { return }
         let anchor = window.convertToScreen(button.convert(button.bounds, to: nil))
         strip.show(below: anchor, items: entries(), notice: notice(), screen: window.screen)
-        highlight.start()
 
         // Re-read the bar in the background: YeeHaw's icon may have moved, and drawn items get
         // fresh photographs. The strip itself opens at once from the saved state.
@@ -234,46 +228,5 @@ final class StatusItemController: NSObject {
             return url.deletingPathExtension().lastPathComponent
         }
         return id
-    }
-}
-
-/// Keeps YeeHaw's icon highlighted while the strip is open. The status button clears its own
-/// highlight when its click tracking ends, so a highlight set from the click's action doesn't
-/// stick. Instead, while started, every pass of the main run loop in the default mode (never
-/// during tracking, which runs in the event-tracking mode) puts the highlight back.
-@MainActor
-final class HighlightKeeper {
-    private let isHighlighted: () -> Bool
-    private let setHighlighted: (Bool) -> Void
-    private var observer: CFRunLoopObserver?
-
-    init(isHighlighted: @escaping () -> Bool, setHighlighted: @escaping (Bool) -> Void) {
-        self.isHighlighted = isHighlighted
-        self.setHighlighted = setHighlighted
-    }
-
-    var isActive: Bool { observer != nil }
-
-    func start() {
-        sync(wanted: true)
-        guard observer == nil else { return }
-        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, true, 0) {
-            [weak self] _, _ in
-            MainActor.assumeIsolated { self?.sync(wanted: true) }
-        }
-        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .defaultMode)
-        self.observer = observer
-    }
-
-    func stop() {
-        if let observer {
-            CFRunLoopObserverInvalidate(observer)
-            self.observer = nil
-        }
-        sync(wanted: false)
-    }
-
-    private func sync(wanted: Bool) {
-        if isHighlighted() != wanted { setHighlighted(wanted) }
     }
 }

@@ -7,13 +7,16 @@ import YeeHawCore
 /// The group container folder is protected (opening it fails with EPERM), so the granted file
 /// itself is watched, under its security scope. cfprefsd replaces the file atomically, so the
 /// watch is re-armed on the new file after a delete, rename or attribute change. If the file
-/// can't be opened, it polls instead; `onChange` callers diff, so a poll with no change is a no-op.
+/// can't be opened, it polls instead (`onChange` callers diff, so a poll with no change is cheap)
+/// and tries the file again every `fileRetryInterval`, going back to watching it once it opens.
 @MainActor
 final class AllowListWatcher {
     enum Mode: String { case file, poll }
 
     static let debounce: Duration = .milliseconds(300)
     static let pollInterval: Duration = .seconds(2)
+    /// While polling, how often to try watching the file again.
+    static let fileRetryInterval: Duration = .seconds(30)
     /// Re-opening the replaced file: a few tries, a moment apart, before falling back to polling.
     static let reopenAttempts = 5
     static let reopenDelay: Duration = .milliseconds(100)
@@ -119,9 +122,21 @@ final class AllowListWatcher {
         Self.log.notice("Polling the Allow list every \(Self.pollInterval, privacy: .public)")
         poller?.cancel()
         poller = Task { [weak self] in
+            var sinceRetry: Duration = .zero
             while !Task.isCancelled {
                 try? await Task.sleep(for: Self.pollInterval)
                 guard !Task.isCancelled, let self else { return }
+                sinceRetry += Self.pollInterval
+                if sinceRetry >= Self.fileRetryInterval {
+                    sinceRetry = .zero
+                    if self.armFileWatch() {
+                        self.mode = .file
+                        Self.log.notice("Watching the Allow list file again; polling stopped")
+                        self.poller = nil
+                        self.onChange() // anything missed between the last poll and the watch
+                        return
+                    }
+                }
                 self.onChange()
             }
         }

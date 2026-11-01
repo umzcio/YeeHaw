@@ -24,6 +24,8 @@ public enum ControllerError: Error, Equatable {
     public static let pollInterval: Double = 0.05
 
     public private(set) var state: HidingState
+    /// What the store last held, so an unchanged state is never written again.
+    private var stored: HidingState
     /// Last read, drawn only.
     public private(set) var items: [MenuBarItem] = []
 
@@ -46,6 +48,7 @@ public enum ControllerError: Error, Equatable {
         self.store = store
         self.sleeper = sleeper
         state = store.load()
+        stored = state
     }
 
     // MARK: Lifecycle
@@ -137,9 +140,11 @@ public enum ControllerError: Error, Equatable {
     }
 
     /// Call when the Allow file changed on disk. Only changes since YeeHaw's own last write count.
+    /// Cheap when nothing changed (a poll): no bar read and no save.
     public func allowListChanged() async throws {
         try await gated {
             let current = try readAllow().snapshot
+            guard current != lastSnapshot else { return }
             save(Reconciler.externalChange(state, before: lastSnapshot, after: current))
             lastSnapshot = current
             await reload()
@@ -232,9 +237,12 @@ public enum ControllerError: Error, Equatable {
         actions.compactMap { if case .switchOn(let id) = $0 { id } else { nil } }
     }
 
+    /// Makes `next` the state, writing the store only when it differs from what the store holds.
     private func save(_ next: HidingState) {
         state = next
+        guard state != stored else { return }
         store.save(state)
+        stored = state
     }
 
     private func reload() async {
@@ -343,7 +351,7 @@ public enum ControllerError: Error, Equatable {
     private func markGranted(_ file: GrantedFile) {
         if state.needsGrant.contains(file) {
             state.needsGrant.remove(file)
-            store.save(state)
+            save(state)
         }
     }
 
@@ -375,7 +383,7 @@ public enum ControllerError: Error, Equatable {
     private func recordGrantFailure(_ error: Error) -> Error {
         guard case GrantError.needsGrant(let file) = error else { return error }
         state.needsGrant.insert(file)
-        store.save(state)
+        save(state)
         return ControllerError.needsGrant(file)
     }
 

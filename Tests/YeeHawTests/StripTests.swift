@@ -121,47 +121,19 @@ import Testing
     }
 }
 
-@Suite(.serialized) @MainActor struct HighlightKeeperTests {
-    final class Button { var highlighted = false; var sets = 0 }
-
-    /// Runs the main run loop in `mode` for a moment. A timer keeps it from returning at once
-    /// for want of sources, so it really waits (and fires before-waiting observers).
-    static func spin(_ mode: RunLoop.Mode) {
-        let timer = Timer(timeInterval: 0.02, repeats: false) { _ in }
-        RunLoop.main.add(timer, forMode: mode)
-        RunLoop.main.run(mode: mode, before: Date(timeIntervalSinceNow: 0.05))
-        timer.invalidate()
+@Suite struct IconHitRectTests {
+    @Test func coversTheIconsEdgesAndTheTopOfTheScreen() {
+        let rect = StripPanel.iconHitRect(NSRect(x: 1514, y: 1290, width: 24, height: 39))
+        #expect(rect.contains(NSPoint(x: 1538, y: 1317)))   // the right edge, where a click lands
+        #expect(rect.contains(NSPoint(x: 1514, y: 1328.5))) // the left edge, top row
+        #expect(!rect.contains(NSPoint(x: 1300, y: 1317)))  // elsewhere in the menu bar
+        #expect(!rect.contains(NSPoint(x: 1526, y: 1250)))  // the strip area below
     }
+}
 
-    static func keeper(_ button: Button) -> HighlightKeeper {
-        HighlightKeeper(isHighlighted: { button.highlighted },
-                        setHighlighted: { button.highlighted = $0; button.sets += 1 })
-    }
-
-    @Test func restoresAHighlightClearedByTrackingOnlyOutsideTracking() {
-        let button = Button()
-        let keeper = Self.keeper(button)
-        keeper.start()
-        #expect(button.highlighted)
-        button.highlighted = false // the button's tracking ended and cleared it
-        Self.spin(.eventTracking)
-        #expect(!button.highlighted)
-        Self.spin(.default)
-        #expect(button.highlighted)
-        keeper.stop()
-        #expect(!button.highlighted)
-        #expect(!keeper.isActive)
-    }
-
-    @Test func stoppedKeeperLeavesTheButtonAlone() {
-        let button = Button()
-        let keeper = Self.keeper(button)
-        keeper.start()
-        keeper.stop()
-        let sets = button.sets
-        button.highlighted = true
-        Self.spin(.default)
-        #expect(button.highlighted)
-        #expect(button.sets == sets)
+@Suite struct ClickLocationTests {
+    @Test func quartzPointsFlipIntoAppKitScreenCoordinates() {
+        #expect(StripPanel.appKitScreenPoint(CGPoint(x: 1538, y: 12), primaryHeight: 1329) == NSPoint(x: 1538, y: 1317))
+        #expect(StripPanel.appKitScreenPoint(nil, primaryHeight: 1329) == nil)
     }
 }

@@ -20,6 +20,7 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     private var _log: [String] = []
     private var _allowWrites = 0
     private var _positionWrites = 0
+    private var _itemReads = 0
 
     init(allow: [(BundleID, Bool)], positions: [String: Double] = [:], running: Set<BundleID>? = nil,
          drawn: [BundleID: [MenuBarItem]] = [:], appleItems: [MenuBarItem] = [],
@@ -66,6 +67,8 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     var positions: [String: Double] { locked { $0._positions } }
     var allowWrites: Int { locked { $0._allowWrites } }
     var positionWrites: Int { locked { $0._positionWrites } }
+    /// How many times the bar was read (`items()`).
+    var itemReads: Int { locked { $0._itemReads } }
     var log: [String] { locked { $0._log } }
 
     /// `honorsWrites = false`: the bar keeps drawing what it drew before.
@@ -126,6 +129,7 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     func items() async -> [MenuBarItem] {
         let live = allowSnapshot
         return locked { s in
+            s._itemReads += 1
             let allow = s._frozenAllow ?? live
             let thirdParty = s._drawn
                 .filter { s._running.contains($0.key) && allow[$0.key] == true }
@@ -748,6 +752,50 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(c.state.journal.isEmpty)
         #expect(c.items.contains { $0.bundleID == Self.a })
         #expect(rig.store.load() == c.state)
+    }
+
+    @Test func unchangedAllowListReadsNothingElseAndSavesNothing() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true), (Self.b, true)]))
+        let c = rig.controller()
+        try await c.launch()
+        try await c.hide(Self.a)
+        let reads = rig.system.itemReads
+        let saves = rig.store.saveCount
+        try await c.allowListChanged()
+        try await c.allowListChanged()
+        #expect(rig.system.itemReads == reads)
+        #expect(rig.store.saveCount == saves)
+        #expect(c.state.hidden == [Self.a])
+    }
+
+    @Test func changedAllowListStillReconciles() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true), (Self.b, true)]))
+        let c = rig.controller()
+        try await c.launch()
+        try await c.hide(Self.a)
+        try await c.allowListChanged() // unchanged: skipped
+        try rig.system.setExternally(Self.a, allowed: true)
+        let reads = rig.system.itemReads
+        try await c.allowListChanged()
+        #expect(c.state.hidden.isEmpty)
+        #expect(c.state.journal.isEmpty)
+        #expect(rig.system.itemReads == reads + 1)
+        #expect(rig.store.load() == c.state)
+    }
+
+    @Test func anUnchangedStateIsNotSavedAgain() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true), (Self.b, true)]),
+                           state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        try await c.launch()
+        let saves = rig.store.saveCount
+        // The user switches B off: the list changed, but YeeHaw's state didn't, so it isn't saved.
+        try rig.system.setExternally(Self.b, allowed: false)
+        let reads = rig.system.itemReads
+        try await c.allowListChanged()
+        #expect(rig.system.itemReads == reads + 1)
+        #expect(rig.store.saveCount == saves)
+        #expect(c.state == HidingState(hidden: [Self.a], journal: [Self.a]))
     }
 
     @Test func externalSwitchOnSurvivesUnrelatedWrite() async throws {
