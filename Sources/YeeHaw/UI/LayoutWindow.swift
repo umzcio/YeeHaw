@@ -66,6 +66,8 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
         model.onDraggingChange = { [weak self] dragging in self?.watchEscape(dragging) }
         // Apps quit and reopen during Apply; read the list again once it's done.
         spacing.onApplied = { [weak self] in self?.refresh() }
+        // Layout edits wait while Apply restarts apps.
+        spacing.onApplyingChange = { [weak model] applying in model?.spacingBusy = applying }
     }
 
     func show() {
@@ -155,11 +157,17 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
         return main
     }
 
-    /// The rows may grow to the width of the screen the window is on, less a margin.
+    /// The rows may grow to the width of the screen the window is on, less a margin, and the
+    /// content to its height less the title bar and a margin; beyond that the content scrolls.
     private func updateMaxRowWidth() {
-        let visible = (window.screen ?? NSScreen.main)?.visibleFrame.width ?? 1440
-        model.maxRowWidth = visible - 2 * LayoutMetrics.windowPadding - 160
+        let visible = (window.screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        model.maxRowWidth = visible.width - 2 * LayoutMetrics.windowPadding - 160
+        let titleBar = window.frameRect(forContentRect: .zero).height
+        model.maxContentHeight = max(visible.height - titleBar - Self.screenMargin, 240)
     }
+
+    /// Room kept free above and below the window when it's as tall as the screen allows.
+    static let screenMargin: CGFloat = 24
 
     /// Call after the controller applied an Allow-list change from disk.
     func allowListChanged() {
@@ -177,7 +185,8 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
             await model.refresh()
             spacing.reloadCurrent()
             let controller = model.controller
-            spacing.setApps(await RunningMenuBarApps.list(drawn: controller.items, hidden: controller.state.hidden))
+            spacing.setApps(await RunningMenuBarApps.list(drawn: controller.items, hidden: controller.state.hidden,
+                                                         exempt: spacing.applier.hiddenAfterRestart))
         }
     }
 

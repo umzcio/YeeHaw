@@ -18,7 +18,6 @@ struct SpacingSection: View {
     let width: CGFloat
     /// A layout edit is under way; Apply waits for it.
     let layoutBusy: Bool
-    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -38,7 +37,7 @@ struct SpacingSection: View {
                 .padding(.bottom, 6)
                 .accessibilityAddTraits(.isHeader)
             appList
-            Text("Apps read the spacing when they start, so Apply quits and reopens the ticked apps one at a time. Unticked apps, macOS’s own icons and YeeHaw change the next time they start.")
+            Text(footnote)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -56,6 +55,13 @@ struct SpacingSection: View {
         .frame(width: width, alignment: .leading)
     }
 
+    static let footnoteRestart = "Apps pick up the spacing when they open, so Apply quits and reopens the selected apps one at a time."
+    static let footnoteOthers = "Other apps change when they next open; macOS’s own icons and YeeHaw change after you log out."
+
+    private var footnote: String {
+        model.candidates.isEmpty ? Self.footnoteOthers : "\(Self.footnoteRestart) \(Self.footnoteOthers)"
+    }
+
     /// The menu bar's height on the main screen (39 pt on a notched MacBook).
     static var barHeight: CGFloat {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return NSStatusBar.system.thickness }
@@ -68,6 +74,7 @@ struct SpacingSection: View {
     private var sliderRow: some View {
         HStack(spacing: 12) {
             // A tick every 8 pt (the default, 16, among them); the value snaps to whole points.
+            // (A `step` would draw a dot at every point.) Arrow keys move it 1 pt.
             Slider(value: sliderValue, in: Double(SpacingPlan.range.lowerBound)...Double(SpacingPlan.range.upperBound),
                    neutralValue: Double(SpacingPlan.defaultValue)) {
                 Text("Spacing")
@@ -80,6 +87,11 @@ struct SpacingSection: View {
                                                       by: Self.tickEvery)).map(Double.init), id: \.self) { value in
                     SliderTick(value)
                 }
+            }
+            .onKeyPress(keys: [.leftArrow, .downArrow, .rightArrow, .upArrow]) { press in
+                let step = press.key == .leftArrow || press.key == .downArrow ? -1 : 1
+                model.value = SpacingPlan.clamped(model.value + step)
+                return .handled
             }
             .labelsHidden()
             .accessibilityValue("\(model.value) points")
@@ -95,6 +107,7 @@ struct SpacingSection: View {
                 .frame(width: 44, alignment: .trailing)
                 .accessibilityHidden(true)
             Button("Default") { model.value = SpacingPlan.defaultValue }
+                .controlSize(.small)
                 .disabled(model.value == SpacingPlan.defaultValue)
                 .help("macOS’s standard spacing, \(SpacingPlan.defaultValue) pt")
         }
@@ -125,11 +138,7 @@ struct SpacingSection: View {
                 rows
             }
         }
-        .background(rowWellColor, in: shape)
-        .overlay {
-            shape.strokeBorder(contrast == .increased ? Color.primary.opacity(0.5) : Color(nsColor: .separatorColor),
-                               lineWidth: contrast == .increased ? 1 : 0.5)
-        }
+        .wellBox(shape)
         .clipShape(shape)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Apps to restart")
@@ -139,9 +148,12 @@ struct SpacingSection: View {
         VStack(spacing: 0) {
             ForEach(Array(model.candidates.enumerated()), id: \.element.id) { index, candidate in
                 if index > 0 {
-                    Divider().padding(.leading, 12)
+                    // Inset to the app icons, like a grouped list.
+                    Divider()
+                        .padding(.leading, SpacingAppRow.iconInset)
+                        .padding(.trailing, SpacingAppRow.horizontalPadding)
                 }
-                SpacingAppRow(candidate: candidate, height: Self.rowHeight) { ticked in
+                SpacingAppRow(candidate: candidate, note: model.note(for: candidate), height: Self.rowHeight) { ticked in
                     model.setTicked(ticked, for: candidate.id)
                 }
             }
@@ -165,21 +177,36 @@ struct SpacingSection: View {
                     .accessibilityAddTraits(.updatesFrequently)
             }
             Spacer(minLength: 12)
-            Button(SpacingModel.applyTitle(restarting: model.tickedCount)) {
+            // The section's commit action, prominent like Apple's own; no Return shortcut, so a
+            // stray key press can't restart apps.
+            Button(model.title) {
                 Task { await model.apply() }
             }
+            .buttonStyle(.borderedProminent)
             .disabled(!model.canApply || layoutBusy)
-            .help(model.canApply ? "Saves the spacing and restarts the ticked apps"
-                                 : "Move the slider to choose a new spacing")
+            .help(applyHelp)
         }
         .frame(minHeight: 22)
+    }
+
+    private var applyHelp: String {
+        if layoutBusy { return "Waits for the menu bar to finish updating" }
+        if !model.canApply { return "Move the slider to choose a new spacing" }
+        return model.isWriting ? "Saves the spacing and restarts the selected apps"
+                               : "Restarts the selected apps so they use the current spacing"
     }
 }
 
 /// One app in the restart list: its checkbox, icon and name, and a note when restarting it
 /// would interrupt open windows.
 private struct SpacingAppRow: View {
+    static let horizontalPadding: CGFloat = 12
+    /// Where the app icon starts: past the padding and the checkbox with its gap.
+    static let iconInset: CGFloat = horizontalPadding + 22
+
     let candidate: SpacingCandidate
+    /// A status to show at the trailing end: open windows, or an older spacing.
+    let note: String?
     let height: CGFloat
     let onToggle: (Bool) -> Void
 
@@ -194,21 +221,25 @@ private struct SpacingAppRow: View {
                 Text(candidate.app.name)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                if candidate.app.hasVisibleWindows {
-                    Label("Open windows", systemImage: "macwindow")
+                if let note {
+                    Text(note)
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                        .help("Restarting \(candidate.app.name) closes its windows and interrupts what’s open in them.")
+                        .lineLimit(1)
+                        .help(candidate.app.hasVisibleWindows
+                              ? "Restarting \(candidate.app.name) closes its windows and interrupts what’s open in them."
+                              : "\(candidate.app.name) opened before the spacing last changed.")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
         .toggleStyle(.checkbox)
-        .padding(.horizontal, 12)
+        .padding(.horizontal, Self.horizontalPadding)
         .frame(height: height)
+        .accessibilityValue(note ?? "")
         .accessibilityHint(candidate.app.hasVisibleWindows
-                           ? "Has open windows. Restarting it interrupts what’s open in them." : "")
+                           ? "Restarting it closes its windows and interrupts what’s open in them." : "")
     }
 }
 
@@ -256,7 +287,7 @@ struct SpacingPreviewBar: View {
         .clipShape(shape)
         .animation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0.12), value: spacing)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Preview")
+        .accessibilityLabel("Menu bar preview")
         .accessibilityValue("Menu bar icons \(spacing) points apart")
     }
 
@@ -296,13 +327,12 @@ struct SpacingPreviewBar: View {
 private struct SpacingReportBanner: View {
     let report: SpacingReport
     let onDismiss: () -> Void
-    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: SpacingSection.boxRadius, style: .continuous)
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Group {
-                if report.skipped.isEmpty {
+                if !report.isWarning {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.white, .green)
                 } else {
@@ -322,6 +352,7 @@ private struct SpacingReportBanner: View {
             }
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
@@ -337,11 +368,8 @@ private struct SpacingReportBanner: View {
         .padding(.leading, 12)
         .padding(.trailing, 9)
         .padding(.vertical, 10)
-        .background(rowWellColor, in: shape)
-        .overlay {
-            shape.strokeBorder(contrast == .increased ? Color.primary.opacity(0.5) : Color(nsColor: .separatorColor),
-                               lineWidth: contrast == .increased ? 1 : 0.5)
-        }
-        .accessibilityElement(children: .combine)
+        .wellBox(shape)
+        // The text reads as one element; Dismiss stays a button of its own.
+        .accessibilityElement(children: .contain)
     }
 }

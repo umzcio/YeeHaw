@@ -56,10 +56,16 @@ final class LayoutModel {
     /// True from the start of an edit until the rows show what the bar holds after it. Drags and
     /// other edits wait for it.
     private(set) var busy = false
+    /// A spacing Apply is restarting apps: their items come and go, so edits wait for it too.
+    var spacingBusy = false
+    /// Drags and edits wait while either is under way.
+    var editsLocked: Bool { busy || spacingBusy }
     private(set) var tileStyle: TileStyle = .system
     var message: LayoutMessage?
     /// The widest the rows may be before they scroll, from the screen the window is on.
     var maxRowWidth: CGFloat = 1200
+    /// The tallest the window's content may be before it scrolls, from the screen the window is on.
+    var maxContentHeight: CGFloat = 10_000
     /// Whether the keyboard focus is drawn: only once a key was pressed in the window, not after a
     /// click, the way macOS shows focus in lists.
     var showsFocusRing = false
@@ -220,7 +226,7 @@ final class LayoutModel {
     /// Moves `bar[from]` to insertion `to` of the Menu Bar row.
     @discardableResult
     func move(from: Int, to: Int) -> Task<Void, Never>? {
-        guard !busy, bar.indices.contains(from), bar[from].capability.canDrag else { return nil }
+        guard !editsLocked, bar.indices.contains(from), bar[from].capability.canDrag else { return nil }
         let to = LayoutRules.clampedInsertion(to, in: bar.map(\.item))
         let items = bar.map(\.item)
         guard let neighbors = LayoutRules.moveNeighbors(from: from, to: to, in: items, anchors: canAnchor) else { return nil }
@@ -237,7 +243,7 @@ final class LayoutModel {
     /// Hides the app owning `bar[from]` and puts its group at insertion `at` of the Hidden row.
     @discardableResult
     func hide(from: Int, at index: Int) -> Task<Void, Never>? {
-        guard !busy, bar.indices.contains(from), bar[from].capability.canHide,
+        guard !editsLocked, bar.indices.contains(from), bar[from].capability.canHide,
               let id = bar[from].item.bundleID else { return nil }
         let order = LayoutRules.hiddenOrder(hidden.map(\.id), placing: id, at: index)
         let name = StatusItemController.name(of: id)
@@ -261,7 +267,7 @@ final class LayoutModel {
     /// places its icons there.
     @discardableResult
     func show(_ id: BundleID, at index: Int?) -> Task<Void, Never>? {
-        guard !busy, hidden.contains(where: { $0.id == id }) else { return nil }
+        guard !editsLocked, hidden.contains(where: { $0.id == id }) else { return nil }
         let items = bar.map(\.item)
         let target = index.map {
             LayoutRules.showNeighbors(at: LayoutRules.clampedInsertion($0, in: items), in: items, anchors: canAnchor)
@@ -291,7 +297,7 @@ final class LayoutModel {
 
     /// Moves the hidden app `id` to insertion `at` of the Hidden row (the strip's order).
     func reorderHidden(_ id: BundleID, at index: Int) {
-        guard !busy else { return }
+        guard !editsLocked else { return }
         let order = LayoutRules.hiddenOrder(hidden.map(\.id), placing: id, at: index)
         guard order != hidden.map(\.id) else { return }
         hidden = order.compactMap { app in hidden.first { $0.id == app } }

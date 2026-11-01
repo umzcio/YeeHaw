@@ -90,6 +90,22 @@ private final class StubBar: MenuBarReading, PreferencesFile, StateStoring, Slee
         #expect(model.bar.map(\.item.bundleID) == [Self.b])
     }
 
+    @Test func aSpacingApplyBlocksEveryEdit() async throws {
+        // Apps quit and reopen during Apply; a move of one mid-restart would time out.
+        let (model, _, directory) = try await Self.model()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        model.spacingBusy = true
+        #expect(model.editsLocked)
+        #expect(model.move(from: 0, to: 2) == nil)
+        #expect(model.hide(from: 0, at: 0) == nil)
+        #expect(model.hidden.isEmpty)
+        model.spacingBusy = false
+        let hide = try #require(model.hide(from: 0, at: 0))
+        #expect(model.editsLocked)
+        await hide.value
+        #expect(!model.editsLocked)
+    }
+
     @Test func aFailedEditSnapsBackAndOffersToFixTheGrant() async throws {
         let (model, bar, directory) = try await Self.model()
         defer { try? FileManager.default.removeItem(at: directory) }

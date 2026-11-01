@@ -276,6 +276,28 @@ let rowWellColor = Color(nsColor: NSColor(name: "YeeHawLayoutWell") { appearance
         ? NSColor(white: 1, alpha: 0.06) : NSColor(white: 0, alpha: 0.04)
 })
 
+/// The grouped-box look shared by the window's boxes (the restart list and the messages): the
+/// well's shade and a separator edge, firmer under Increase Contrast.
+struct WellBox<Box: InsettableShape>: ViewModifier {
+    let shape: Box
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    func body(content: Content) -> some View {
+        content
+            .background(rowWellColor, in: shape)
+            .overlay {
+                shape.strokeBorder(contrast == .increased ? Color.primary.opacity(0.5) : Color(nsColor: .separatorColor),
+                                   lineWidth: contrast == .increased ? 1 : 0.5)
+            }
+    }
+}
+
+extension View {
+    func wellBox(_ shape: some InsettableShape) -> some View {
+        modifier(WellBox(shape: shape))
+    }
+}
+
 /// A row's rounded well. It takes a faint accent tint when a drop would land in it (the slot
 /// and the lifted tile carry the rest), and dims behind a dashed edge when the dragged tile can't
 /// go there.
@@ -322,7 +344,6 @@ struct MessageBanner: View {
     let width: CGFloat
     let onFix: () -> Void
     let onDismiss: () -> Void
-    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -354,11 +375,7 @@ struct MessageBanner: View {
         .padding(.trailing, 9)
         .padding(.vertical, 9)
         .frame(width: width)
-        .background(rowWellColor, in: shape)
-        .overlay {
-            shape.strokeBorder(contrast == .increased ? Color.primary.opacity(0.5) : Color(nsColor: .separatorColor),
-                               lineWidth: contrast == .increased ? 1 : 0.5)
-        }
+        .wellBox(shape)
         .accessibilityElement(children: .combine)
     }
 }

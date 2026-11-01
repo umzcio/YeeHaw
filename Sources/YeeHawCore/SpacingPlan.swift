@@ -6,14 +6,22 @@ public struct RunningMenuBarApp: Equatable, Sendable {
     /// The app bundle's path, e.g. `/Applications/DigUp.app`.
     public var bundlePath: String
     public var name: String
-    /// Whether it has windows open, which a restart would interrupt.
+    /// Whether it has windows open, which a restart would interrupt: hidden (Command-H),
+    /// minimized and other-Space windows count (see `SpacingPlan.hasOpenWindows`).
     public var hasVisibleWindows: Bool
+    /// Hidden with Command-H; it's reopened hidden too.
+    public var isHidden: Bool
+    /// When this process launched, which says the spacing it picked up.
+    public var launchDate: Date?
 
-    public init(bundleID: BundleID, bundlePath: String, name: String, hasVisibleWindows: Bool) {
+    public init(bundleID: BundleID, bundlePath: String, name: String, hasVisibleWindows: Bool,
+                isHidden: Bool = false, launchDate: Date? = nil) {
         self.bundleID = bundleID
         self.bundlePath = bundlePath
         self.name = name
         self.hasVisibleWindows = hasVisibleWindows
+        self.isHidden = isHidden
+        self.launchDate = launchDate
     }
 }
 
@@ -77,17 +85,10 @@ public enum SpacingPlan {
         return Dictionary(uniqueKeysWithValues: keys.map { ($0, stored) })
     }
 
-    /// The spacing a stored preference stands for: a number or numeric string (as
+    /// The spacing a stored `NSStatusItemSpacing` stands for: a number or numeric string (as
     /// `defaults write` stores it without `-int`), clamped into `range`; the default when unset
     /// or unreadable.
     public static func value(fromPreference raw: Any?) -> Int {
-        switch raw {
-        case let number as NSNumber:
-            return clamped(Int(number.doubleValue.rounded()))
-        case let string as String:
-            return Int(string.trimmingCharacters(in: .whitespaces)).map(clamped) ?? defaultValue
-        default:
-            return defaultValue
-        }
+        StoredSpacing(spacing: storedValue(raw)).value
     }
 }

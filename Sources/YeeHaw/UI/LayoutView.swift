@@ -124,7 +124,18 @@ struct LayoutView: View {
     static func barKey(_ id: String) -> String { "bar:\(id)" }
     static func hiddenKey(_ id: BundleID) -> String { "hidden:\(id)" }
 
+    /// The window's content scrolls once it's taller than the screen allows (a small display, or
+    /// a larger text size), so Apply and the report stay reachable.
     var body: some View {
+        ScrollView(.vertical) {
+            content
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(maxHeight: model.maxContentHeight)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
             section("Menu Bar", busy: model.busy) { barRow }
                 .padding(.bottom, 18)
@@ -311,7 +322,7 @@ struct LayoutView: View {
             .focusRing(focus == key && model.showsFocusRing)
             .reportFrame(key)
             .contentShape(RoundedRectangle(cornerRadius: LayoutMetrics.tileRadius, style: .continuous))
-            .gesture(dragGesture(.bar(tile.id), key: key), including: tile.capability.canDrag && !model.busy ? .all : .none)
+            .gesture(dragGesture(.bar(tile.id), key: key), including: tile.capability.canDrag && !model.editsLocked ? .all : .none)
             .pointerStyle(tile.capability.canDrag ? .grabIdle : nil)
             // Focusable by click as well as Tab, like the items of a collection; the ring shows
             // only once a key is pressed (`LayoutModel.showsFocusRing`).
@@ -336,7 +347,7 @@ struct LayoutView: View {
                        radius: LayoutMetrics.tileRadius + (group.icons.count > 1 ? LayoutMetrics.groupInset : 0))
             .reportFrame(key)
             .contentShape(RoundedRectangle(cornerRadius: LayoutMetrics.tileRadius, style: .continuous))
-            .gesture(dragGesture(.hidden(group.id), key: key), including: model.busy ? .none : .all)
+            .gesture(dragGesture(.hidden(group.id), key: key), including: model.editsLocked ? .none : .all)
             .pointerStyle(.grabIdle)
             .focusable(true, interactions: .edit)
             .focusEffectDisabled()
@@ -345,12 +356,12 @@ struct LayoutView: View {
             .help(group.name)
             .contextMenu {
                 Button("Show in Menu Bar") { showGroup(group) }
-                    .disabled(model.busy)
+                    .disabled(model.editsLocked)
                 Divider()
                 Button("Move Left") { moveHiddenGroup(group, by: -1) }
-                    .disabled(model.busy || model.hidden.first?.id == group.id)
+                    .disabled(model.editsLocked || model.hidden.first?.id == group.id)
                 Button("Move Right") { moveHiddenGroup(group, by: 1) }
-                    .disabled(model.busy || model.hidden.last?.id == group.id)
+                    .disabled(model.editsLocked || model.hidden.last?.id == group.id)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(group.name)
@@ -364,14 +375,14 @@ struct LayoutView: View {
     private func barMenu(_ tile: BarTile) -> some View {
         if tile.capability.canHide {
             Button("Hide") { hideBarTile(tile) }
-                .disabled(model.busy)
+                .disabled(model.editsLocked)
             Divider()
         }
         if tile.capability.canDrag {
             Button("Move Left") { moveBarTile(tile, by: -1) }
-                .disabled(model.busy || model.bar.first?.id == tile.id)
+                .disabled(model.editsLocked || model.bar.first?.id == tile.id)
             Button("Move Right") { moveBarTile(tile, by: 1) }
-                .disabled(model.busy || !canMoveRight(tile))
+                .disabled(model.editsLocked || !canMoveRight(tile))
         } else {
             Text(help(for: tile))
         }
@@ -447,7 +458,7 @@ struct LayoutView: View {
     }
 
     private func moveBarTile(_ tile: BarTile, by step: Int) {
-        guard tile.capability.canDrag, !model.busy, let index = model.bar.firstIndex(where: { $0.id == tile.id }) else { return }
+        guard tile.capability.canDrag, !model.editsLocked, let index = model.bar.firstIndex(where: { $0.id == tile.id }) else { return }
         let to = step < 0 ? index - 1 : index + 2
         guard to >= 0, LayoutRules.clampedInsertion(to, in: model.bar.map(\.item)) == to else { return }
         withAnimation(LayoutModel.rowAnimation) { _ = model.move(from: index, to: to) }
@@ -455,7 +466,7 @@ struct LayoutView: View {
 
     /// Hides the tile's app; a focused tile hands the focus to the app's new hidden group.
     private func hideBarTile(_ tile: BarTile) {
-        guard tile.capability.canHide, !model.busy, let app = tile.item.bundleID,
+        guard tile.capability.canHide, !model.editsLocked, let app = tile.item.bundleID,
               let index = model.bar.firstIndex(where: { $0.id == tile.id }) else { return }
         let hadFocus = focus == Self.barKey(tile.id)
         withAnimation(LayoutModel.rowAnimation) { _ = model.hide(from: index, at: model.hidden.count) }
@@ -465,7 +476,7 @@ struct LayoutView: View {
     /// Shows the group's app; a focused group hands the focus to its neighbour in Hidden, or the
     /// first Menu Bar tile when it was the last.
     private func showGroup(_ group: HiddenGroup) {
-        guard !model.busy, let index = model.hidden.firstIndex(where: { $0.id == group.id }) else { return }
+        guard !model.editsLocked, let index = model.hidden.firstIndex(where: { $0.id == group.id }) else { return }
         let hadFocus = focus == Self.hiddenKey(group.id)
         let next = model.hidden[safe: index + 1] ?? model.hidden[safe: index - 1]
         withAnimation(LayoutModel.rowAnimation) { _ = model.show(group.id, at: nil) }
@@ -473,7 +484,7 @@ struct LayoutView: View {
     }
 
     private func moveHiddenGroup(_ group: HiddenGroup, by step: Int) {
-        guard !model.busy, let index = model.hidden.firstIndex(where: { $0.id == group.id }) else { return }
+        guard !model.editsLocked, let index = model.hidden.firstIndex(where: { $0.id == group.id }) else { return }
         let to = step < 0 ? index - 1 : index + 2
         guard to >= 0, to <= model.hidden.count else { return }
         withAnimation(LayoutModel.rowAnimation) { model.reorderHidden(group.id, at: to) }
@@ -504,7 +515,7 @@ struct LayoutView: View {
     }
 
     private func begin(_ source: LayoutDrag.Source, key: String, at start: CGPoint) {
-        guard !model.busy, let origin = frames[key] else { return }
+        guard !model.editsLocked, let origin = frames[key] else { return }
         let barFrames = model.bar.compactMap { frames[Self.barKey($0.id)] }
         let hiddenFrames = model.hidden.compactMap { frames[Self.hiddenKey($0.id)] }
         // Frames lag the model by a layout pass; a drag needs all of them.
