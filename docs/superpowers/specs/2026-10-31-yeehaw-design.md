@@ -173,8 +173,12 @@ That folder is temporary, so the techniques are written out below.
 ### The strip
 
 - **Placement:** a floating panel attached just below YeeHaw's icon, as in the owner's screenshot
-  of Thaw. It uses a Liquid Glass material (`NSGlassEffectView` or the SwiftUI glass APIs), has
-  rounded corners, and shows hidden icons in a single row at menu bar size.
+  of Thaw. It is a bar-height, opaque strip with rounded corners, centred under the icon and
+  painted with the menu bar's own colour, so it reads as part of the bar. The colour is sampled with
+  ScreenCaptureKit only when Screen Recording is already granted (YeeHaw never prompts); without
+  it the strip uses the window background colour. Ink is black or white by contrast. Hidden icons
+  show in a single row at menu bar size. (Revised 2026-11-01 after the owner rejected two Liquid
+  Glass versions as "disconnected".)
 - **Open and close:** opens with a subtle, fast spring and closes on outside click, Esc, or after an
   icon is used.
   - Respects Reduce Motion and Reduce Transparency, and looks right in light and dark mode.
