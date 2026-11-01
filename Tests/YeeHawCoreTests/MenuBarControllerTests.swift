@@ -94,6 +94,9 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
         }
     }
 
+    /// Replaces the whole Allow list, e.g. when macOS starts tracking a new app.
+    func setAllowBlob(_ blob: Data) { locked { $0._allowBlob = blob } }
+
     // PreferencesFile backing.
     func read(_ file: GrantedFile, _ key: String) throws -> Any? {
         try locked {
@@ -402,12 +405,53 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(rig.system.positionWrites == 0)
     }
 
-    @Test func moveOfAppleItemIsNoOp() throws {
-        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true)], positions: ["module:WiFi": 50]))
+    /// Ruling R51: MenuBarAgent honours `module:` writes for Apple items (Wi-Fi verified on 27.2).
+    @Test func moveOfAppleItemWritesItsModuleKey() throws {
+        let rig = Self.rig(try FakeSystem(
+            allow: [(Self.a, true)],
+            positions: ["status:\(Self.a)::Item-0": 200, "module:WiFi": 50, "module:Battery": 30, PositionKey.clock: 0]))
         let c = rig.controller()
         try c.move(FakeSystem.appleItem("com.apple.menuextra.wifi"), leftNeighbor: FakeSystem.item(Self.a),
-                   rightNeighbor: nil)
+                   rightNeighbor: FakeSystem.appleItem("com.apple.menuextra.battery"))
+        #expect(rig.system.positions["module:WiFi"] == 115)
+        #expect(rig.system.positions["status:\(Self.a)::Item-0"] == 200)
+        #expect(rig.system.positionWrites == 1)
+    }
+
+    @Test func moveOfAppleItemWithoutModuleKeyThrows() throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true)], positions: ["status:\(Self.a)::Item-0": 200]))
+        let c = rig.controller()
+        #expect(throws: ControllerError.unresolvedNeighbor) {
+            try c.move(FakeSystem.appleItem("com.apple.menuextra.mystery"), leftNeighbor: FakeSystem.item(Self.a),
+                       rightNeighbor: nil)
+        }
         #expect(rig.system.positionWrites == 0)
+    }
+
+    @Test func moveOfPinnedOrUnownedItemIsNoOp() throws {
+        let rig = Self.rig(try FakeSystem(
+            allow: [(Self.a, true)],
+            positions: ["status:\(Self.a)::Item-0": 200, PositionKey.controlCenter: 20, PositionKey.clock: 0]))
+        let c = rig.controller()
+        var controlCenter = FakeSystem.appleItem("com.apple.menuextra.controlcenter")
+        controlCenter.isPinned = true
+        try c.move(controlCenter, leftNeighbor: FakeSystem.item(Self.a), rightNeighbor: nil)
+        let unknown = MenuBarItem(id: "unknown@40", bundleID: nil, appleIdentifier: nil, indexInApp: 0,
+                                  axIdentifier: "", label: "", keyNames: [], keyPrefixes: [], x: 40, width: 20,
+                                  isPinned: false)
+        try c.move(unknown, leftNeighbor: FakeSystem.item(Self.a), rightNeighbor: nil)
+        #expect(rig.system.positionWrites == 0)
+    }
+
+    @Test func trackedAppsFollowTheAllowList() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true), (Self.b, false)]))
+        let c = rig.controller()
+        #expect(c.trackedApps.isEmpty)
+        try await c.launch()
+        #expect(c.trackedApps == [Self.a, Self.b])
+        rig.system.setAllowBlob(try FakeSystem.blob([(Self.a, true), (Self.b, false), (Self.yeehaw, true)]))
+        try await c.allowListChanged()
+        #expect(c.trackedApps == [Self.a, Self.b, Self.yeehaw])
     }
 
     // MARK: reveal

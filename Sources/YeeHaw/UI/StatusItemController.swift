@@ -20,7 +20,7 @@ final class StatusItemController: NSObject {
     private let reveal: RevealCoordinator
     private let openLayout: () -> Void
     private let openSettings: () -> Void
-    private let icons = IconImageProvider()
+    private let icons: IconImageProvider
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private var strip: StripPanel!
@@ -29,13 +29,16 @@ final class StatusItemController: NSObject {
     /// Set when a click in the strip found no drawn YeeHaw icon to reveal next to.
     private var ownIconMissing = false
     private var refreshTask: Task<Void, Never>?
+    /// Opens the menu straight from a secondary mouse-down (see `watchSecondaryClicks`).
+    private var secondaryClickMonitor: Any?
     /// A click on the icon within this long after the strip closed by itself is the click that
     /// closed it (ruling I2), so it leaves the strip closed instead of reopening it.
     nonisolated static let reopenGuard: Duration = .milliseconds(300)
 
-    init(controller: MenuBarController, reveal: RevealCoordinator, openLayout: @escaping () -> Void,
-         openSettings: @escaping () -> Void) {
+    init(controller: MenuBarController, reveal: RevealCoordinator, icons: IconImageProvider,
+         openLayout: @escaping () -> Void, openSettings: @escaping () -> Void) {
         self.controller = controller
+        self.icons = icons
         self.reveal = reveal
         self.openLayout = openLayout
         self.openSettings = openSettings
@@ -51,6 +54,7 @@ final class StatusItemController: NSObject {
             button.sendAction(on: [.leftMouseDown, .rightMouseDown])
         }
         buildMenu()
+        watchSecondaryClicks()
         strip = StripPanel(
             onSelect: { [weak self] id in self?.select(id) },
             onFix: { [weak self] in
@@ -107,6 +111,23 @@ final class StatusItemController: NSObject {
         case .close: strip.dismiss()
         case .open: openStrip()
         case .stayClosed: break
+        }
+    }
+
+    /// Opens the menu from the mouse-down itself and consumes it, so the button never starts
+    /// tracking that click. Opened from the button's action instead, the menu takes the click's
+    /// mouse-up and the button keeps tracking afterwards, which swallows the next mouse-down
+    /// anywhere in YeeHaw (the Layout window's first drag). `iconClicked` stays as the fallback.
+    private func watchSecondaryClicks() {
+        secondaryClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            let (type, modifiers, window) = (event.type, event.modifierFlags, event.windowNumber)
+            let consumed = MainActor.assumeIsolated { () -> Bool in
+                guard let self, let button = self.statusItem.button, window == button.window?.windowNumber,
+                      Self.isSecondaryClick(type: type, modifiers: modifiers) else { return false }
+                self.showMenu()
+                return true
+            }
+            return consumed ? nil : event
         }
     }
 
@@ -218,7 +239,8 @@ final class StatusItemController: NSObject {
         }
     }
 
-    private static func name(of id: BundleID) -> String {
+    /// The app's display name: the running app's, else its bundle's, else the bundle ID.
+    static func name(of id: BundleID) -> String {
         if let name = NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.localizedName {
             return name
         }

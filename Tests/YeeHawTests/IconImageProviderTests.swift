@@ -1,6 +1,7 @@
 import AppKit
 import Testing
 @testable import YeeHaw
+import YeeHawCore
 
 /// A `width`×`height` pixel crop, clear except `ink` (top-left origin) filled with `color`.
 func crop(width: Int = 60, height: Int = 78, ink: CGRect, color: CGColor = .white, background: CGColor? = nil) -> CGImage {
@@ -94,5 +95,29 @@ func crop(width: Int = 60, height: Int = 78, ink: CGRect, color: CGColor = .whit
         let image = IconImageProvider(directory: directory).image(for: "com.example.not-installed")
         #expect(!image.isTemplate)
         #expect(image.size == NSSize(width: 18, height: 18))
+    }
+}
+
+@Suite struct AppleCropTests {
+    static func item(_ id: String, x: Double, width: Double, apple: Bool = true) -> MenuBarItem {
+        MenuBarItem(id: id, bundleID: apple ? nil : id, appleIdentifier: apple ? id : nil, indexInApp: 0,
+                    axIdentifier: "", label: id, keyNames: [], keyPrefixes: [], x: x, width: width, isPinned: false)
+    }
+
+    @Test func theClockReachesIntoTheEmptyBarOnItsRight() {
+        let controlCenter = Self.item("cc", x: 1866, width: 26)
+        let clock = Self.item("clock", x: 1908, width: 127.5)
+        let column = IconImageProvider.widened(clock, among: [controlCenter, clock])
+        #expect(column.x == 1904)
+        #expect(column.width == 127.5 + 8)
+    }
+
+    @Test func neverReachesIntoANeighbour() {
+        let wifi = Self.item("wifi", x: 100, width: 22)
+        let left = Self.item("a", x: 80, width: 20, apple: false)
+        let right = Self.item("b", x: 124, width: 20, apple: false)
+        let column = IconImageProvider.widened(wifi, among: [left, wifi, right])
+        #expect(column.x == 100)
+        #expect(column.width == 24)
     }
 }

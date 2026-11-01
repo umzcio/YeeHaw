@@ -31,6 +31,9 @@ public enum ControllerError: Error, Equatable {
     private var stored: HidingState
     /// Last read, drawn only.
     public private(set) var items: [MenuBarItem] = []
+    /// Apps with an Allow-list entry as of YeeHaw's last read or write. Only these can be hidden;
+    /// macOS adds an entry some time after an app first draws an icon.
+    public var trackedApps: Set<BundleID> { Set(lastSnapshot.keys) }
 
     private let allowFile: PreferencesFile
     private let positionFile: PreferencesFile
@@ -156,12 +159,14 @@ public enum ControllerError: Error, Equatable {
 
     // MARK: Ordering
 
-    /// Places every key of `item` between its new neighbours. A no-op for items with no owning app.
+    /// Places every key of `item` between its new neighbours. An Apple item moves by its `module:`
+    /// key (ruling R51) and throws `.unresolvedNeighbor` when it has none. A no-op for pinned items
+    /// (macOS ignores their moves) and items with no known owner.
     public func move(_ item: MenuBarItem, leftNeighbor: MenuBarItem?, rightNeighbor: MenuBarItem?) throws {
-        guard item.bundleID != nil else { return }
+        guard !item.isPinned, item.bundleID != nil || item.appleIdentifier != nil else { return }
         try guarded {
             let table = PositionTable(try readPositions())
-            let keys = PositionKey.keys(for: item, table: table)
+            let keys = item.bundleID != nil ? PositionKey.keys(for: item, table: table) : [try neighborKey(item, table)]
             let left = try leftNeighbor.map { try neighborKey($0, table) }
             let right = try rightNeighbor.map { try neighborKey($0, table) }
             try writePositions(table.placement(of: keys, leftNeighbor: left, rightNeighbor: right))

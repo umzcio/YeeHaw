@@ -19,6 +19,9 @@ final class IconImageProvider {
     /// The PNG last written per cache key, so an unchanged capture isn't rewritten.
     private var written: [String: Data] = [:]
     private var fallbacks: [BundleID: NSImage] = [:]
+    /// Apple items' glyphs by item id. Kept in memory only: Apple items are always drawn, so they
+    /// can be photographed again whenever they're needed.
+    private var appleCaptures: [String: NSImage] = [:]
 
     init(directory: URL = IconImageProvider.defaultDirectory) {
         self.directory = directory
@@ -31,11 +34,30 @@ final class IconImageProvider {
         return String("\(bundleID)-\(indexInApp)".map { allowed.contains($0) ? $0 : "_" })
     }
 
-    /// The cached glyph, else the app's icon.
+    /// The cached glyph, else the app's icon (YeeHaw's own glyph for YeeHaw, a symbol for an Apple
+    /// item that hasn't been photographed).
     func image(for item: MenuBarItem) -> NSImage {
-        guard let id = item.bundleID else { return Self.sized(NSWorkspace.shared.icon(for: .application)) }
+        if item.bundleID == OwnIconLocator.bundleID { return StatusGlyph.image() }
+        guard let id = item.bundleID else {
+            if let captured = appleCaptures[item.id] { return captured }
+            return Self.symbol(for: item.appleIdentifier)
+        }
         return image(for: id, indexInApp: item.indexInApp)
     }
+
+    /// The icon indices of a hidden app that have a saved photograph, at least `[0]`: one layout
+    /// tile per icon the app drew when it was last seen.
+    func iconIndices(for id: BundleID) -> [Int] {
+        let found = (0..<Self.maxIconsPerApp).filter { index in
+            let key = Self.cacheKey(bundleID: id, indexInApp: index)
+            if let cached = captures[key] { return cached != nil }
+            return fileURL(key).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        }
+        return found.isEmpty ? [0] : found
+    }
+
+    /// The most icons looked up per app; no app on record draws more than a handful.
+    static let maxIconsPerApp = 8
 
     /// The cached glyph of one of an app's items (a hidden app's first item by default), else the
     /// app's icon.
@@ -48,7 +70,9 @@ final class IconImageProvider {
     /// already granted; it never prompts.
     func captureIfPermitted(_ items: [MenuBarItem]) async {
         guard CGPreflightScreenCaptureAccess() else { return }
-        let targets = items.filter { $0.bundleID != nil && $0.bundleID != OwnIconLocator.bundleID }
+        let targets = items.filter {
+            ($0.bundleID != nil && $0.bundleID != OwnIconLocator.bundleID) || $0.appleIdentifier != nil
+        }
         guard !targets.isEmpty else { return }
         let bars: [BarShot]
         do {
@@ -57,15 +81,35 @@ final class IconImageProvider {
             Self.log.error("Menu bar capture failed: \(error, privacy: .public)")
             return
         }
+        let drawn = items.sorted { $0.x < $1.x }
         for item in targets {
-            guard let id = item.bundleID, let bar = Self.bar(containing: item, in: bars),
-                  let crop = bar.crop(x: item.x, width: item.width) else { continue }
+            let column = item.bundleID == nil ? Self.widened(item, among: drawn) : (x: item.x, width: item.width)
+            guard let bar = Self.bar(containing: item, in: bars),
+                  let crop = bar.crop(x: column.x, width: column.width),
+                  // Blank or opaque shots (drawn but not rendered yet, or a solid background) are dropped.
+                  let glyph = GlyphImage.make(from: crop, scale: bar.scale) else { continue }
+            guard let id = item.bundleID else {
+                appleCaptures[item.id] = glyph
+                continue
+            }
             let key = Self.cacheKey(bundleID: id, indexInApp: item.indexInApp)
-            // Blank or opaque shots (drawn but not rendered yet, or a solid background) are dropped.
-            guard let glyph = GlyphImage.make(from: crop, scale: bar.scale) else { continue }
             captures[key] = glyph
             store(crop, scale: bar.scale, key: key)
         }
+    }
+
+    /// How far an Apple item's crop may reach past its frame into empty bar: the clock's text
+    /// can be drawn a little wider than its frame after the time changes.
+    nonisolated static let appleCropSlack: Double = 4
+
+    /// An Apple item's column, widened by up to `appleCropSlack` on each side where no other
+    /// drawn item is (so a neighbour's ink is never included).
+    nonisolated static func widened(_ item: MenuBarItem, among drawn: [MenuBarItem]) -> (x: Double, width: Double) {
+        let left = drawn.filter { $0.id != item.id && $0.x < item.x }.map { $0.x + $0.width }.max()
+        let right = drawn.filter { $0.id != item.id && $0.x > item.x }.map(\.x).min()
+        let before = min(appleCropSlack, max(0, item.x - (left ?? -.infinity)))
+        let after = min(appleCropSlack, max(0, (right ?? .infinity) - (item.x + item.width)))
+        return (item.x - before, item.width + before + after)
     }
 
     // MARK: Cache
@@ -115,6 +159,29 @@ final class IconImageProvider {
         let sized = Self.sized(icon)
         fallbacks[id] = sized
         return sized
+    }
+
+    /// A template symbol standing in for an Apple item that hasn't been photographed.
+    private static func symbol(for appleIdentifier: String?) -> NSImage {
+        let name = switch appleIdentifier?.split(separator: ".").last?.lowercased() {
+        case "wifi": "wifi"
+        case "battery": "battery.100percent"
+        case "bluetooth": "dot.radiowaves.left.and.right"
+        case "sound", "volume": "speaker.wave.2.fill"
+        case "controlcenter": "switch.2"
+        case "clock": "clock"
+        case "screenmirroring": "rectangle.on.rectangle"
+        case "nowplaying": "play.fill"
+        case "focus", "focusmodes": "moon.fill"
+        case "spotlight": "magnifyingglass"
+        case "siri": "mic.fill"
+        default: "square.dashed"
+        }
+        let configuration = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(configuration) ?? NSImage()
+        image.isTemplate = true
+        return image
     }
 
     /// A copy at menu bar size. The copy keeps every representation, so it stays sharp at 2x.

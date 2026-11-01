@@ -35,12 +35,15 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
             allowFile: GrantedPreferencesFile(file: .allowList, grants: grants),
             positionFile: GrantedPreferencesFile(file: .positions, grants: grants),
             reader: AXMenuBarReader(), store: DefaultsStateStore(), sleeper: TaskSleeper())
+        let icons = IconImageProvider()
+        // A stub until Settings exists (ruling R37).
+        let openSettings = { Self.log.notice("Settings… chosen; Settings isn't built yet") }
         let status = StatusItemController(
             controller: controller,
             reveal: RevealCoordinator(controller: controller),
-            // Stubs until the layout window and Settings exist (ruling R37).
-            openLayout: { Self.log.notice("Layout… chosen; the layout window isn't built yet") },
-            openSettings: { Self.log.notice("Settings… chosen; Settings isn't built yet") })
+            icons: icons,
+            openLayout: { showLayoutWindow(controller: controller, images: icons, openSettings: openSettings) },
+            openSettings: openSettings)
         self.controller = controller
         statusItem = status
 
@@ -50,6 +53,7 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
             Task {
                 do {
                     try await controller.allowListChanged()
+                    LayoutWindowController.current?.allowListChanged()
                 } catch {
                     Self.log.error("Allow list change not applied: \(error, privacy: .public)")
                 }
