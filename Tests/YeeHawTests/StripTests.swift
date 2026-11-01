@@ -3,36 +3,60 @@ import Testing
 @testable import YeeHaw
 
 @Suite struct StripPlacementTests {
+    /// The owner's screen: 2056×1329 with a 39 pt menu bar.
+    static let screen = NSRect(x: 0, y: 0, width: 2056, height: 1329)
     static let visible = NSRect(x: 0, y: 0, width: 2056, height: 1290)
-    static let size = NSSize(width: 200, height: 34)
+    static let barHeight: CGFloat = 39
+    /// YeeHaw's hat button: only 22×22, inside the bar.
+    static let hat = NSRect(x: 1517, y: 1298.5, width: 22, height: 22)
 
-    @Test func hangsFromTheBarWithItsLeadingEdgeUnderTheIcon() {
-        // YeeHaw's icon on the owner's Mac: x 1514, 24 wide, in a 39 pt bar.
-        let anchor = NSRect(x: 1514, y: 1290, width: 24, height: 39)
-        let frame = StripPanel.stripFrame(size: NSSize(width: 45, height: 34), below: anchor, within: Self.visible, inset: 6)
-        #expect(frame == NSRect(x: 1509.5, y: 1290 - 1 - 34, width: 45, height: 34))
+    @Test func hangsCentredUnderTheHatOnePointBelowTheBar() {
+        let frame = StripPanel.stripFrame(size: NSSize(width: 48, height: 39), under: Self.hat, screen: Self.screen,
+                                          barHeight: Self.barHeight, inset: 6)
+        #expect(frame == NSRect(x: 1528 - 24, y: 1329 - 39 - 1 - 39, width: 48, height: 39))
+        #expect(frame.maxY == 1289)
         #expect(StripPanel.gap == 1)
-        #expect(StripPanel.leadingInset == 4.5)
+        #expect(StripPanel.screenInset == 6)
+    }
+
+    @Test func heightComesFromTheScreensTopInsetNotTheAnchor() {
+        #expect(StripPanel.barHeight(screenFrame: Self.screen, visibleFrame: Self.visible) == 39)
+        let secondary = NSRect(x: -1440, y: 0, width: 1440, height: 900)
+        #expect(StripPanel.barHeight(screenFrame: secondary, visibleFrame: NSRect(x: -1440, y: 80, width: 1440, height: 796)) == 24)
+    }
+
+    @Test func aHiddenMenuBarStillGetsABarHeight() {
+        #expect(StripPanel.barHeight(screenFrame: Self.screen, visibleFrame: Self.screen) == StripPanel.fallbackBarHeight)
+    }
+
+    @Test func cornerRadiusIsAQuarterOfTheHeight() {
+        #expect(StripPanel.cornerRadius(barHeight: 39) == 9.75)
+        #expect(StripPanel.cornerRadius(barHeight: 24) == 6)
     }
 
     @Test func staysInsideTheRightEdge() {
-        let anchor = NSRect(x: 2000, y: 1290, width: 30, height: 39)
-        let frame = StripPanel.stripFrame(size: Self.size, below: anchor, within: Self.visible, inset: 6)
+        let anchor = NSRect(x: 2030, y: 1298.5, width: 22, height: 22)
+        let frame = StripPanel.stripFrame(size: NSSize(width: 200, height: 39), under: anchor, screen: Self.screen,
+                                          barHeight: Self.barHeight, inset: 6)
         #expect(frame.maxX == 2050)
+        #expect(frame.width == 200)
     }
 
-    @Test func staysInsideTheLeftEdgeOfASecondDisplay() {
-        let visible = NSRect(x: -1440, y: 0, width: 1440, height: 875)
-        let anchor = NSRect(x: -1438, y: 875, width: 30, height: 24)
-        let frame = StripPanel.stripFrame(size: Self.size, below: anchor, within: visible, inset: 6)
+    @Test func staysInsideTheLeftEdgeOfADisplayAtNegativeX() {
+        let screen = NSRect(x: -1440, y: 0, width: 1440, height: 900)
+        let anchor = NSRect(x: -1430, y: 877, width: 22, height: 22)
+        let frame = StripPanel.stripFrame(size: NSSize(width: 200, height: 24), under: anchor, screen: screen,
+                                          barHeight: 24, inset: 6)
         #expect(frame.minX == -1434)
-        #expect(frame.maxY == 875 - StripPanel.gap)
+        let barBottom: CGFloat = 900 - 24 - 1
+        #expect(frame.maxY == barBottom)
     }
 
     @Test func neverWiderThanTheScreen() {
-        let visible = NSRect(x: 0, y: 0, width: 300, height: 800)
-        let frame = StripPanel.stripFrame(size: NSSize(width: 900, height: 34),
-                                          below: NSRect(x: 150, y: 800, width: 30, height: 24), within: visible, inset: 6)
+        let screen = NSRect(x: 0, y: 0, width: 300, height: 800)
+        let frame = StripPanel.stripFrame(size: NSSize(width: 900, height: 24),
+                                          under: NSRect(x: 150, y: 777, width: 22, height: 22), screen: screen,
+                                          barHeight: 24, inset: 6)
         #expect(frame.minX == 6)
         #expect(frame.width == 288)
     }
@@ -77,39 +101,49 @@ import Testing
 }
 
 @Suite @MainActor struct StripMeasureTests {
-    static let rowHeight = StripView.tileHeight + 2 * StripView.verticalPadding
+    static let barHeight: CGFloat = 39
 
-    static func model(entries: Int, maxWidth: CGFloat = .greatestFiniteMagnitude) -> StripModel {
+    static func model(entries: Int, glyph: NSSize = NSSize(width: 16, height: 16),
+                      maxWidth: CGFloat = .greatestFiniteMagnitude) -> StripModel {
         let model = StripModel(onSelect: { _ in }, onFix: {})
-        let image = NSImage(size: NSSize(width: 16, height: 16))
+        let image = NSImage(size: glyph)
         model.entries = (0..<entries).map { StripEntry(id: "com.example.app\($0)", image: image, name: "App \($0)") }
         model.maxWidth = maxWidth
+        model.barHeight = barHeight
         return model
     }
 
-    @Test func oneEntryIsOneBarItemWide() {
+    @Test func oneGlyphIsOneBarItemAsTallAsTheBar() {
         let size = StripPanel.measure(Self.model(entries: 1))
-        // A 36 pt tile (like DigUp's item) between the padding; one 24 pt row.
-        #expect(size == NSSize(width: 36 + 2 * StripPanel.leadingInset, height: Self.rowHeight))
-        #expect(Self.rowHeight == 34)
+        #expect(size == NSSize(width: 16 + 20 + 2 * 6, height: Self.barHeight))
     }
 
-    @Test func tilesAbutLikeTheBarsItems() {
+    @Test func tilesTouchLikeTheBarsItems() {
         let size = StripPanel.measure(Self.model(entries: 3))
-        #expect(size.width == 3 * 36 + 2 * StripPanel.leadingInset)
+        let expected: CGFloat = 3 * (16 + 20) + 2 * 6
+        #expect(size.width == expected)
     }
 
-    @Test func measuresTheEmptyState() {
+    @Test func glyphsScaleDownButNeverUp() {
+        #expect(StripView.glyphSize(NSSize(width: 10, height: 12)) == NSSize(width: 10, height: 12))
+        #expect(StripView.glyphSize(NSSize(width: 20, height: 36)) == NSSize(width: 10, height: 18))
+        #expect(StripView.glyphSize(NSSize(width: 30, height: 18)) == NSSize(width: 30, height: 18))
+        let tall = StripPanel.measure(Self.model(entries: 1, glyph: NSSize(width: 40, height: 40)))
+        #expect(tall == NSSize(width: 18 + 20 + 2 * 6, height: Self.barHeight))
+    }
+
+    @Test func theEmptyStateIsOneBarHighRow() {
         let size = StripPanel.measure(Self.model(entries: 0))
         #expect(size.width > 200)
-        #expect(size.height == Self.rowHeight)
+        #expect(size.height == Self.barHeight)
     }
 
-    @Test func aNoticeAddsALine() {
+    @Test func aNoticeAddsABarHighRow() {
         let model = Self.model(entries: 1)
-        let plain = StripPanel.measure(model)
         model.notice = "YeeHaw needs access to the menu bar settings files."
-        #expect(StripPanel.measure(model).height > plain.height)
+        #expect(StripPanel.measure(model).height == 2 * Self.barHeight)
+        model.entries = []
+        #expect(StripPanel.measure(model).height == 2 * Self.barHeight)
     }
 
     @Test func tooManyTilesScrollWithinTheScreen() {
@@ -118,7 +152,7 @@ import Testing
         let size = StripPanel.measure(model)
         #expect(size.width <= 800)
         #expect(size.width > 700)
-        #expect(size.height == Self.rowHeight)
+        #expect(size.height == Self.barHeight)
     }
 }
 

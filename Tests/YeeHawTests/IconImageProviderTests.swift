@@ -88,11 +88,11 @@ func crop(width: Int = 60, height: Int = 78, ink: CGRect, color: CGColor = .whit
         #expect(image.size == NSSize(width: 13, height: 15))
     }
 
-    @Test func fallsBackToAnAppIconAtMenuBarSize() throws {
+    @Test func fallsBackToAnEighteenPointAppIcon() throws {
         let directory = try Self.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let image = IconImageProvider(directory: directory).image(for: "com.example.not-installed")
         #expect(!image.isTemplate)
-        #expect(image.size == NSSize(width: IconImageProvider.fallbackSize, height: IconImageProvider.fallbackSize))
+        #expect(image.size == NSSize(width: 18, height: 18))
     }
 }

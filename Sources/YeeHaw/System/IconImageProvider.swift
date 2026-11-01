@@ -8,8 +8,8 @@ import YeeHawCore
 /// capture the app's icon stands in.
 @MainActor
 final class IconImageProvider {
-    /// Edge of the app-icon fallback, in points: a menu bar glyph's size.
-    static let fallbackSize: CGFloat = 16
+    /// Edge of the app-icon fallback, in points (the strip draws it at this size).
+    static let fallbackSize: CGFloat = 18
     private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "glyphs")
     static let defaultDirectory = URL.applicationSupportDirectory.appending(path: "YeeHaw/Glyphs", directoryHint: .isDirectory)
 

@@ -11,40 +11,48 @@ struct StripEntry: Identifiable {
 }
 
 /// The strip under YeeHaw's icon that lists the hidden apps (spec "The strip", ruling R44). It's
-/// built to look like the menus status items open on macOS 27: attached just under the bar, its
-/// leading edge under the icon's, the same glass, corner radius and window shadow, and a row of
-/// tiles that continues the bar's own row.
-///
-/// The geometry was measured from a screenshot of DigUp's native menu on 27.2 (2x pixels): the
-/// menu's top edge is 1 pt below the bar, its leading edge 4.5 pt left of the item's frame, and
-/// its corners have a 12 pt radius.
+/// built to read as a piece of the menu bar hanging down under the hat: a solid bar as tall as the
+/// menu bar, 1 pt below it, centred under the icon, filled with the bar's own colour (sampled by
+/// `StripColorSampler`, or an opaque neutral without Screen Recording), with continuous corners
+/// and the window shadow.
 ///
 /// A borderless, non-activating panel: it can become key (for Esc) without activating YeeHaw or
 /// taking focus from the frontmost app.
 @MainActor
 final class StripPanel: NSPanel {
-    /// Space between the bottom of the menu bar and the top of the strip (measured).
+    /// Space between the bottom of the menu bar and the top of the strip.
     nonisolated static let gap: CGFloat = 1
-    /// How far the strip's leading edge sits left of the icon's frame (measured).
-    nonisolated static let leadingInset: CGFloat = 4.5
-    /// Corner radius of the strip (measured).
-    nonisolated static let cornerRadius: CGFloat = 12
     /// Closest the strip comes to a screen edge.
     nonisolated static let screenInset: CGFloat = 6
+    /// The bar height used when the screen reports no menu bar (it's set to hide).
+    nonisolated static let fallbackBarHeight: CGFloat = 24
     /// Fade in and out, like a native menu.
     static let fadeIn: Double = 0.16
     static let fadeOut: Double = 0.12
+    /// Crossfade when a fresh sample changes the fill.
+    static let colorCrossfade: Double = 0.2
+    /// How long after a Space switch to resample, so the new Space's wallpaper is on screen.
+    static let spaceSettle: Duration = .milliseconds(600)
 
     private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "strip")
     private let model: StripModel
     private let hosting: NSHostingView<StripView>
-    private let glass = NSGlassEffectView()
-    private let solid = NSView()
+    /// The rounded, opaque fill everything sits on.
+    private let surface = NSView()
+    private let sampler = StripColorSampler()
     private var monitors: [Any] = []
     private var observers: [NSObjectProtocol] = []
+    /// Space and appearance watchers, kept for the panel's lifetime so the cache stays current.
+    private var resampleTriggers: [NSObjectProtocol] = []
+    private var appearanceObservation: NSKeyValueObservation?
     /// Bumped on every show and dismiss, so a finished fade-out never hides a strip shown since.
     private var generation = 0
     private(set) var isShown = false
+    /// The display and bar height the strip was last shown on.
+    private var displayID: CGDirectDisplayID?
+    private var barHeight = StripPanel.fallbackBarHeight
+    /// The fill on screen now.
+    private var fill: StripRGB?
     /// YeeHaw's icon in screen coordinates while shown. Its clicks are drawn by MenuBarAgent, so
     /// they reach the global monitor too; the icon's own action handles them instead.
     private var iconRect: NSRect = .zero
@@ -66,18 +74,20 @@ final class StripPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle, .fullScreenAuxiliary]
         backgroundColor = .clear
         isOpaque = false
-        // The window server's shadow, shaped by the rounded surface, as menus have.
+        // The window server's shadow, shaped by the rounded surface.
         hasShadow = true
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         animationBehavior = .none
         becomesKeyOnlyIfNeeded = false
 
-        glass.cornerRadius = Self.cornerRadius
-        solid.wantsLayer = true
-        solid.layer?.cornerRadius = Self.cornerRadius
-        solid.layer?.cornerCurve = .continuous
-        solid.layer?.masksToBounds = true
+        surface.wantsLayer = true
+        surface.layer?.cornerCurve = .continuous
+        surface.layer?.masksToBounds = true
+        hosting.autoresizingMask = [.width, .height]
+        surface.addSubview(hosting)
+        contentView = surface
+        watchForResampling()
     }
 
     override var canBecomeKey: Bool { true }
@@ -100,14 +110,21 @@ final class StripPanel: NSPanel {
         iconRect = Self.iconHitRect(anchor)
         let target = screen ?? NSScreen.screens.first { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) }
             ?? NSScreen.main
-        let visible = target?.visibleFrame ?? anchor
+        let frame = target?.frame ?? anchor
+        barHeight = Self.barHeight(screenFrame: frame, visibleFrame: target?.visibleFrame ?? frame)
+        displayID = target.flatMap(StripColorSampler.displayID)
         model.entries = items
         model.notice = notice
-        model.maxWidth = visible.width - 2 * Self.screenInset
-        installSurface()
-        let strip = Self.stripFrame(size: Self.measure(model), below: anchor, within: visible, inset: Self.screenInset)
+        model.barHeight = barHeight
+        model.maxWidth = frame.width - 2 * Self.screenInset
+        surface.layer?.cornerRadius = Self.cornerRadius(barHeight: barHeight)
+        // The last sample (or the neutral) goes on before the panel is ordered front, so the strip
+        // never opens in the wrong colour.
+        paint(currentFill(), animated: false)
+        let strip = Self.stripFrame(size: Self.measure(model), under: anchor, screen: frame, barHeight: barHeight,
+                                    inset: Self.screenInset)
         setFrame(strip, display: false)
-        Self.log.info("Strip at \(NSStringFromRect(strip), privacy: .public) under icon \(NSStringFromRect(anchor), privacy: .public), screen \(NSStringFromRect(visible), privacy: .public)")
+        Self.log.info("Strip at \(NSStringFromRect(strip), privacy: .public) under icon \(NSStringFromRect(anchor), privacy: .public), screen \(NSStringFromRect(frame), privacy: .public)")
 
         let wasShown = isShown
         isShown = true
@@ -120,6 +137,7 @@ final class StripPanel: NSPanel {
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().alphaValue = 1
         }
+        resampleForShow()
     }
 
     /// Fades the strip out and orders it out. Safe to call when it's already closed.
@@ -143,25 +161,92 @@ final class StripPanel: NSPanel {
         }
     }
 
-    /// Glass, or a solid menu-coloured surface under Reduce Transparency.
-    private func installSurface() {
-        // Only re-parented when the setting changed: re-setting the same content view drops its
-        // frame and leaves the strip empty.
-        hosting.autoresizingMask = [.width, .height]
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
-            solid.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-            if hosting.superview !== solid {
-                glass.contentView = nil
-                hosting.frame = solid.bounds
-                solid.addSubview(hosting)
-            }
-            if contentView !== solid { contentView = solid }
+    // MARK: Fill
+
+    /// The fill for the current display: its last sample, else the neutral for the appearance.
+    private func currentFill() -> StripRGB {
+        displayID.flatMap(sampler.cached) ?? StripColor.fallback(for: effectiveAppearance)
+    }
+
+    /// Fills the strip with `color` and picks the ink for it, crossfading when `animated`.
+    private func paint(_ color: StripRGB, animated: Bool) {
+        guard let layer = surface.layer else { return }
+        if animated, color != fill {
+            let fade = CABasicAnimation(keyPath: "backgroundColor")
+            fade.fromValue = layer.presentation()?.backgroundColor ?? layer.backgroundColor
+            fade.toValue = color.cgColor
+            fade.duration = Self.colorCrossfade
+            fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.add(fade, forKey: "fill")
+        }
+        layer.backgroundColor = color.cgColor
+        fill = color
+        let ink = StripColor.ink(for: color)
+        guard ink != model.ink else { return }
+        if animated {
+            withAnimation(.easeInOut(duration: Self.colorCrossfade)) { model.ink = ink }
         } else {
-            if glass.contentView !== hosting {
-                hosting.removeFromSuperview()
-                glass.contentView = hosting
+            model.ink = ink
+        }
+    }
+
+    /// Samples the bar on the strip's display and, if the strip is still showing, crossfades to
+    /// the result. Logs the colour's tier (once per show).
+    private func resampleForShow() {
+        let showing = generation
+        guard let display = displayID else {
+            Self.log.info("Strip colour: fallback (no display for the strip's screen)")
+            return
+        }
+        let height = barHeight
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome = await sampler.sample(display: display, barHeight: height)
+            switch outcome {
+            case .sampled(let color):
+                let rgb = color.byteTriple.map(String.init).joined(separator: ",")
+                Self.log.info("Strip colour: sampled \(rgb, privacy: .public)")
+            case .unavailable(let reason):
+                Self.log.info("Strip colour: fallback (\(reason, privacy: .public))")
             }
-            if contentView !== glass { contentView = glass }
+            guard isShown, generation == showing, displayID == display else { return }
+            paint(currentFill(), animated: true)
+        }
+    }
+
+    /// Resamples every screen's bar, so the next show anywhere opens in the right colour, and
+    /// crossfades the strip if it's showing.
+    private func resampleAllScreens() {
+        let screens = NSScreen.screens.compactMap { screen in
+            StripColorSampler.displayID(of: screen).map {
+                ($0, Self.barHeight(screenFrame: screen.frame, visibleFrame: screen.visibleFrame))
+            }
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            for (display, height) in screens {
+                _ = await sampler.sample(display: display, barHeight: height)
+            }
+            if isShown { paint(currentFill(), animated: true) }
+        }
+    }
+
+    /// Resamples when the active Space or the appearance changes: the wallpaper, the bar's tint
+    /// and the neutral can all change with them.
+    private func watchForResampling() {
+        resampleTriggers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: Self.spaceSettle)
+                self?.resampleAllScreens()
+            }
+        })
+        appearanceObservation = NSApp?.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if isShown { paint(currentFill(), animated: true) }
+                resampleAllScreens()
+            }
         }
     }
 
@@ -190,17 +275,28 @@ final class StripPanel: NSPanel {
             .sizeThatFits(in: CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
     }
 
-    /// Where the strip goes: its top `gap` below `anchor` (the icon), its leading edge
-    /// `leadingInset` left of the icon's, and at least `inset` inside `visible` on every side.
-    nonisolated static func stripFrame(size: NSSize, below anchor: NSRect, within visible: NSRect,
+    /// The menu bar's height on a screen: its top inset (39 pt on a notched MacBook), or
+    /// `fallbackBarHeight` when the bar is set to hide and the screen reports none.
+    nonisolated static func barHeight(screenFrame: NSRect, visibleFrame: NSRect) -> CGFloat {
+        let inset = screenFrame.maxY - visibleFrame.maxY
+        return inset >= 1 ? inset : fallbackBarHeight
+    }
+
+    /// The strip's continuous corner radius for a bar of `barHeight`.
+    nonisolated static func cornerRadius(barHeight: CGFloat) -> CGFloat {
+        barHeight / 4
+    }
+
+    /// Where the strip goes: its top `gap` below the menu bar (`barHeight` from the top of
+    /// `screen`), centred under `anchor` (the icon), and at least `inset` inside the screen's sides.
+    nonisolated static func stripFrame(size: NSSize, under anchor: NSRect, screen: NSRect, barHeight: CGFloat,
                                        inset: CGFloat) -> NSRect {
-        let width = min(size.width, visible.width - 2 * inset)
-        var x = anchor.minX - leadingInset
-        x = min(x, visible.maxX - inset - width)
-        x = max(x, visible.minX + inset)
-        var y = min(anchor.minY, visible.maxY) - gap - size.height
-        y = max(y, visible.minY + inset)
-        return NSRect(x: x, y: y, width: width, height: size.height)
+        let width = min(size.width, screen.width - 2 * inset)
+        var x = anchor.midX - width / 2
+        x = min(x, screen.maxX - inset - width)
+        x = max(x, screen.minX + inset)
+        let top = screen.maxY - barHeight - gap
+        return NSRect(x: x, y: top - size.height, width: width, height: size.height)
     }
 
     // MARK: Closing triggers
@@ -246,157 +342,5 @@ final class StripPanel: NSPanel {
             NotificationCenter.default.removeObserver(observer)
         }
         observers = []
-    }
-}
-
-// MARK: - SwiftUI
-
-@MainActor @Observable
-final class StripModel {
-    var entries: [StripEntry] = []
-    var notice: String?
-    /// The widest the strip may be (its screen, inset); wider tile rows scroll.
-    var maxWidth: CGFloat = .greatestFiniteMagnitude
-    @ObservationIgnored let onSelect: (BundleID) -> Void
-    @ObservationIgnored let onFix: () -> Void
-
-    init(onSelect: @escaping (BundleID) -> Void, onFix: @escaping () -> Void) {
-        self.onSelect = onSelect
-        self.onFix = onFix
-    }
-}
-
-/// The strip's content: the bar's row continued. Tiles are menu bar items: the height of the
-/// bar's selection capsule, 10 pt either side of a 16 pt glyph (DigUp's own item is 36 pt wide),
-/// and abutting like the bar's items. The padding puts the first tile right under YeeHaw's icon.
-struct StripView: View {
-    static let tileHeight: CGFloat = 24
-    static let glyphSize: CGFloat = 16
-    static let tileImagePadding: CGFloat = 10
-    static let minTileWidth: CGFloat = glyphSize + 2 * tileImagePadding
-    /// The bar's selection capsule is inset 5 pt into the item on each side (measured).
-    static let highlightInset: CGFloat = 5
-    static let horizontalPadding: CGFloat = StripPanel.leadingInset
-    static let verticalPadding: CGFloat = 5
-    static let font = Font(NSFont.menuFont(ofSize: 0))
-
-    let model: StripModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Group {
-                if model.entries.isEmpty {
-                    Text("No hidden icons. Right-click YeeHaw for Layout.")
-                        .font(Self.font)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .padding(.horizontal, 10)
-                        .frame(height: Self.tileHeight)
-                } else if Self.tilesWidth(model.entries) > tilesLimit {
-                    ScrollView(.horizontal, showsIndicators: false) { tiles }
-                        .frame(width: max(tilesLimit, Self.minTileWidth))
-                } else {
-                    tiles
-                }
-            }
-            .padding(.horizontal, Self.horizontalPadding)
-            .padding(.vertical, Self.verticalPadding)
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("Hidden menu bar icons")
-
-            if let notice = model.notice {
-                Divider().padding(.horizontal, 10)
-                NoticeRow(message: notice, onFix: model.onFix)
-            }
-        }
-        .fixedSize()
-    }
-
-    private var tiles: some View {
-        HStack(spacing: 0) {
-            ForEach(model.entries) { entry in
-                StripTile(entry: entry) { model.onSelect(entry.id) }
-            }
-        }
-    }
-
-    /// Room for tiles in a strip of `model.maxWidth`, less the padding.
-    private var tilesLimit: CGFloat {
-        model.maxWidth - 2 * Self.horizontalPadding
-    }
-
-    static func tileWidth(_ image: NSImage) -> CGFloat {
-        max(image.size.width + 2 * tileImagePadding, minTileWidth)
-    }
-
-    /// The natural width of the tile row.
-    static func tilesWidth(_ entries: [StripEntry]) -> CGFloat {
-        entries.reduce(0) { $0 + tileWidth($1.image) }
-    }
-}
-
-private struct StripTile: View {
-    let entry: StripEntry
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(nsImage: entry.image)
-                .renderingMode(entry.image.isTemplate ? .template : .original)
-                .interpolation(.high)
-                .foregroundStyle(.primary)
-                .frame(width: entry.image.size.width, height: entry.image.size.height)
-                .frame(width: StripView.tileWidth(entry.image), height: StripView.tileHeight)
-        }
-        .buttonStyle(StripButtonStyle())
-        .help(entry.name)
-        .accessibilityLabel(entry.name)
-        .accessibilityHint("Opens its menu")
-    }
-}
-
-/// The bar's own selection capsule, on hover and press.
-private struct StripButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        HighlightBody(configuration: configuration)
-    }
-
-    private struct HighlightBody: View {
-        let configuration: Configuration
-        @State private var hovering = false
-
-        var body: some View {
-            configuration.label
-                .background {
-                    Capsule(style: .continuous)
-                        .fill(Color.primary.opacity(configuration.isPressed ? 0.2 : hovering ? 0.12 : 0))
-                        .padding(.horizontal, StripView.highlightInset)
-                }
-                .contentShape(Rectangle())
-                .onHover { hovering = $0 }
-                .animation(.easeOut(duration: 0.1), value: hovering)
-        }
-    }
-}
-
-private struct NoticeRow: View {
-    let message: String
-    let onFix: () -> Void
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .symbolRenderingMode(.multicolor)
-            Text(message)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Spacer(minLength: 12)
-            Button("Fix…", action: onFix)
-                .controlSize(.small)
-        }
-        .font(StripView.font)
-        .padding(.leading, 10)
-        .padding(.trailing, 6)
-        .padding(.vertical, 6)
     }
 }
