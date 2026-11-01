@@ -29,6 +29,15 @@ final class StripPanel: NSPanel {
     /// Bumped on every show and dismiss, so a finished fade-out never hides a strip shown since.
     private var generation = 0
     private(set) var isShown = false
+    /// YeeHaw's icon in screen coordinates while shown. Its clicks are drawn by MenuBarAgent, so
+    /// they reach the global monitor too; the icon's own action handles them instead.
+    private var iconRect: NSRect = .zero
+    /// When the strip last closed by itself (an outside click or losing key), so the icon click
+    /// that caused it can tell the strip was open.
+    private(set) var lastAutoDismissal: ContinuousClock.Instant?
+
+    /// Why the strip closes.
+    enum DismissReason { case requested, outsideClick, resignedKey }
 
     /// `onClose` runs once each time a shown strip starts to close.
     init(menu: NSMenu, onSelect: @escaping (BundleID) -> Void, onFix: @escaping () -> Void,
@@ -66,25 +75,28 @@ final class StripPanel: NSPanel {
     override func resignKey() {
         super.resignKey()
         // Another app took the keyboard (Command-Tab, a click elsewhere): the strip is done.
-        dismiss()
+        dismiss(.resignedKey)
     }
 
     /// Shows `items` (and `notice`, a one-line problem with a Fix… button) just below `anchor`,
     /// YeeHaw's icon in screen coordinates, kept fully on `screen` (the status button's screen).
     func show(below anchor: NSRect, items: [StripEntry], notice: String? = nil, screen: NSScreen? = nil) {
         generation += 1
-        model.entries = items
-        model.notice = notice
-        model.presented = false
+        iconRect = anchor
         let target = screen ?? NSScreen.screens.first { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) }
             ?? NSScreen.main
         let visible = target?.visibleFrame ?? anchor
-        let fitting = hosting.fittingSize
-        let content = NSSize(width: fitting.width - 2 * Self.sideMargin,
-                             height: fitting.height - Self.gap - Self.bottomMargin)
+        model.entries = items
+        model.notice = notice
+        model.maxWidth = visible.width - 2 * Self.screenInset
+        model.presented = false
+        // Measured on a separate view: the panel's own hosting view never sizes the window, so
+        // nothing fights `setFrame` while the spring runs.
+        let content = Self.measure(model)
         let strip = Self.stripFrame(size: content, below: anchor, within: visible, inset: Self.screenInset)
         setFrame(NSRect(x: strip.minX - Self.sideMargin, y: strip.minY - Self.bottomMargin,
-                        width: strip.width + 2 * Self.sideMargin, height: fitting.height), display: false)
+                        width: strip.width + 2 * Self.sideMargin,
+                        height: strip.height + Self.gap + Self.bottomMargin), display: false)
 
         let wasShown = isShown
         isShown = true
@@ -102,9 +114,10 @@ final class StripPanel: NSPanel {
     }
 
     /// Fades the strip out and orders it out. Safe to call when it's already closed.
-    func dismiss() {
+    func dismiss(_ reason: DismissReason = .requested) {
         guard isShown else { return }
         isShown = false
+        if reason != .requested { lastAutoDismissal = .now }
         stopMonitoring()
         generation += 1
         let closing = generation
@@ -115,6 +128,13 @@ final class StripPanel: NSPanel {
             guard let self, self.generation == closing else { return }
             self.orderOut(nil)
         }
+    }
+
+    /// The visible strip's size (without the transparent margins) for the model's contents.
+    static func measure(_ model: StripModel) -> NSSize {
+        let fitting = NSHostingController(rootView: StripView(model: model))
+            .sizeThatFits(in: CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
+        return NSSize(width: max(0, fitting.width - 2 * sideMargin), height: max(0, fitting.height - gap - bottomMargin))
     }
 
     /// Where the visible strip goes: centred under `anchor`, its top `gap` below it, and at least
@@ -133,10 +153,14 @@ final class StripPanel: NSPanel {
     // MARK: Closing triggers
 
     private func startMonitoring() {
-        // Clicks in other apps. Clicks on YeeHaw's own icon reach its button, which toggles.
+        // Clicks in other apps, except on YeeHaw's own icon, whose button toggles the strip.
         if let monitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] _ in
-                MainActor.assumeIsolated { self?.dismiss() }
+                let location = NSEvent.mouseLocation
+                MainActor.assumeIsolated {
+                    guard let self, !self.iconRect.contains(location) else { return }
+                    self.dismiss(.outsideClick)
+                }
             }) {
             monitors.append(monitor)
         }
@@ -183,6 +207,8 @@ final class StripModel {
     var entries: [StripEntry] = []
     var notice: String?
     var presented = false
+    /// The widest the visible strip may be (its screen, inset); wider tile rows scroll.
+    var maxWidth: CGFloat = .greatestFiniteMagnitude
     @ObservationIgnored let onSelect: (BundleID) -> Void
     @ObservationIgnored let onFix: () -> Void
     @ObservationIgnored var onMore: (CGRect) -> Void = { _ in }
@@ -197,6 +223,9 @@ struct StripView: View {
     /// Tile size: a menu bar item with comfortable room around it.
     static let tileHeight: CGFloat = 28
     static let minTileWidth: CGFloat = 32
+    static let tileImagePadding: CGFloat = 6
+    static let tileSpacing: CGFloat = 2
+    static let moreWidth: CGFloat = 26
     static let padding: CGFloat = 4
     /// Concentric with the tiles' capsules (tile radius + padding).
     static let cornerRadius: CGFloat = tileHeight / 2 + padding
@@ -207,7 +236,7 @@ struct StripView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 2) {
+            HStack(spacing: Self.tileSpacing) {
                 if model.entries.isEmpty {
                     Text("Nothing hidden yet. Use Layout… to hide icons.")
                         .font(.system(size: 13))
@@ -215,10 +244,12 @@ struct StripView: View {
                         .lineLimit(1)
                         .padding(.horizontal, 10)
                         .frame(height: Self.tileHeight)
+                } else if Self.tilesWidth(model.entries) > tilesLimit {
+                    // "…" stays pinned outside the scroll.
+                    ScrollView(.horizontal, showsIndicators: false) { tiles }
+                        .frame(width: max(tilesLimit, Self.minTileWidth))
                 } else {
-                    ForEach(model.entries) { entry in
-                        StripTile(entry: entry) { model.onSelect(entry.id) }
-                    }
+                    tiles
                 }
                 Spacer(minLength: 0)
                 moreButton
@@ -241,12 +272,35 @@ struct StripView: View {
                             bottom: StripPanel.bottomMargin, trailing: StripPanel.sideMargin))
     }
 
+    private var tiles: some View {
+        HStack(spacing: Self.tileSpacing) {
+            ForEach(model.entries) { entry in
+                StripTile(entry: entry) { model.onSelect(entry.id) }
+            }
+        }
+    }
+
+    /// Room for tiles in a strip of `model.maxWidth`: less the padding, the "…" button, and the
+    /// row's two gaps (tiles to spacer, spacer to "…").
+    private var tilesLimit: CGFloat {
+        model.maxWidth - 2 * Self.padding - 2 * Self.tileSpacing - Self.moreWidth
+    }
+
+    static func tileWidth(_ image: NSImage) -> CGFloat {
+        max(image.size.width + 2 * tileImagePadding, minTileWidth)
+    }
+
+    /// The natural width of the tile row.
+    static func tilesWidth(_ entries: [StripEntry]) -> CGFloat {
+        entries.reduce(0) { $0 + tileWidth($1.image) } + tileSpacing * CGFloat(max(entries.count - 1, 0))
+    }
+
     private var moreButton: some View {
         Button { model.onMore(moreFrame) } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 26, height: Self.tileHeight)
+                .frame(width: Self.moreWidth, height: Self.tileHeight)
         }
         .buttonStyle(StripButtonStyle())
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { moreFrame = $0 }
@@ -284,9 +338,7 @@ private struct StripTile: View {
                 .interpolation(.high)
                 .foregroundStyle(.primary)
                 .frame(width: entry.image.size.width, height: entry.image.size.height)
-                .frame(minWidth: StripView.minTileWidth)
-                .padding(.horizontal, 6)
-                .frame(height: StripView.tileHeight)
+                .frame(width: StripView.tileWidth(entry.image), height: StripView.tileHeight)
         }
         .buttonStyle(StripButtonStyle())
         .help(entry.name)
@@ -304,10 +356,11 @@ private struct StripButtonStyle: ButtonStyle {
     private struct HighlightBody: View {
         let configuration: Configuration
         @State private var hovering = false
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
             configuration.label
-                .scaleEffect(configuration.isPressed ? 0.92 : 1)
+                .scaleEffect(configuration.isPressed && !reduceMotion ? 0.92 : 1)
                 .background {
                     Capsule(style: .continuous)
                         .fill(Color.primary.opacity(configuration.isPressed ? 0.16 : hovering ? 0.09 : 0))

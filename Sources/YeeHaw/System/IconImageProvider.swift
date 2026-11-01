@@ -24,8 +24,11 @@ final class IconImageProvider {
         self.directory = directory
     }
 
+    /// `<bundleID>-<indexInApp>`, with anything outside `[A-Za-z0-9.-]` replaced by `_`, so a key
+    /// is always a plain file name.
     static func cacheKey(bundleID: BundleID, indexInApp: Int) -> String {
-        "\(bundleID)-\(indexInApp)"
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-")
+        return String("\(bundleID)-\(indexInApp)".map { allowed.contains($0) ? $0 : "_" })
     }
 
     /// The cached glyph, else the app's icon.
@@ -67,13 +70,16 @@ final class IconImageProvider {
 
     // MARK: Cache
 
-    private func fileURL(_ key: String) -> URL {
-        directory.appending(path: "\(key).png", directoryHint: .notDirectory)
+    /// The cache file for `key`, or nil unless it resolves to a file directly inside `directory`.
+    func fileURL(_ key: String) -> URL? {
+        let url = directory.appending(path: "\(key).png", directoryHint: .notDirectory).standardizedFileURL
+        guard url.deletingLastPathComponent().path == directory.standardizedFileURL.path else { return nil }
+        return url
     }
 
     private func captured(_ key: String) -> NSImage? {
         if let cached = captures[key] { return cached }
-        let loaded = Self.loadCapture(fileURL(key))
+        let loaded = fileURL(key).flatMap(Self.loadCapture)
         captures[key] = .some(loaded)
         return loaded
     }
@@ -83,10 +89,11 @@ final class IconImageProvider {
     private func store(_ crop: CGImage, scale: CGFloat, key: String) {
         let rep = NSBitmapImageRep(cgImage: crop)
         rep.size = NSSize(width: CGFloat(crop.width) / scale, height: CGFloat(crop.height) / scale)
-        guard let data = rep.representation(using: .png, properties: [:]), written[key] != data else { return }
+        guard let url = fileURL(key), let data = rep.representation(using: .png, properties: [:]),
+              written[key] != data else { return }
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try data.write(to: fileURL(key), options: .atomic)
+            try data.write(to: url, options: .atomic)
             written[key] = data
         } catch {
             Self.log.error("Cannot save glyph \(key, privacy: .public): \(error, privacy: .public)")
@@ -169,8 +176,12 @@ final class IconImageProvider {
 enum GlyphImage {
     /// Tallest tile image, in points; taller glyphs are scaled down.
     static let maxHeight: CGFloat = 22
-    /// Alpha (0...255) above which a pixel counts as part of the glyph.
+    /// Alpha (0...255) above which a pixel counts as part of the glyph's bounding box.
     static let inkAlpha: UInt8 = 10
+    /// Alpha below which a pixel counts as clear background (about 5%).
+    static let clearAlpha: UInt8 = 13
+    /// Alpha above which a pixel is solid enough to judge its colour (about 20%).
+    static let colorJudgedAlpha: UInt8 = 51
     /// A real menu bar item is mostly clear; less clear area than this means a solid background.
     static let minClearFraction = 0.15
     /// Visible pixels more saturated than `colorSaturation` above this share make a colour glyph.
@@ -206,12 +217,12 @@ enum GlyphImage {
         for y in 0..<pixels.height {
             for x in 0..<pixels.width {
                 let (r, g, b, a) = pixels[x, y]
-                if a < 13 { clear += 1 }
+                if a < clearAlpha { clear += 1 }
                 peak = max(peak, a)
                 guard a > inkAlpha else { continue }
                 minX = min(minX, x); maxX = max(maxX, x)
                 minY = min(minY, y); maxY = max(maxY, y)
-                guard a > 51 else { continue }
+                guard a > colorJudgedAlpha else { continue }
                 visible += 1
                 // Premultiplied, so the ratio is unaffected by alpha.
                 let high = max(r, g, b), low = min(r, g, b)

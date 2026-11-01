@@ -158,6 +158,7 @@ enum DebugCommand {
             needsGrant.append(.positions)
         }
         lines.append("needsGrant: \(listed(needsGrant.map(\.rawValue)))")
+        lines.append("watcher: \(AllowListWatcher.probeMode(grants: grants).rawValue)")
         return lines
     }
 

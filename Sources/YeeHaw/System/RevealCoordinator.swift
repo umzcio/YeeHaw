@@ -27,7 +27,8 @@ final class RevealCoordinator {
     private let trace: @MainActor (String) -> Void
     private var busy = false
 
-    /// Runs once the revealed item is drawn, before it's pressed (the strip photographs it here).
+    /// Started once the revealed item is drawn (the strip photographs it). It runs in its own
+    /// task, so the press and `endReveal` never wait on it.
     var onDrawn: (@MainActor (MenuBarItem) async -> Void)?
 
     /// `trace` receives each step with its timing; debug runs write it to probe.txt.
@@ -36,11 +37,20 @@ final class RevealCoordinator {
         self.trace = trace
     }
 
+    /// How a call to `open` went, as far as the app appearing is concerned.
+    enum Outcome {
+        /// The app was drawn next to YeeHaw (whatever happened with the press afterwards).
+        case revealed
+        /// Another reveal was open, so this one never started.
+        case ignored
+        /// `beginReveal` threw; the reveal was ended.
+        case failed(Error)
+    }
+
     /// Reveal → press → wait until the app is done with its menu → `endReveal`. While one reveal
     /// is open, further calls are ignored, so two reveals never share the controller's one slot.
-    /// Returns `beginReveal`'s error when the reveal couldn't start, else nil.
     @discardableResult
-    func open(_ id: BundleID, nextTo yeehaw: MenuBarItem) async -> Error? {
+    func open(_ id: BundleID, nextTo yeehaw: MenuBarItem) async -> Outcome {
         let start = ContinuousClock.now
         let step: @MainActor (String) -> Void = { [trace] text in
             let line = "reveal \(id) +\(Self.milliseconds(ContinuousClock.now - start)) ms: \(text)"
@@ -49,7 +59,7 @@ final class RevealCoordinator {
         }
         guard !busy else {
             step("ignored, another reveal is open")
-            return nil
+            return .ignored
         }
         busy = true
         defer { busy = false }
@@ -62,15 +72,15 @@ final class RevealCoordinator {
             // couldn't undo itself (a failed write after the slot was taken, or a failed undo).
             step("beginReveal failed: \(error)")
             await end(step)
-            return error
+            return .failed(error)
         }
         step("reveal done, drawn at x \(item.x) width \(item.width)")
-        await onDrawn?(item)
+        if let onDrawn { Task { await onDrawn(item) } }
 
         guard let pid = NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.processIdentifier else {
             step("app is not running")
             await end(step)
-            return nil
+            return .revealed
         }
         let session = RevealSession(pid: pid)
         if !session.isObserving { step("AX observer unavailable; only clicks and the timeout can end it") }
@@ -81,7 +91,7 @@ final class RevealCoordinator {
         }
         session.tearDown()
         await end(step)
-        return nil
+        return .revealed
     }
 
     /// `endReveal`, retried once after `endRetryDelay`. It runs in its own unstructured task so a

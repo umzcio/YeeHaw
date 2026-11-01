@@ -66,6 +66,16 @@ func crop(width: Int = 60, height: Int = 78, ink: CGRect, color: CGColor = .whit
         #expect(IconImageProvider.cacheKey(bundleID: "com.abdurrahim.DigUp", indexInApp: 0) == "com.abdurrahim.DigUp-0")
     }
 
+    @Test func cacheNamesAreSanitisedAndStayInTheGlyphsFolder() throws {
+        #expect(IconImageProvider.cacheKey(bundleID: "../evil/app id", indexInApp: 2) == ".._evil_app_id-2")
+        let directory = try Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let provider = IconImageProvider(directory: directory)
+        let url = try #require(provider.fileURL(IconImageProvider.cacheKey(bundleID: "../evil", indexInApp: 0)))
+        #expect(url.deletingLastPathComponent().path == directory.standardizedFileURL.path)
+        #expect(provider.fileURL("../outside") == nil)
+    }
+
     @Test func loadsACachedCaptureFromDisk() throws {
         let directory = try Self.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

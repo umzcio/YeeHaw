@@ -44,21 +44,24 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         self.controller = controller
         statusItem = status
 
+        // Started before the launch: the controller's gate runs calls in order, so a change seen
+        // while launching is applied right after it (ruling M9).
+        watcher = AllowListWatcher(grants: grants) {
+            Task {
+                do {
+                    try await controller.allowListChanged()
+                } catch {
+                    Self.log.error("Allow list change not applied: \(error, privacy: .public)")
+                }
+            }
+        }
         Task {
+            await status.captureHiddenBeforeLaunch()
             do {
                 try await controller.launch()
             } catch {
                 // A missing grant is recorded in state.needsGrant, which the strip's notice shows.
                 Self.log.error("Launch failed: \(error, privacy: .public)")
-            }
-            watcher = AllowListWatcher {
-                Task {
-                    do {
-                        try await controller.allowListChanged()
-                    } catch {
-                        Self.log.error("Allow list change not applied: \(error, privacy: .public)")
-                    }
-                }
             }
             await status.start(grants: grants)
         }

@@ -27,7 +27,13 @@ final class StatusItemController: NSObject {
     private var strip: StripPanel!
     /// The last reveal's failure, when macOS didn't draw the app in time; cleared by a success.
     private var revealFailure: BundleID?
+    /// Set when a click in the strip found no drawn YeeHaw icon to reveal next to.
+    private var ownIconMissing = false
     private var refreshTask: Task<Void, Never>?
+    private var highlight: HighlightKeeper!
+    /// A click on the icon within this long after the strip closed by itself is the click that
+    /// closed it (ruling I2), so it leaves the strip closed instead of reopening it.
+    nonisolated static let reopenGuard: Duration = .milliseconds(300)
 
     init(controller: MenuBarController, reveal: RevealCoordinator, openLayout: @escaping () -> Void,
          openSettings: @escaping () -> Void) {
@@ -54,9 +60,21 @@ final class StatusItemController: NSObject {
                 self?.strip.dismiss()
                 self?.openSettings()
             },
-            onClose: { [weak self] in self?.statusItem.button?.highlight(false) })
+            onClose: { [weak self] in self?.highlight.stop() })
+        highlight = HighlightKeeper(
+            isHighlighted: { [weak self] in self?.statusItem.button?.isHighlighted ?? false },
+            setHighlighted: { [weak self] in self?.statusItem.button?.highlight($0) })
         // Photograph a revealed item while it's drawn; a hidden one can't be photographed later.
         reveal.onDrawn = { [icons] item in await icons.captureIfPermitted([item]) }
+    }
+
+    /// Call before `controller.launch()`: photographs the saved hidden apps that are drawn right
+    /// now (after a quit switched them back on), before the launch hides them again (ruling I3).
+    func captureHiddenBeforeLaunch() async {
+        let hidden = Set(controller.state.hidden)
+        guard !hidden.isEmpty, CGPreflightScreenCaptureAccess() else { return }
+        await controller.refresh()
+        await icons.captureIfPermitted(controller.items.filter { $0.bundleID.map(hidden.contains) ?? false })
     }
 
     /// Call once the controller has launched: finds YeeHaw's own drawn item (waiting for its
@@ -73,16 +91,29 @@ final class StatusItemController: NSObject {
             || !modifiers.intersection([.control, .option]).isEmpty
     }
 
+    enum ClickAction: Equatable { case open, close, stayClosed }
+
+    /// What a plain click on the icon does. `sinceAutoDismissal` is how long ago the strip closed
+    /// by itself (nil if it never did).
+    nonisolated static func clickAction(stripShown: Bool, sinceAutoDismissal: Duration?) -> ClickAction {
+        if stripShown { return .close }
+        if let since = sinceAutoDismissal, since < reopenGuard { return .stayClosed }
+        return .open
+    }
+
     // MARK: Icon
 
     @objc private func iconClicked(_ sender: NSStatusBarButton) {
         let event = NSApp.currentEvent
         if Self.isSecondaryClick(type: event?.type ?? .leftMouseDown, modifiers: event?.modifierFlags ?? []) {
             showMenu()
-        } else if strip.isShown {
-            strip.dismiss()
-        } else {
-            openStrip()
+            return
+        }
+        switch Self.clickAction(stripShown: strip.isShown,
+                                sinceAutoDismissal: strip.lastAutoDismissal.map { .now - $0 }) {
+        case .close: strip.dismiss()
+        case .open: openStrip()
+        case .stayClosed: break
         }
     }
 
@@ -137,11 +168,7 @@ final class StatusItemController: NSObject {
         guard let button = statusItem.button, let window = button.window else { return }
         let anchor = window.convertToScreen(button.convert(button.bounds, to: nil))
         strip.show(below: anchor, items: entries(), notice: notice(), screen: window.screen)
-        // After the button's own click tracking, which would clear it, and only if still open.
-        DispatchQueue.main.async { [weak self] in
-            guard let self, strip.isShown else { return }
-            statusItem.button?.highlight(true)
-        }
+        highlight.start()
 
         // Re-read the bar in the background: YeeHaw's icon may have moved, and drawn items get
         // fresh photographs. The strip itself opens at once from the saved state.
@@ -149,7 +176,10 @@ final class StatusItemController: NSObject {
         refreshTask = Task { [weak self] in
             guard let self else { return }
             await controller.refresh()
-            if let drawn = OwnIconLocator.drawn(in: controller.items) { yeehawItem = drawn }
+            if let drawn = OwnIconLocator.drawn(in: controller.items) {
+                yeehawItem = drawn
+                ownIconMissing = false
+            }
             await icons.captureIfPermitted(controller.items)
         }
     }
@@ -166,6 +196,9 @@ final class StatusItemController: NSObject {
         if let id = revealFailure {
             return "\(Self.name(of: id)) didn't appear in the menu bar in time."
         }
+        if ownIconMissing {
+            return "YeeHaw can't find its own menu bar icon."
+        }
         return nil
     }
 
@@ -178,13 +211,17 @@ final class StatusItemController: NSObject {
             }
             guard let yeehaw = yeehawItem else {
                 Self.log.error("Cannot open \(id, privacy: .public): YeeHaw's own icon isn't drawn")
+                ownIconMissing = true
                 return
             }
-            let error = await reveal.open(id, nextTo: yeehaw)
-            if case ControllerError.notHonored(let failed)? = error {
-                revealFailure = failed
-            } else if error == nil {
+            ownIconMissing = false
+            switch await reveal.open(id, nextTo: yeehaw) {
+            case .revealed:
                 revealFailure = nil
+            case .failed(ControllerError.notHonored(let failed)):
+                revealFailure = failed
+            case .failed, .ignored:
+                break
             }
         }
     }
@@ -197,5 +234,46 @@ final class StatusItemController: NSObject {
             return url.deletingPathExtension().lastPathComponent
         }
         return id
+    }
+}
+
+/// Keeps YeeHaw's icon highlighted while the strip is open. The status button clears its own
+/// highlight when its click tracking ends, so a highlight set from the click's action doesn't
+/// stick. Instead, while started, every pass of the main run loop in the default mode (never
+/// during tracking, which runs in the event-tracking mode) puts the highlight back.
+@MainActor
+final class HighlightKeeper {
+    private let isHighlighted: () -> Bool
+    private let setHighlighted: (Bool) -> Void
+    private var observer: CFRunLoopObserver?
+
+    init(isHighlighted: @escaping () -> Bool, setHighlighted: @escaping (Bool) -> Void) {
+        self.isHighlighted = isHighlighted
+        self.setHighlighted = setHighlighted
+    }
+
+    var isActive: Bool { observer != nil }
+
+    func start() {
+        sync(wanted: true)
+        guard observer == nil else { return }
+        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, true, 0) {
+            [weak self] _, _ in
+            MainActor.assumeIsolated { self?.sync(wanted: true) }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .defaultMode)
+        self.observer = observer
+    }
+
+    func stop() {
+        if let observer {
+            CFRunLoopObserverInvalidate(observer)
+            self.observer = nil
+        }
+        sync(wanted: false)
+    }
+
+    private func sync(wanted: Bool) {
+        if isHighlighted() != wanted { setHighlighted(wanted) }
     }
 }
