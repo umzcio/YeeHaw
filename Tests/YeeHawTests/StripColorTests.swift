@@ -1,4 +1,5 @@
 import AppKit
+import Synchronization
 import Testing
 @testable import YeeHaw
 
@@ -25,13 +26,10 @@ func band(_ colors: [(Int, Int, Int, Int)], width: Int = 8) -> CGImage {
         #expect(StripColor.ink(for: StripRGB(bytes: 230, 230, 230)) == .black)
     }
 
-    @Test(arguments: 110...130)
-    func midGreyGetsTheHigherContrastInk(level: Int) {
-        let fill = StripRGB(bytes: level, level, level)
-        let luminance = StripColor.relativeLuminance(fill)
-        let onWhite = StripColor.contrastRatio(luminance, 1)
-        let onBlack = StripColor.contrastRatio(luminance, 0)
-        #expect(StripColor.ink(for: fill) == (onWhite > onBlack ? .white : .black))
+    @Test(arguments: [(0, StripInk.white), (60, .white), (100, .white), (117, .white),
+                      (118, .black), (128, .black), (180, .black), (255, .black)])
+    func greysGetTheHigherContrastInk(level: Int, ink: StripInk) {
+        #expect(StripColor.ink(for: StripRGB(bytes: level, level, level)) == ink)
     }
 
     @Test func midGreyFlipsBetween117And118() {
@@ -74,6 +72,29 @@ func band(_ colors: [(Int, Int, Int, Int)], width: Int = 8) -> CGImage {
         let menuBar = band([(0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0), (255, 255, 255, 255)])
         let color = try #require(StripColor.backdropColor(composite: composite, menuBarLayer: menuBar))
         #expect(color.byteTriple == [14, 15, 27])
+    }
+
+    @Test func anOpaqueBackdropKeepsItsColourAndLeavesLightTextOut() throws {
+        // "Show menu bar background" or Reduce Transparency: the bar layer is opaque everywhere,
+        // text included, so the text has to be told apart by colour.
+        let composite = band([(40, 40, 50, 255), (40, 40, 50, 255), (40, 40, 50, 255), (250, 250, 250, 255)])
+        let menuBar = composite
+        let color = try #require(StripColor.backdropColor(composite: composite, menuBarLayer: menuBar))
+        #expect(color.byteTriple == [40, 40, 50])
+    }
+
+    @Test func aTintedBackdropWithAClearGapKeepsTheTint() throws {
+        // One clear stretch of the bar layer (wallpaper showing through) must not stand in for the backdrop.
+        let composite = band([(40, 40, 50, 255), (40, 40, 50, 255), (14, 15, 27, 255), (250, 250, 250, 255)])
+        let menuBar = band([(30, 30, 30, 90), (30, 30, 30, 90), (0, 0, 0, 0), (255, 255, 255, 255)])
+        let color = try #require(StripColor.backdropColor(composite: composite, menuBarLayer: menuBar))
+        #expect(color.byteTriple == [40, 40, 50])
+    }
+
+    @Test func tellsAnOpaqueBarLayerFromAClearOne() {
+        #expect(StripColor.isOpaqueBackdrop(band([(40, 40, 50, 255), (40, 40, 50, 255), (40, 40, 50, 255), (250, 250, 250, 255)])))
+        #expect(!StripColor.isOpaqueBackdrop(band([(0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0), (255, 255, 255, 255)])))
+        #expect(!StripColor.isOpaqueBackdrop(band([(30, 30, 30, 90), (30, 30, 30, 90), (0, 0, 0, 0), (255, 255, 255, 255)])))
     }
 
     @Test func aTranslucentBackdropIsKeptAndTextOnItLeftOut() throws {
@@ -120,5 +141,74 @@ func band(_ colors: [(Int, Int, Int, Int)], width: Int = 8) -> CGImage {
         for window in others {
             #expect(StripColorSampler.role(of: window) == nil, "\(window)")
         }
+    }
+}
+
+/// Hands out scripted capture results and counts the calls.
+final class ScriptedCapture: Sendable {
+    let calls = Mutex(0)
+    let results: [StripColorSampler.Outcome]
+    let delays: [Duration]
+
+    init(_ results: [StripColorSampler.Outcome], delays: [Duration] = []) {
+        self.results = results
+        self.delays = delays
+    }
+
+    var capture: StripColorSampler.Capture {
+        { [self] _, _ in
+            let call = calls.withLock { value in
+                defer { value += 1 }
+                return value
+            }
+            if call < delays.count { try? await Task.sleep(for: delays[call]) }
+            return results[min(call, results.count - 1)]
+        }
+    }
+}
+
+@MainActor final class Permission {
+    var granted = true
+}
+
+@Suite @MainActor struct StripColorSamplerTests {
+    static let navy = StripRGB(bytes: 14, 15, 27)
+    static let grey = StripRGB(bytes: 120, 120, 120)
+
+    @Test func aSuccessIsCached() async {
+        let sampler = StripColorSampler(permitted: { true }, capture: ScriptedCapture([.sampled(Self.navy)]).capture)
+        #expect(await sampler.sample(display: 1, barHeight: 39) == .sampled(Self.navy))
+        #expect(sampler.cached(for: 1) == Self.navy)
+        #expect(sampler.cached(for: 2) == nil)
+    }
+
+    @Test func losingScreenRecordingClearsTheCache() async {
+        let permission = Permission()
+        let script = ScriptedCapture([.sampled(Self.navy)])
+        let sampler = StripColorSampler(permitted: { permission.granted }, capture: script.capture)
+        _ = await sampler.sample(display: 1, barHeight: 39)
+        permission.granted = false
+        #expect(await sampler.sample(display: 1, barHeight: 39) == .noPermission)
+        #expect(sampler.cached(for: 1) == nil)
+        #expect(script.calls.withLock { $0 } == 1)
+    }
+
+    @Test func aTransientFailureKeepsTheLastGoodColour() async {
+        let sampler = StripColorSampler(permitted: { true },
+                                        capture: ScriptedCapture([.sampled(Self.navy), .failed("capture failed: timeout")]).capture)
+        _ = await sampler.sample(display: 1, barHeight: 39)
+        #expect(await sampler.sample(display: 1, barHeight: 39) == .failed("capture failed: timeout"))
+        #expect(sampler.cached(for: 1) == Self.navy)
+    }
+
+    @Test func anOlderSampleFinishingLastIsDropped() async throws {
+        // The first capture is slow and returns grey; the second, started later, returns navy first.
+        let script = ScriptedCapture([.sampled(Self.grey), .sampled(Self.navy)], delays: [.milliseconds(300)])
+        let sampler = StripColorSampler(permitted: { true }, capture: script.capture)
+        let older = Task { await sampler.sample(display: 1, barHeight: 39) }
+        while script.calls.withLock({ $0 }) == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(await sampler.sample(display: 1, barHeight: 39) == .sampled(Self.navy))
+        #expect(await older.value == .sampled(Self.grey))
+        #expect(sampler.cached(for: 1) == Self.navy)
     }
 }

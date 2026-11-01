@@ -24,8 +24,6 @@ final class StripPanel: NSPanel {
     nonisolated static let gap: CGFloat = 1
     /// Closest the strip comes to a screen edge.
     nonisolated static let screenInset: CGFloat = 6
-    /// The bar height used when the screen reports no menu bar (it's set to hide).
-    nonisolated static let fallbackBarHeight: CGFloat = 24
     /// Fade in and out, like a native menu.
     static let fadeIn: Double = 0.16
     static let fadeOut: Double = 0.12
@@ -50,7 +48,7 @@ final class StripPanel: NSPanel {
     private(set) var isShown = false
     /// The display and bar height the strip was last shown on.
     private var displayID: CGDirectDisplayID?
-    private var barHeight = StripPanel.fallbackBarHeight
+    private var barHeight = NSStatusBar.system.thickness
     /// The fill on screen now.
     private var fill: StripRGB?
     /// YeeHaw's icon in screen coordinates while shown. Its clicks are drawn by MenuBarAgent, so
@@ -111,7 +109,8 @@ final class StripPanel: NSPanel {
         let target = screen ?? NSScreen.screens.first { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) }
             ?? NSScreen.main
         let frame = target?.frame ?? anchor
-        barHeight = Self.barHeight(screenFrame: frame, visibleFrame: target?.visibleFrame ?? frame)
+        barHeight = Self.barHeight(screenFrame: frame, visibleFrame: target?.visibleFrame ?? frame,
+                                   fallback: target.map(Self.hiddenBarHeight) ?? NSStatusBar.system.thickness)
         displayID = target.flatMap(StripColorSampler.displayID)
         model.entries = items
         model.notice = notice
@@ -204,14 +203,23 @@ final class StripPanel: NSPanel {
             let outcome = await sampler.sample(display: display, barHeight: height)
             switch outcome {
             case .sampled(let color):
-                let rgb = color.byteTriple.map(String.init).joined(separator: ",")
-                Self.log.info("Strip colour: sampled \(rgb, privacy: .public)")
-            case .unavailable(let reason):
-                Self.log.info("Strip colour: fallback (\(reason, privacy: .public))")
+                Self.log.info("Strip colour: sampled \(Self.describe(color), privacy: .public)")
+            case .noPermission:
+                Self.log.info("Strip colour: fallback (no Screen Recording)")
+            case .failed(let reason):
+                if let kept = sampler.cached(for: display) {
+                    Self.log.info("Strip colour: kept \(Self.describe(kept), privacy: .public) (\(reason, privacy: .public))")
+                } else {
+                    Self.log.info("Strip colour: fallback (\(reason, privacy: .public))")
+                }
             }
             guard isShown, generation == showing, displayID == display else { return }
             paint(currentFill(), animated: true)
         }
+    }
+
+    private static func describe(_ color: StripRGB) -> String {
+        color.byteTriple.map(String.init).joined(separator: ",")
     }
 
     /// Resamples every screen's bar, so the next show anywhere opens in the right colour, and
@@ -219,7 +227,8 @@ final class StripPanel: NSPanel {
     private func resampleAllScreens() {
         let screens = NSScreen.screens.compactMap { screen in
             StripColorSampler.displayID(of: screen).map {
-                ($0, Self.barHeight(screenFrame: screen.frame, visibleFrame: screen.visibleFrame))
+                ($0, Self.barHeight(screenFrame: screen.frame, visibleFrame: screen.visibleFrame,
+                                    fallback: Self.hiddenBarHeight(screen)))
             }
         }
         Task { [weak self] in
@@ -231,9 +240,15 @@ final class StripPanel: NSPanel {
         }
     }
 
-    /// Resamples when the active Space or the appearance changes: the wallpaper, the bar's tint
-    /// and the neutral can all change with them.
+    /// Samples every screen now, so the first show after launch opens in the bar's colour, and
+    /// again when a display comes or goes, the active Space changes or the appearance changes: the
+    /// wallpaper, the bar's tint and the neutral can all change with them.
     private func watchForResampling() {
+        resampleAllScreens()
+        resampleTriggers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.resampleAllScreens() }
+        })
         resampleTriggers.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -276,10 +291,15 @@ final class StripPanel: NSPanel {
     }
 
     /// The menu bar's height on a screen: its top inset (39 pt on a notched MacBook), or
-    /// `fallbackBarHeight` when the bar is set to hide and the screen reports none.
-    nonisolated static func barHeight(screenFrame: NSRect, visibleFrame: NSRect) -> CGFloat {
+    /// `fallback` when the bar is set to hide and the screen reports none.
+    nonisolated static func barHeight(screenFrame: NSRect, visibleFrame: NSRect, fallback: CGFloat) -> CGFloat {
         let inset = screenFrame.maxY - visibleFrame.maxY
-        return inset >= 1 ? inset : fallbackBarHeight
+        return inset >= 1 ? inset : fallback
+    }
+
+    /// The bar's height on `screen` while it's hidden: the notch's safe area, else the status bar's thickness.
+    static func hiddenBarHeight(_ screen: NSScreen) -> CGFloat {
+        max(screen.safeAreaInsets.top, NSStatusBar.system.thickness)
     }
 
     /// The strip's continuous corner radius for a bar of `barHeight`.

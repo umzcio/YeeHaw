@@ -20,13 +20,15 @@ import Testing
     }
 
     @Test func heightComesFromTheScreensTopInsetNotTheAnchor() {
-        #expect(StripPanel.barHeight(screenFrame: Self.screen, visibleFrame: Self.visible) == 39)
+        #expect(StripPanel.barHeight(screenFrame: Self.screen, visibleFrame: Self.visible, fallback: 37) == 39)
         let secondary = NSRect(x: -1440, y: 0, width: 1440, height: 900)
-        #expect(StripPanel.barHeight(screenFrame: secondary, visibleFrame: NSRect(x: -1440, y: 80, width: 1440, height: 796)) == 24)
+        #expect(StripPanel.barHeight(screenFrame: secondary, visibleFrame: NSRect(x: -1440, y: 80, width: 1440, height: 796),
+                                     fallback: 24) == 24)
     }
 
-    @Test func aHiddenMenuBarStillGetsABarHeight() {
-        #expect(StripPanel.barHeight(screenFrame: Self.screen, visibleFrame: Self.screen) == StripPanel.fallbackBarHeight)
+    @Test func aHiddenMenuBarUsesTheFallbackHeight() {
+        // The caller passes max(safe-area top inset, status bar thickness).
+        #expect(StripPanel.barHeight(screenFrame: Self.screen, visibleFrame: Self.screen, fallback: 37) == 37)
     }
 
     @Test func cornerRadiusIsAQuarterOfTheHeight() {

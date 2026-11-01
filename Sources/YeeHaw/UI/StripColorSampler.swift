@@ -18,36 +18,57 @@ struct BackdropWindowInfo: Equatable, Sendable {
 /// "Menubar" window also draws the app menus and the clock, which `StripColor.backdropColor`
 /// leaves out.
 ///
-/// It never asks for Screen Recording: without it, sampling reports unavailable.
+/// It never asks for Screen Recording: without it, sampling reports `noPermission`.
 @MainActor
 final class StripColorSampler {
     enum Role: Equatable { case menuBar, wallpaper }
 
     enum Outcome: Equatable, Sendable {
         case sampled(StripRGB)
-        /// Why there's no sample, for the log.
-        case unavailable(String)
+        /// Screen Recording isn't granted.
+        case noPermission
+        /// The capture didn't produce a colour, and why, for the log.
+        case failed(String)
     }
 
-    private var cache: [CGDirectDisplayID: StripRGB] = [:]
+    /// Takes one sample of a display's bar, given its height.
+    typealias Capture = @Sendable (CGDirectDisplayID, CGFloat) async -> Outcome
 
-    /// The last sample taken on `display`, if the last attempt succeeded.
+    private let permitted: @MainActor () -> Bool
+    private let capture: Capture
+    private var cache: [CGDirectDisplayID: StripRGB] = [:]
+    /// The number of the last sample started, and the newest one whose result was kept, per display.
+    private var started: [CGDirectDisplayID: Int] = [:]
+    private var applied: [CGDirectDisplayID: Int] = [:]
+
+    init(permitted: @escaping @MainActor () -> Bool = { CGPreflightScreenCaptureAccess() },
+         capture: @escaping Capture = { display, height in await StripColorSampler.screenCapture(display: display, barHeight: height) }) {
+        self.permitted = permitted
+        self.capture = capture
+    }
+
+    /// The last good sample of `display`'s bar.
     func cached(for display: CGDirectDisplayID) -> StripRGB? {
         cache[display]
     }
 
-    /// Samples the bar on `display`, whose menu bar is `barHeight` points tall, and caches it.
-    /// A failed attempt clears the cache, so a stale colour isn't shown after permission is withdrawn.
+    /// Samples the bar on `display`, whose menu bar is `barHeight` points tall.
+    ///
+    /// A success is cached unless a sample started later has already been kept. Without Screen
+    /// Recording the cache is cleared, so a stale colour isn't shown once permission is withdrawn;
+    /// a failed capture keeps the last good colour.
     func sample(display: CGDirectDisplayID, barHeight: CGFloat) async -> Outcome {
-        let outcome: Outcome
-        if CGPreflightScreenCaptureAccess() {
-            outcome = await Self.capture(display: display, barHeight: barHeight)
-        } else {
-            outcome = .unavailable("no Screen Recording")
+        guard permitted() else {
+            cache[display] = nil
+            applied[display] = started[display] // A capture still in flight is stale now.
+            return .noPermission
         }
-        switch outcome {
-        case .sampled(let color): cache[display] = color
-        case .unavailable: cache[display] = nil
+        let number = (started[display] ?? 0) + 1
+        started[display] = number
+        let outcome = await capture(display, barHeight)
+        if case .sampled(let color) = outcome, number > applied[display] ?? 0 {
+            applied[display] = number
+            cache[display] = color
         }
         return outcome
     }
@@ -70,12 +91,13 @@ final class StripColorSampler {
         }
     }
 
+    /// Samples the bar with ScreenCaptureKit (see the type's comment).
     @concurrent
-    private static func capture(display id: CGDirectDisplayID, barHeight: CGFloat) async -> Outcome {
+    nonisolated static func screenCapture(display id: CGDirectDisplayID, barHeight: CGFloat) async -> Outcome {
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             guard let display = content.displays.first(where: { $0.displayID == id }) else {
-                return .unavailable("display \(id) not in shareable content")
+                return .failed("display \(id) not in shareable content")
             }
             let onDisplay = content.windows.filter { $0.frame.intersects(display.frame) }
             func windows(_ role: Role) -> [SCWindow] {
@@ -85,15 +107,24 @@ final class StripColorSampler {
                 }
             }
             let menuBar = windows(.menuBar)
-            guard !menuBar.isEmpty else { return .unavailable("no Menubar window") }
-            let composite = try await band(of: display, including: menuBar + windows(.wallpaper), barHeight: barHeight)
+            guard !menuBar.isEmpty else { return .failed("no Menubar window") }
+            let wallpaper = windows(.wallpaper)
             let layer = try await band(of: display, including: menuBar, barHeight: barHeight)
+            let composite: CGImage
+            if !wallpaper.isEmpty {
+                composite = try await band(of: display, including: menuBar + wallpaper, barHeight: barHeight)
+            } else if StripColor.isOpaqueBackdrop(layer) {
+                // An opaque backdrop hides the wallpaper anyway.
+                composite = layer
+            } else {
+                return .failed("no Wallpaper window")
+            }
             guard let color = StripColor.backdropColor(composite: composite, menuBarLayer: layer) else {
-                return .unavailable("blank capture")
+                return .failed("blank capture")
             }
             return .sampled(color)
         } catch {
-            return .unavailable("capture failed: \(error.localizedDescription)")
+            return .failed("capture failed: \(error.localizedDescription)")
         }
     }
 

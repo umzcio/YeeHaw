@@ -9,7 +9,7 @@ final class StripModel {
     /// The widest the strip may be (its screen, inset); wider tile rows scroll.
     var maxWidth: CGFloat = .greatestFiniteMagnitude
     /// The menu bar's height on the strip's screen; every row is this tall.
-    var barHeight: CGFloat = StripPanel.fallbackBarHeight
+    var barHeight: CGFloat = NSStatusBar.system.thickness
     /// Black or white, whichever reads best on the strip's fill.
     var ink: StripInk = .black
     @ObservationIgnored let onSelect: (BundleID) -> Void

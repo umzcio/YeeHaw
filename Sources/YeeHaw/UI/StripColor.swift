@@ -68,21 +68,67 @@ enum StripColor {
 
     /// The bar's backdrop colour from a band captured twice: `composite` (the bar's backdrop over
     /// the wallpaper) and `menuBarLayer` (the bar's own window alone, which on 27.2 also draws the
-    /// app menus and the clock). Only columns where the bar layer is at its least opaque count, so
-    /// menu titles and system items are left out whether the backdrop is clear or tinted.
+    /// app menus and the clock).
+    ///
+    /// The backdrop is what most of the band is. When the bar layer is translucent or clear, that
+    /// is the pixels at its most common alpha: text is more opaque, and a clear gap less. When the
+    /// layer is opaque ("Show menu bar background", Reduce Transparency), text has the same alpha
+    /// as the backdrop, so the backdrop is the pixels near the composite's most common colour.
     static func backdropColor(composite: CGImage, menuBarLayer: CGImage) -> StripRGB? {
         guard let colors = GlyphImage.Pixels(composite), let layer = GlyphImage.Pixels(menuBarLayer),
               colors.width == layer.width, colors.height == layer.height else { return nil }
-        var least = UInt8.max
-        for y in 0..<layer.height {
-            for x in 0..<layer.width { least = min(least, layer[x, y].3) }
+        let alpha = modalAlpha(layer)
+        if alpha >= opaqueAlpha {
+            let mode = modalColorBin(colors)
+            return average(colors) { x, y in
+                let bin = colorBin(colors[x, y])
+                return abs(bin.0 - mode.0) <= 1 && abs(bin.1 - mode.1) <= 1 && abs(bin.2 - mode.2) <= 1
+            }
         }
-        let limit = Int(least) + backdropAlphaTolerance
-        return average(colors) { x, y in Int(layer[x, y].3) <= limit }
+        return average(colors) { x, y in abs(Int(layer[x, y].3) - alpha) <= backdropAlphaTolerance }
     }
 
-    /// How far above the bar layer's least alpha (0...255) a pixel may be and still count as backdrop.
+    /// Whether the bar layer is opaque across most of the band, hiding the wallpaper.
+    static func isOpaqueBackdrop(_ layer: CGImage) -> Bool {
+        guard let pixels = GlyphImage.Pixels(layer) else { return false }
+        return modalAlpha(pixels) >= opaqueAlpha
+    }
+
+    /// How far from the bar layer's most common alpha (0...255) a pixel may be and still count as backdrop.
     static let backdropAlphaTolerance = 8
+    /// The bar layer's most common alpha at or above which it counts as opaque.
+    static let opaqueAlpha = 250
+    /// Width of a colour bin, per 8-bit channel, when finding the most common colour.
+    static let colorBinWidth = 8
+
+    /// The most common alpha among `pixels`.
+    private static func modalAlpha(_ pixels: GlyphImage.Pixels) -> Int {
+        var counts = [Int](repeating: 0, count: 256)
+        for y in 0..<pixels.height {
+            for x in 0..<pixels.width { counts[Int(pixels[x, y].3)] += 1 }
+        }
+        return counts.indices.max { counts[$0] < counts[$1] } ?? 0
+    }
+
+    private static func colorBin(_ pixel: (UInt8, UInt8, UInt8, UInt8)) -> (Int, Int, Int) {
+        (Int(pixel.0) / colorBinWidth, Int(pixel.1) / colorBinWidth, Int(pixel.2) / colorBinWidth)
+    }
+
+    /// The colour bin holding the most of `pixels`.
+    private static func modalColorBin(_ pixels: GlyphImage.Pixels) -> (Int, Int, Int) {
+        var counts: [Int: Int] = [:]
+        var best = (key: 0, count: 0)
+        for y in 0..<pixels.height {
+            for x in 0..<pixels.width {
+                let bin = colorBin(pixels[x, y])
+                let key = (bin.0 << 16) | (bin.1 << 8) | bin.2
+                let count = counts[key, default: 0] + 1
+                counts[key] = count
+                if count > best.count { best = (key, count) }
+            }
+        }
+        return (best.key >> 16, (best.key >> 8) & 0xFF, best.key & 0xFF)
+    }
 
     /// The opaque neutral used when the bar can't be sampled: the window background colour as
     /// `appearance` draws it.
