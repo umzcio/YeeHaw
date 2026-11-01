@@ -108,6 +108,7 @@ struct LayoutView: View {
     static let hiddenRowKey = "row:hidden"
 
     let model: LayoutModel
+    let spacing: SpacingModel
 
     @State private var frames: [String: CGRect] = [:]
     @State private var drag: LayoutDrag?
@@ -138,6 +139,11 @@ struct LayoutView: View {
                 .padding(.top, 14)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
+            Divider()
+                .frame(width: rowWidth)
+                .padding(.vertical, 20)
+            SpacingSection(model: spacing, bar: model.bar, style: model.tileStyle, width: rowWidth,
+                           layoutBusy: model.busy)
         }
         .padding(.horizontal, LayoutMetrics.windowPadding)
         .padding(.top, 6)

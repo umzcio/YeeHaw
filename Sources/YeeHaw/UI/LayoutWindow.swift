@@ -33,6 +33,7 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
     static let appChangeDelay: Duration = .milliseconds(800)
 
     private let model: LayoutModel
+    private let spacing: SpacingModel
     private let window: NSWindow
     private var observers: [NSObjectProtocol] = []
     private var refreshTask: Task<Void, Never>?
@@ -46,12 +47,13 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
 
     init(controller: MenuBarController, images: IconImageProvider, requestGrant: @escaping (GrantedFile) async -> Bool) {
         model = LayoutModel(controller: controller, images: images, requestGrant: requestGrant)
+        spacing = SpacingModel(applier: SpacingApplier(hidden: { Set(controller.state.hidden) }))
         window = LayoutPanelWindow(
             contentRect: NSRect(x: 0, y: 0, width: 560, height: 260),
             styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: true)
         super.init()
 
-        let hosting = NSHostingController(rootView: LayoutView(model: model))
+        let hosting = NSHostingController(rootView: LayoutView(model: model, spacing: spacing))
         hosting.sizingOptions = [.preferredContentSize]
         window.contentViewController = hosting
         window.title = "Layout"
@@ -62,6 +64,8 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
         window.collectionBehavior.insert(.fullScreenNone)
         window.delegate = self
         model.onDraggingChange = { [weak self] dragging in self?.watchEscape(dragging) }
+        // Apps quit and reopen during Apply; read the list again once it's done.
+        spacing.onApplied = { [weak self] in self?.refresh() }
     }
 
     func show() {
@@ -165,12 +169,15 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
 
     private func refresh(after delay: Duration = .zero) {
         refreshTask?.cancel()
-        refreshTask = Task { [model] in
+        refreshTask = Task { [model, spacing] in
             if delay > .zero {
                 try? await Task.sleep(for: delay)
                 guard !Task.isCancelled else { return }
             }
             await model.refresh()
+            spacing.reloadCurrent()
+            let controller = model.controller
+            spacing.setApps(await RunningMenuBarApps.list(drawn: controller.items, hidden: controller.state.hidden))
         }
     }
 
@@ -213,6 +220,7 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         stopObserving()
         model.windowClosed()
+        spacing.windowClosed()
         // Back to a plain menu bar app: hand activation to whatever was in front before, then
         // leave Command-Tab and the Dock. Not `hide`, which would keep the strip from opening
         // until YeeHaw is activated again.
