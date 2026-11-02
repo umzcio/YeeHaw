@@ -44,11 +44,9 @@ struct LayoutDrag {
     var showsGroup = false
     /// Dropped, cancelled or abandoned: from here on the tile only settles.
     var dropped = false
-    /// The frame the tile springs to, and the key of the view it becomes.
+    /// The frame the tile springs to, and the keys of the views it becomes (a shown app's tiles).
     var settleFrame: CGRect?
-    var settleKey: String?
-    /// Fades the tile out as it settles (it lands where nothing is drawn yet).
-    var fadesOnSettle = false
+    var settleKeys: [String] = []
 
     var center: CGPoint {
         CGPoint(x: location.x - grab.width, y: location.y - grab.height)
@@ -125,21 +123,25 @@ struct LayoutView: View {
     static func hiddenKey(_ id: BundleID) -> String { "hidden:\(id)" }
 
     /// The window's content scrolls once it's taller than the screen allows (a small display, or
-    /// a larger text size), so Apply and the report stay reachable.
+    /// a larger text size); the footer with Apply stays below it.
     var body: some View {
-        ScrollView(.vertical) {
-            content
+        VStack(spacing: 0) {
+            ScrollView(.vertical) {
+                content
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: model.maxContentHeight - LayoutFooter.height)
+            .fixedSize(horizontal: true, vertical: false)
+            LayoutFooter(model: model, spacing: spacing)
+                .frame(width: rowWidth + 2 * LayoutMetrics.windowPadding)
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .frame(maxHeight: model.maxContentHeight)
-        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
-            section("Menu Bar", busy: model.busy) { barRow }
+            section("Menu Bar") { barRow }
                 .padding(.bottom, 18)
-            section("Hidden", busy: false) { hiddenRow }
+            section("Hidden") { hiddenRow }
             footnote
                 .frame(width: rowWidth, alignment: .topLeading)
                 .padding(.top, 12)
@@ -154,7 +156,7 @@ struct LayoutView: View {
                 .frame(width: rowWidth)
                 .padding(.vertical, 20)
             SpacingSection(model: spacing, bar: model.bar, style: model.tileStyle, width: rowWidth,
-                           layoutBusy: model.busy)
+                           locked: model.applying)
         }
         .padding(.horizontal, LayoutMetrics.windowPadding)
         .padding(.top, 6)
@@ -208,19 +210,12 @@ struct LayoutView: View {
 
     // MARK: Sections and rows
 
-    private func section<Content: View>(_ title: String, busy: Bool, @ViewBuilder content: () -> Content) -> some View {
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text(title)
-                    .font(.headline)
-                    .accessibilityAddTraits(.isHeader)
-                if busy {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityLabel("Updating the menu bar")
-                }
-            }
-            .frame(height: 18)
+            Text(title)
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
+                .frame(height: 18)
             content()
         }
     }
@@ -390,7 +385,7 @@ struct LayoutView: View {
 
     private func phase(of key: String) -> TilePhase {
         guard let drag else { return .resting }
-        if drag.dropped { return key == drag.key || key == drag.settleKey ? .invisible : .resting }
+        if drag.dropped { return key == drag.key || drag.settleKeys.contains(key) ? .invisible : .resting }
         guard key == drag.key || (drag.showsGroup && drag.siblings.contains(key)) else { return .resting }
         // Over a new place in its own row, the row closes up around the slot (`slotShift`).
         switch (drag.source, drag.target) {
@@ -573,7 +568,7 @@ struct LayoutView: View {
         let animation = LayoutModel.rowAnimation
         switch (dropped.source, dropped.target) {
         case (.bar(let id), .bar(let index)?):
-            settled.settleKey = Self.barKey(id)
+            settled.settleKeys = [Self.barKey(id)]
             withAnimation(animation) {
                 drag = settled
                 if let from = model.bar.firstIndex(where: { $0.id == id }) { model.move(from: from, to: index) }
@@ -581,25 +576,24 @@ struct LayoutView: View {
         case (.bar(let id), .hidden(let index)?):
             guard let from = model.bar.firstIndex(where: { $0.id == id }),
                   let app = model.bar[from].item.bundleID else { return cancelDrag() }
-            settled.settleKey = Self.hiddenKey(app)
+            settled.settleKeys = [Self.hiddenKey(app)]
             withAnimation(animation) {
                 drag = settled
                 model.hide(from: from, at: index)
             }
         case (.hidden(let app), .hidden(let index)?):
-            settled.settleKey = Self.hiddenKey(app)
+            settled.settleKeys = [Self.hiddenKey(app)]
             withAnimation(animation) {
                 drag = settled
                 model.reorderHidden(app, at: index)
             }
         case (.hidden(let app), .bar(let index)?):
-            // The icons come back once macOS draws them; the tile fades into its slot meanwhile.
-            settled.settleFrame = slotFrame(for: dropped.target, in: dropped) ?? dropped.origin
-            settled.fadesOnSettle = true
+            // The group lands on the app's tiles, which the draft puts in the row at once.
             settled.showsGroup = false
             withAnimation(animation) {
-                drag = settled
                 model.show(app, at: index)
+                settled.settleKeys = model.bar.filter { $0.item.bundleID == app }.map { Self.barKey($0.id) }
+                drag = settled
             }
         default:
             return cancelDrag()
@@ -616,7 +610,8 @@ struct LayoutView: View {
     private func settle(_ start: LayoutDrag? = nil) {
         guard var current = start ?? drag else { return }
         if current.settleFrame == nil {
-            current.settleFrame = current.settleKey.flatMap { frames[$0] } ?? current.origin
+            let landing = current.settleKeys.compactMap { frames[$0] }
+            current.settleFrame = landing.dropFirst().reduce(landing.first) { $0?.union($1) } ?? current.origin
         }
         let frame = current.settleFrame ?? current.origin
         // Keep the frame's centre but the tile's own size: a group lands centred on its slot.
@@ -643,7 +638,7 @@ struct LayoutView: View {
         current.dropped = true
         current.showsGroup = false
         current.settleFrame = current.origin
-        current.settleKey = current.key
+        current.settleKeys = [current.key]
         if gestureLive { spentGesture = true }
         settle(current)
     }
@@ -709,7 +704,6 @@ struct LayoutView: View {
         .scaleEffect(lift ? LayoutMetrics.liftScale : 1)
         .rotationEffect(.degrees(lift ? LayoutMetrics.liftRotation : 0))
         .shadow(color: .black.opacity(drag.lifted ? 0.28 : 0), radius: drag.lifted ? 12 : 0, y: drag.lifted ? 8 : 0)
-        .opacity(drag.fadesOnSettle && !drag.lifted ? 0 : 1)
     }
 
     /// The slot the held tile would land in for `target`: the room the row's tiles make

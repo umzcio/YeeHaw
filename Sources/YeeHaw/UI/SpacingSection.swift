@@ -3,7 +3,7 @@ import SwiftUI
 import YeeHawCore
 
 /// The layout window's Spacing section (spec "Spacing"): a live preview of the bar at the
-/// slider's spacing, the apps Apply restarts, and Apply. Nothing changes until Apply.
+/// slider's spacing and the apps Apply restarts. Nothing changes until the window's Apply.
 struct SpacingSection: View {
     /// The list shows this many rows before it scrolls.
     static let visibleRows = 6
@@ -16,8 +16,8 @@ struct SpacingSection: View {
     let bar: [BarTile]
     let style: TileStyle
     let width: CGFloat
-    /// A layout edit is under way; Apply waits for it.
-    let layoutBusy: Bool
+    /// The window's Apply is running: the slider and the list wait for it.
+    let locked: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -42,8 +42,6 @@ struct SpacingSection: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 8)
-            applyRow
-                .padding(.top, 14)
             if let report = model.report {
                 SpacingReportBanner(report: report) {
                     withAnimation(LayoutModel.rowAnimation) { model.report = nil }
@@ -57,6 +55,11 @@ struct SpacingSection: View {
 
     static let footnoteRestart = "Apps pick up the spacing when they open, so Apply quits and reopens the selected apps one at a time."
     static let footnoteOthers = "Other apps change when they next open; macOS’s own icons and YeeHaw change after you log out."
+
+    /// The window footer's line for a pending spacing change, in `footnoteRestart`'s words.
+    static func restartNote(_ names: [String]) -> String {
+        "Apply quits and reopens \(names.formatted(.list(type: .and))) one at a time."
+    }
 
     private var footnote: String {
         model.candidates.isEmpty ? Self.footnoteOthers : "\(Self.footnoteRestart) \(Self.footnoteOthers)"
@@ -112,7 +115,7 @@ struct SpacingSection: View {
                 .help("macOS’s standard spacing, \(SpacingPlan.defaultValue) pt")
         }
         .font(.callout)
-        .disabled(model.isApplying)
+        .disabled(locked || model.isApplying)
     }
 
     private var sliderValue: Binding<Double> {
@@ -158,42 +161,7 @@ struct SpacingSection: View {
                 }
             }
         }
-        .disabled(model.isApplying)
-    }
-
-    // MARK: Apply
-
-    private var applyRow: some View {
-        HStack(spacing: 8) {
-            if let progress = model.progress {
-                ProgressView()
-                    .controlSize(.small)
-                Text(progress.count == 0 ? "Saving…"
-                     : "Restarting \(progress.name)… (\(progress.index + 1) of \(progress.count))")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .accessibilityAddTraits(.updatesFrequently)
-            }
-            Spacer(minLength: 12)
-            // The section's commit action, prominent like Apple's own; no Return shortcut, so a
-            // stray key press can't restart apps.
-            Button(model.title) {
-                Task { await model.apply() }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(!model.canApply || layoutBusy)
-            .help(applyHelp)
-        }
-        .frame(minHeight: 22)
-    }
-
-    private var applyHelp: String {
-        if layoutBusy { return "Waits for the menu bar to finish updating" }
-        if !model.canApply { return "Move the slider to choose a new spacing" }
-        return model.isWriting ? "Saves the spacing and restarts the selected apps"
-                               : "Restarts the selected apps so they use the current spacing"
+        .disabled(locked || model.isApplying)
     }
 }
 

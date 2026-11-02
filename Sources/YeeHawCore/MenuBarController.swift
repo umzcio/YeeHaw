@@ -150,8 +150,10 @@ public enum ControllerError: Error, Equatable {
     // MARK: Hiding
 
     /// A hide that fails (the write, or macOS not honouring it in time) is undone: the app is
-    /// switched back on and the state is what it was before (`rollBack`).
-    public func hide(_ id: BundleID) async throws {
+    /// switched back on and the state is what it was before (`rollBack`). With `waits` false it
+    /// returns once written, for a caller that waits for several edits at once (the Layout
+    /// window's Apply) and undoes the ones macOS didn't honour itself.
+    public func hide(_ id: BundleID, waits: Bool = true) async throws {
         try await gated {
             let locations = await runningLocations(of: id)
             let allow = try readAllow().snapshot
@@ -162,7 +164,7 @@ public enum ControllerError: Error, Equatable {
             save(r.state)
             do {
                 try writeAllow(r.actions)
-                try await waitIfRunning(id, drawn: false)
+                if waits { try await waitIfRunning(id, drawn: false) }
             } catch {
                 rollBack(id, allowed: true, to: before)
                 throw error
@@ -173,8 +175,8 @@ public enum ControllerError: Error, Equatable {
     /// Switches the app back on for good. Showing the app that's being revealed also ends the
     /// reveal here and now (its positions go back), so a Layout placement made right after isn't
     /// undone when the reveal would have ended. A show that fails is undone like a hide: the
-    /// switch goes back to what it was and the app back into Hidden.
-    public func show(_ id: BundleID) async throws {
+    /// switch goes back to what it was and the app back into Hidden. `waits` as for `hide`.
+    public func show(_ id: BundleID, waits: Bool = true) async throws {
         try await gated {
             let locations = await runningLocations(of: id)
             let wasAllowed = try readAllow().snapshot[id]
@@ -196,7 +198,7 @@ public enum ControllerError: Error, Equatable {
                     next.pendingReveal = nil
                     save(next)
                 }
-                if !r.actions.isEmpty { try await waitIfRunning(id, drawn: true) }
+                if waits, !r.actions.isEmpty { try await waitIfRunning(id, drawn: true) }
             } catch {
                 rollBack(id, allowed: wasAllowed, to: before)
                 throw error
@@ -217,6 +219,11 @@ public enum ControllerError: Error, Equatable {
             guard !actions.isEmpty else { return }
             try writeAllow(actions)
         }
+    }
+
+    /// Whether the app is running, and so has icons to draw once it's switched on.
+    public func isRunning(_ id: BundleID) async -> Bool {
+        await reader.runningBundleIDs().contains(id)
     }
 
     /// Sets the strip order. Only reorders apps already hidden; any left out keep their place at the end.
@@ -269,6 +276,35 @@ public enum ControllerError: Error, Equatable {
             let keys = item.bundleID != nil ? PositionKey.keys(for: item, table: table) : [try neighborKey(item, table)]
             let left = try leftNeighbor.map { try neighborKey($0, table) }
             let right = try rightNeighbor.map { try neighborKey($0, table) }
+            try writePositions(table.placement(of: keys, leftNeighbor: left, rightNeighbor: right))
+        }
+    }
+
+    /// Places an app's icons between two items, whether or not it's drawn yet: every existing key
+    /// of the app under any of its prefixes gets the slot, else `Item-0` under the first (as a
+    /// reveal does), so it works for an app that's just been switched on. A neighbour that isn't
+    /// drawn yet (an app shown just before, placed already) is found by its app's own keys.
+    public func place(_ id: BundleID, leftNeighbor: MenuBarItem?, rightNeighbor: MenuBarItem?) async throws {
+        try await gated {
+            // Asked before the read, so nothing suspends between reading the table and writing it.
+            let prefixes = await reader.keyPrefixes(of: id)
+            var undrawn: [BundleID: [String]] = [:]
+            for neighbor in [leftNeighbor, rightNeighbor].compactMap(\.self) where neighbor.keyPrefixes.isEmpty {
+                if let app = neighbor.bundleID { undrawn[app] = await reader.keyPrefixes(of: app) }
+            }
+            let table = PositionTable(try readPositions())
+            let key = { @MainActor (neighbor: MenuBarItem) throws -> String in
+                guard let app = neighbor.bundleID, let prefixes = undrawn[app] else {
+                    return try self.neighborKey(neighbor, table)
+                }
+                guard let key = PositionKey.existingKeys(prefixes: prefixes, table: table).first else {
+                    throw ControllerError.unresolvedNeighbor
+                }
+                return key
+            }
+            let left = try leftNeighbor.map(key)
+            let right = try rightNeighbor.map(key)
+            let keys = Self.revealKeys(prefixes: prefixes, table)
             try writePositions(table.placement(of: keys, leftNeighbor: left, rightNeighbor: right))
         }
     }

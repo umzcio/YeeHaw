@@ -79,7 +79,8 @@ enum SpacingPreview {
 }
 
 /// The layout window's spacing section: the slider's value, the apps Apply would restart and
-/// what the last Apply did. Nothing is written until Apply.
+/// what the last Apply did. Part of the window's draft: nothing is written until the window's
+/// Apply, which runs `apply()` after the layout edits.
 @MainActor @Observable
 final class SpacingModel {
     /// The slider's value.
@@ -126,16 +127,19 @@ final class SpacingModel {
     var isWriting: Bool { value != current || needsCleanup }
     var canApply: Bool { !isApplying && (isWriting || tickedCount > 0) }
     var tickedCount: Int { candidates.count { $0.ticked } }
-    var title: String { Self.applyTitle(restarting: tickedCount, writing: isWriting) }
+    /// Whether the window's draft holds a spacing change: a new value, or apps ticked to restart
+    /// at the current one (only the user ticks those). Tidying the stored keys alone isn't one;
+    /// it rides along with the next Apply that writes.
+    var isPending: Bool { value != current || tickedCount > 0 }
+    /// The apps Apply would quit and reopen, in the list's order.
+    var restartNames: [String] { candidates.filter(\.ticked).map(\.app.name) }
 
-    static func applyTitle(restarting count: Int, writing: Bool) -> String {
-        switch (count, writing) {
-        case (0, _): "Apply"
-        case (1, true): "Apply and Restart 1 App"
-        case (_, true): "Apply and Restart \(count) Apps"
-        case (1, false): "Restart 1 App"
-        case (_, false): "Restart \(count) Apps"
-        }
+    /// The draft's change, for the window's footer ("Set spacing to 8 pt", "Restart DigUp").
+    var pendingPhrase: String? {
+        guard isPending else { return nil }
+        if value != current { return "Set spacing to \(value) pt" }
+        let names = restartNames
+        return names.count == 1 ? "Restart \(names[0])" : "Restart \(names.count) apps"
     }
 
     /// The spacing a running app draws: what it picked up at launch, or the stored value when
@@ -190,11 +194,19 @@ final class SpacingModel {
         retick()
     }
 
-    /// Call when the window closes: an unapplied value and the last report are let go. An Apply
-    /// under way carries on.
+    /// Puts the slider back at the stored value and drops the user's ticks.
+    func revert() {
+        guard !isApplying else { return }
+        userTicks = [:]
+        value = current
+        retick()
+    }
+
+    /// Call when the window closes: an unapplied value, the ticks and the last report are let go.
+    /// An Apply under way carries on.
     func windowClosed() {
         guard !isApplying else { return }
-        value = current
+        revert()
         report = nil
     }
 
@@ -212,9 +224,10 @@ final class SpacingModel {
         let stored = applier.storedState()
         current = stored.value
         needsCleanup = !stored.isCanonical(for: stored.value)
-        // The restarted apps have the stored spacing now; their next tick follows the defaults.
+        // The draft is applied: every tick follows the defaults again, and the restarted apps have
+        // the stored spacing now.
+        userTicks = [:]
         for restart in result.restarted {
-            userTicks[restart.app.bundleID] = nil
             if let index = candidates.firstIndex(where: { $0.id == restart.app.bundleID }) {
                 candidates[index].spacingAtLaunch = current
             }
@@ -228,12 +241,15 @@ final class SpacingModel {
         AccessibilityNotification.Announcement("\(report.headline) \(report.detail.joined(separator: " "))").post()
     }
 
-    /// Re-derives every tick: the user's choice, else ticked when restarting gets the app a
-    /// spacing it doesn't have and it has no windows to interrupt.
+    /// Re-derives every tick: the user's choice, else, while the slider is at a new value, ticked
+    /// when restarting gets the app a spacing it doesn't have and it has no windows to interrupt.
+    /// At the stored value nothing is ticked unless the user ticks it, so opening the window with
+    /// an app still at an older spacing doesn't make a draft of its own.
     private func retick() {
         for index in candidates.indices {
             let candidate = candidates[index]
-            let ticked = userTicks[candidate.id] ?? (!candidate.app.hasOpenWindows && spacing(of: candidate) != value)
+            let ticked = userTicks[candidate.id]
+                ?? (value != current && !candidate.app.hasOpenWindows && spacing(of: candidate) != value)
             if candidates[index].ticked != ticked { candidates[index].ticked = ticked }
         }
     }

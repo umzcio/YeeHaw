@@ -413,6 +413,46 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(system.allowWrites == 0)
     }
 
+    // MARK: the Layout window's Apply
+
+    @Test func switchesCanSkipTheWaitForALaterOneOfTheirOwn() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true), (Self.b, false)]),
+                           state: HidingState(hidden: [Self.b], journal: [Self.b]))
+        rig.system.honorsWrites = false
+        let c = rig.controller()
+        try await c.hide(Self.a, waits: false)
+        try await c.show(Self.b, waits: false)
+        #expect(rig.sleeper.count == 0)
+        #expect(rig.system.allowSnapshot == [Self.a: false, Self.b: true])
+        #expect(c.state.hidden == [Self.a])
+        #expect(await c.isRunning(Self.a))
+    }
+
+    @Test func aHiddenAppIsPlacedBetweenItsNeighboursBeforeItsDrawn() async throws {
+        let rig = Self.rig(try FakeSystem(
+            allow: [(Self.a, false), (Self.b, true), (Self.yeehaw, true)],
+            positions: ["status:\(Self.a)::Item-0": 400, "status:\(Self.a)::Clock": 400, "status:\(Self.b)::Item-0": 300,
+                        "status:\(Self.yeehaw)::Item-0": 100, PositionKey.clock: 0]))
+        let c = rig.controller()
+        try await c.place(Self.a, leftNeighbor: FakeSystem.item(Self.b), rightNeighbor: FakeSystem.item(Self.yeehaw))
+        #expect(rig.system.positions["status:\(Self.a)::Item-0"] == 200)
+        #expect(rig.system.positions["status:\(Self.a)::Clock"] == 200)
+        #expect(rig.system.positionWrites == 1)
+    }
+
+    @Test func aShownAppThatIsntDrawnYetCanBeTheLeftNeighbourOfTheNext() async throws {
+        let rig = Self.rig(try FakeSystem(
+            allow: [(Self.a, false), (Self.b, false), (Self.yeehaw, true)],
+            positions: ["status:\(Self.a)::Item-0": 200, "status:\(Self.b)::Named": 500,
+                        "status:\(Self.yeehaw)::Item-0": 100, PositionKey.clock: 0]))
+        let c = rig.controller()
+        // A's tile in the Layout window: no frame or keys, just its app.
+        let placeholder = MenuBarItem(id: "\(Self.a)#0", bundleID: Self.a, appleIdentifier: nil, indexInApp: 0, label: "",
+                                      keyNames: [], keyPrefixes: [], x: 0, width: 0, isPinned: false)
+        try await c.place(Self.b, leftNeighbor: placeholder, rightNeighbor: FakeSystem.item(Self.yeehaw))
+        #expect(rig.system.positions["status:\(Self.b)::Named"] == 150)
+    }
+
     // MARK: failed edits roll back
 
     @Test func aHideMacOSDoesntHonorIsUndone() async throws {

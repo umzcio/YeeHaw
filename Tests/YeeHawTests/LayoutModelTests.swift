@@ -30,6 +30,16 @@ import YeeHawCore
         #expect(LayoutModel.message(for: LayoutModel.LayoutError.moveNotApplied).text.contains("didn’t apply"))
     }
 
+    @Test func severalFailuresReadOneLineEachAndOfferTheFirstFix() throws {
+        let message = try #require(LayoutModel.message(for: [
+            ControllerError.notHonored("com.example.A"), LayoutModel.LayoutError.moveNotApplied,
+            LayoutModel.LayoutError.moveNotApplied, ControllerError.needsGrant(.positions),
+        ]))
+        #expect(message.text.split(separator: "\n").count == 3)
+        #expect(message.grant == .positions)
+        #expect(LayoutModel.message(for: [Error]()) == nil)
+    }
+
     @Test func refusalsSayWhy() {
         #expect(LayoutView.refusalText(.apple, name: "Wi‑Fi") == "Wi‑Fi belongs to macOS and stays in the menu bar.")
         #expect(LayoutView.refusalText(.notTrackedYet, name: "Tailscale").hasPrefix("Tailscale can’t be hidden yet."))

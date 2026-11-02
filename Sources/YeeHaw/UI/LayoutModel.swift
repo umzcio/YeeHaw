@@ -41,25 +41,34 @@ enum TileStyle: Equatable {
     case system
 }
 
-/// The layout window's state and its edits, which go through `MenuBarController`. Edits update
-/// the rows at once and then follow the real bar: after a move the row keeps the new order until
-/// macOS has applied it (or a timeout says it didn't).
+/// The layout window's state. Its edits are a draft (`LayoutDraft`): the rows change at once and
+/// nothing is written until Apply, which writes the layout edits through `MenuBarController`,
+/// waits once for macOS to show them, then applies any spacing change (`SpacingModel`). Revert,
+/// or closing without applying, drops the draft.
 @MainActor @Observable
 final class LayoutModel {
     private static let log = Logger(subsystem: Log.subsystem, category: "layout")
-    /// How long to wait for macOS to apply a move before showing what the bar really holds.
-    static let moveSettleTimeout: Duration = .seconds(5)
-    static let moveSettlePoll: Duration = .milliseconds(250)
+    /// How long Apply waits for macOS to show all the layout edits together, before naming the
+    /// ones it didn't. MenuBarAgent applies a write within a few seconds.
+    static let applyTimeout: Duration = .seconds(5)
+    static let applyPoll: Duration = .milliseconds(250)
+    /// The longest the footer's summary may be before it gives a count instead.
+    static let summaryLength = 48
+    /// After Apply, how long to let the icons slide into their new places before photographing
+    /// them; a shot taken while they move crops the wrong glyphs and caches them.
+    static let photoSettle: Duration = .seconds(1)
 
+    /// The draft's rows, as tiles.
     private(set) var bar: [BarTile] = []
     private(set) var hidden: [HiddenGroup] = []
-    /// True from the start of an edit until the rows show what the bar holds after it. Drags and
-    /// other edits wait for it.
-    private(set) var busy = false
+    private(set) var draft = LayoutDraft(bar: [], hidden: [])
+    /// True from the start of Apply until the rows show what the bar holds after it. Drags and
+    /// edits wait for it.
+    private(set) var applying = false
     /// A spacing Apply is restarting apps: their items come and go, so edits wait for it too.
     var spacingBusy = false
     /// Drags and edits wait while either is under way.
-    var editsLocked: Bool { busy || spacingBusy }
+    var editsLocked: Bool { applying || spacingBusy }
     private(set) var tileStyle: TileStyle = .system
     var message: LayoutMessage?
     /// The widest the rows may be before they scroll, from the screen the window is on.
@@ -77,6 +86,10 @@ final class LayoutModel {
     @ObservationIgnored let controller: MenuBarController
     @ObservationIgnored let images: IconImageProvider
     @ObservationIgnored let requestGrant: (GrantedFile) async -> Bool
+    /// The window's spacing section, whose change is part of the draft and applied last.
+    @ObservationIgnored var spacing: SpacingModel?
+    /// How long Apply waits for macOS (`applyTimeout`; shorter in tests).
+    @ObservationIgnored var applyTimeout = LayoutModel.applyTimeout
     /// Shared with the strip, so both read one cache of the bar's colour.
     @ObservationIgnored private let sampler = StripColorSampler.shared
     /// Set by the view while a tile is being dragged; reloads wait until the drag ends, so the
@@ -89,9 +102,9 @@ final class LayoutModel {
     /// The widest the rows have been since the window opened. Rows never narrow while it's open,
     /// so the window doesn't jump each time an icon is hidden or shown.
     @ObservationIgnored private var widestRow: CGFloat = 0
-    /// A rebuild of the rows from the controller, asked for while an edit or a drag was running.
+    /// A rebuild of the rows from the controller, asked for while Apply or a drag was running.
     @ObservationIgnored private var reloadPending = false
-    /// A re-read of the bar, asked for while an edit, a drag or another re-read was running.
+    /// A re-read of the bar, asked for while Apply, a drag or another re-read was running.
     @ObservationIgnored private var refreshPending = false
     @ObservationIgnored private var refreshing = false
     /// Drawn items whose position key isn't saved yet: they can't anchor a move (see
@@ -106,23 +119,57 @@ final class LayoutModel {
         reload()
     }
 
+    // MARK: The draft
+
+    /// Whether anything waits for Apply: a layout edit or a spacing change.
+    var isDirty: Bool { draft.isDirty || spacing?.isPending == true }
+
+    /// What Apply would do, one phrase per change, the spacing change last.
+    var pendingPhrases: [String] {
+        draft.changes(anchors: canAnchor).phrases(itemName: Self.name(of:), appName: AppIdentity.name(of:))
+            + [spacing?.pendingPhrase].compactMap(\.self)
+    }
+
+    /// The footer's summary of the draft ("Hide Fiddle, move zWhisper", or "3 changes").
+    var summary: String { LayoutDraft.summary(pendingPhrases, maxLength: Self.summaryLength) }
+
+    /// The apps Apply will quit and reopen for the spacing change.
+    var restarting: [String] { spacing?.isPending == true ? spacing?.restartNames ?? [] : [] }
+
     // MARK: Reading
 
-    /// Rebuilds both rows from the controller's last read and saved state.
+    /// Takes the controller's last read and saved state as the real rows. A clean draft follows
+    /// them; a dirty one keeps its edits (`LayoutDraft.reconcile`).
     func reload() {
-        let hiddenIDs = Set(controller.state.hidden)
-        let tracked = controller.trackedApps
+        let hiddenIDs = controller.state.hidden
         images.noteDrawn(controller.items)
         withoutPositions = controller.itemsWithoutPositions()
-        bar = LayoutRules.deduplicated(controller.items)
-            .filter { item in item.bundleID.map { !hiddenIDs.contains($0) } ?? true }
-            .map { item in
-                BarTile(item: item,
-                        capability: LayoutRules.capability(of: item, own: OwnIconLocator.bundleID, tracked: tracked,
-                                                           appleMovable: !withoutPositions.contains(item.id)),
-                        name: Self.name(of: item), image: images.image(for: item))
+        let real = LayoutRules.deduplicated(controller.items).filter { item in
+            item.bundleID.map { !hiddenIDs.contains($0) } ?? true
+        }
+        if draft.isDirty {
+            draft.reconcile(bar: real, hidden: hiddenIDs)
+        } else {
+            draft = LayoutDraft(bar: real, hidden: hiddenIDs)
+        }
+        rebuildRows()
+    }
+
+    /// The tiles for the draft. A hidden app being shown isn't drawn: its tiles are the icons it
+    /// drew when last seen.
+    private func rebuildRows() {
+        let tracked = controller.trackedApps
+        bar = draft.bar.map { item in
+            if draft.isPlaceholder(item), let id = item.bundleID {
+                return BarTile(item: item, capability: .hideable, name: AppIdentity.name(of: id),
+                               image: images.image(for: id, indexInApp: item.indexInApp))
             }
-        hidden = controller.state.hidden.map { id in
+            return BarTile(item: item,
+                           capability: LayoutRules.capability(of: item, own: OwnIconLocator.bundleID, tracked: tracked,
+                                                              appleMovable: !withoutPositions.contains(item.id)),
+                           name: Self.name(of: item), image: images.image(for: item))
+        }
+        hidden = draft.hidden.map { id in
             HiddenGroup(id: id, name: AppIdentity.name(of: id),
                         icons: images.iconIndices(for: id).map {
                             HiddenGroup.Icon(id: "\(id)#\($0)", image: images.image(for: id, indexInApp: $0))
@@ -136,9 +183,9 @@ final class LayoutModel {
     }
 
     /// Re-reads the bar, photographs what's drawn, samples the bar's colour and rebuilds the rows.
-    /// Asked for while an edit, a drag or another re-read is running, it runs once that ends.
+    /// Asked for while Apply, a drag or another re-read is running, it runs once that ends.
     func refresh() async {
-        guard !busy, !isDragging, !refreshing else {
+        guard !applying, !isDragging, !refreshing else {
             refreshPending = true
             return
         }
@@ -149,8 +196,8 @@ final class LayoutModel {
             await controller.refresh()
             await images.captureIfPermitted(controller.items)
             await sampleBarColour()
-            guard !busy, !isDragging else {
-                // The re-read is stale by the time the edit or drag ends; read again then.
+            guard !applying, !isDragging else {
+                // The re-read is stale by the time Apply or the drag ends; read again then.
                 refreshPending = true
                 return
             }
@@ -170,13 +217,18 @@ final class LayoutModel {
         return widestRow
     }
 
-    /// Call when the window closes: the next opening sizes the rows afresh, and any drag ends.
+    /// Call when the window closes: an unapplied draft is let go, the next opening sizes the rows
+    /// afresh, and any drag ends. An Apply under way carries on.
     func windowClosed() {
         widestRow = 0
         message = nil
         showsFocusRing = false
         closes += 1
         dragEnded()
+        if !applying {
+            draft.revert()
+            rebuildRows()
+        }
     }
 
     /// Call when Esc is pressed during a drag; the view springs the tile back.
@@ -190,9 +242,9 @@ final class LayoutModel {
         catchUp()
     }
 
-    /// Rebuilds the rows now, or once the edit or drag under way has ended.
+    /// Rebuilds the rows now, or once Apply or the drag under way has ended.
     private func reloadWhenIdle() {
-        guard !busy, !isDragging else {
+        guard !applying, !isDragging else {
             reloadPending = true
             return
         }
@@ -200,9 +252,9 @@ final class LayoutModel {
         withAnimation(Self.rowAnimation) { reload() }
     }
 
-    /// Runs what waited for an edit or a drag to end.
+    /// Runs what waited for Apply or a drag to end.
     private func catchUp() {
-        guard !busy, !isDragging else { return }
+        guard !applying, !isDragging else { return }
         if refreshPending {
             Task { await refresh() }
         } else if reloadPending {
@@ -221,87 +273,69 @@ final class LayoutModel {
         }
     }
 
-    // MARK: Edits
+    // MARK: Edits (all to the draft)
 
-    /// Moves `bar[from]` to insertion `to` of the Menu Bar row.
+    /// Moves `bar[from]` to insertion `to` of the Menu Bar row. False when nothing moves.
     @discardableResult
-    func move(from: Int, to: Int) -> Task<Void, Never>? {
-        guard !editsLocked, bar.indices.contains(from), bar[from].capability.canDrag else { return nil }
-        let to = LayoutRules.clampedInsertion(to, in: bar.map(\.item))
-        let items = bar.map(\.item)
-        guard let neighbors = LayoutRules.moveNeighbors(from: from, to: to, in: items, anchors: canAnchor) else { return nil }
-        let tile = bar[from]
-        bar = LayoutRules.moved(bar.map(\.item), from: from, to: to).compactMap { item in bar.first { $0.id == item.id } }
-        return perform("move \(tile.name)", announcing: "Moved \(tile.name)") { [controller] in
-            try controller.move(tile.item, leftNeighbor: neighbors.left, rightNeighbor: neighbors.right)
-            try await self.waitUntilApplied { items in
-                Self.isOrdered(tile.item.id, after: neighbors.left?.id, before: neighbors.right?.id, in: items)
-            }
-        }
+    func move(from: Int, to: Int) -> Bool {
+        guard !editsLocked, bar.indices.contains(from), bar[from].capability.canDrag else { return false }
+        let to = LayoutRules.clampedInsertion(to, in: draft.bar)
+        guard LayoutRules.moved(draft.bar, from: from, to: to) != draft.bar else { return false }
+        draft.move(from: from, to: to)
+        edited()
+        return true
     }
 
     /// Hides the app owning `bar[from]` and puts its group at insertion `at` of the Hidden row.
     @discardableResult
-    func hide(from: Int, at index: Int) -> Task<Void, Never>? {
+    func hide(from: Int, at index: Int) -> Bool {
         guard !editsLocked, bar.indices.contains(from), bar[from].capability.canHide,
-              let id = bar[from].item.bundleID else { return nil }
-        let order = LayoutRules.hiddenOrder(hidden.map(\.id), placing: id, at: index)
-        let name = AppIdentity.name(of: id)
+              let id = bar[from].item.bundleID else { return false }
         // The group gets a tile per icon the app draws right now.
         images.noteDrawn(controller.items)
-        bar.removeAll { $0.item.bundleID == id }
-        let icons = images.iconIndices(for: id)
-        hidden = order.map { app in
-            hidden.first { $0.id == app } ?? HiddenGroup(
-                id: app, name: name,
-                icons: icons.map { HiddenGroup.Icon(id: "\(app)#\($0)", image: images.image(for: app, indexInApp: $0)) })
-        }
-        return perform("hide \(name)", announcing: "Hid \(name)") { [controller] in
-            try await controller.hide(id)
-            // The Hidden row as it is now: other edits wait while this one runs.
-            controller.reorderHidden(self.hidden.map(\.id))
-        }
+        draft.hide(id, at: index)
+        edited()
+        return true
     }
 
-    /// Shows a hidden app and, if it doesn't come back at insertion `at` of the Menu Bar row,
-    /// places its icons there.
+    /// Shows a hidden app at insertion `at` of the Menu Bar row: by default at the row's right
+    /// end, just left of the icons macOS keeps in place, where it's easy to see.
     @discardableResult
-    func show(_ id: BundleID, at index: Int?) -> Task<Void, Never>? {
-        guard !editsLocked, hidden.contains(where: { $0.id == id }) else { return nil }
-        let items = bar.map(\.item)
-        let target = index.map {
-            LayoutRules.showNeighbors(at: LayoutRules.clampedInsertion($0, in: items), in: items, anchors: canAnchor)
+    func show(_ id: BundleID, at index: Int?) -> Bool {
+        guard !editsLocked, hidden.contains(where: { $0.id == id }) else { return false }
+        let at = LayoutRules.clampedInsertion(index ?? draft.bar.count, in: draft.bar)
+        let placeholders = images.iconIndices(for: id).map { icon in
+            MenuBarItem(id: "\(id)#\(icon)", bundleID: id, appleIdentifier: nil, indexInApp: icon,
+                        label: AppIdentity.name(of: id), keyNames: [], keyPrefixes: [], x: 0, width: 0, isPinned: false)
         }
-        let anchors = canAnchor
-        let name = AppIdentity.name(of: id)
-        hidden.removeAll { $0.id == id }
-        return perform("show \(name)", announcing: "\(name) is back in the menu bar") { [controller] in
-            try await controller.show(id)
-            let drawn = LayoutRules.deduplicated(controller.items)
-            let own = drawn.filter { $0.bundleID == id }
-            // An app that isn't running draws nothing to place; it comes back where macOS puts it.
-            guard let target, !own.isEmpty,
-                  !LayoutRules.isPlaced(id, between: target.left, and: target.right, in: drawn, anchors: anchors)
-            else { return }
-            // Place the app's icons left to right, each just right of the one before.
-            var left = target.left
-            for item in own {
-                try controller.move(item, leftNeighbor: left, rightNeighbor: target.right)
-                left = item
-            }
-            try await self.waitUntilApplied { items in
-                LayoutRules.isPlaced(id, between: target.left, and: target.right, in: items, anchors: anchors)
-            }
-        }
+        draft.show(id, placeholders: placeholders, at: at)
+        edited()
+        return true
     }
 
     /// Moves the hidden app `id` to insertion `at` of the Hidden row (the strip's order).
     func reorderHidden(_ id: BundleID, at index: Int) {
         guard !editsLocked else { return }
-        let order = LayoutRules.hiddenOrder(hidden.map(\.id), placing: id, at: index)
-        guard order != hidden.map(\.id) else { return }
-        hidden = order.compactMap { app in hidden.first { $0.id == app } }
-        controller.reorderHidden(order)
+        let order = LayoutRules.hiddenOrder(draft.hidden, placing: id, at: index)
+        guard order != draft.hidden else { return }
+        draft.reorderHidden(id, at: index)
+        edited()
+    }
+
+    /// Puts the draft, the slider and the ticks back to what's real, animated.
+    func revert() {
+        guard !editsLocked else { return }
+        withAnimation(Self.rowAnimation) {
+            draft.revert()
+            spacing?.revert()
+            message = nil
+            rebuildRows()
+        }
+    }
+
+    private func edited() {
+        message = nil
+        rebuildRows()
     }
 
     /// "Fix…": asks for the file again, and clears the message once it's granted.
@@ -314,42 +348,167 @@ final class LayoutModel {
         }
     }
 
-    /// Runs one edit: marks the window busy, shows any failure inline, and finally rebuilds the
-    /// rows from what the controller and the bar really hold. The window stays busy until then,
-    /// so no drag or other edit starts on rows that are about to change.
-    private func perform(_ what: String, announcing done: String,
-                         _ edit: @escaping @MainActor () async throws -> Void) -> Task<Void, Never> {
-        busy = true
+    // MARK: Apply
+
+    /// One edit Apply couldn't make, and why.
+    struct Failure {
+        let what: String
+        let error: Error
+    }
+
+    /// Writes the draft: the layout edits (`applyLayout`), then the spacing change, which restarts
+    /// apps and so must see the final layout. The window stays locked until the rows show what the
+    /// bar really holds; each edit that failed is back where it really is, its reason inline.
+    @discardableResult
+    func apply() -> Task<[Failure], Never>? {
+        guard isDirty, !editsLocked else { return nil }
+        let changes = draft.changes(anchors: canAnchor)
+        let neighbours = Dictionary(changes.moves.map { ($0.item.id, draft.neighbours(of: $0.item)) }) { first, _ in first }
+        let order = draft.hidden
+        let hiddenBefore = draft.realHidden
+        let spacing = spacing?.isPending == true ? spacing : nil
+        applying = true
         message = nil
         return Task {
-            var failed = false
-            do {
-                try await edit()
-            } catch {
-                failed = true
-                Self.log.error("Layout could not \(what, privacy: .public): \(error, privacy: .public)")
-                withAnimation(Self.rowAnimation) { message = Self.message(for: error) }
-            }
+            let failures = await applyLayout(changes, neighbours: neighbours, hiddenOrder: order,
+                                             hiddenBefore: hiddenBefore)
+            // The spacing section reports (and announces) its own outcome.
+            if let spacing { await spacing.apply() }
             await controller.refresh()
-            await images.captureIfPermitted(controller.items)
-            busy = false
+            applying = false
             refreshPending = false
-            reloadPending = true
-            reloadWhenIdle()
-            if !failed { AccessibilityNotification.Announcement(done).post() }
+            reloadPending = false
+            withAnimation(Self.rowAnimation) {
+                draft.revert()
+                reload()
+                message = Self.message(for: failures.map(\.error))
+            }
+            catchUp()
+            for failure in failures {
+                Self.log.error("Layout could not \(failure.what, privacy: .public): \(failure.error, privacy: .public)")
+            }
+            let outcome = failures.isEmpty ? "Your changes are in the menu bar."
+                : "Some changes didn’t apply. \(message?.text ?? "")"
+            AccessibilityNotification.Announcement(outcome).post()
+            refreshOnceSettled()
+            return failures
         }
     }
 
-    /// Re-reads the bar until `applied` holds for it, for at most `moveSettleTimeout`. MenuBarAgent
-    /// applies a layout write within a few seconds.
-    private func waitUntilApplied(_ applied: ([MenuBarItem]) -> Bool) async throws {
-        let deadline = ContinuousClock.now + Self.moveSettleTimeout
-        while true {
-            await controller.refresh()
-            if applied(LayoutRules.deduplicated(controller.items)) { return }
-            guard ContinuousClock.now < deadline else { throw LayoutError.moveNotApplied }
-            try await Task.sleep(for: Self.moveSettlePoll)
+    /// Re-reads the bar and photographs it once the icons Apply moved have settled.
+    private func refreshOnceSettled() {
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.photoSettle)
+            await self?.refresh()
         }
+    }
+
+    /// The layout edits in Apply's order (shows, hides, moves, the Hidden order), written without
+    /// waiting between them, then one wait of at most `applyTimeout` for macOS to show them all.
+    /// A shown app is switched on first but placed after the moves, so its neighbours are where
+    /// they stay. A switch macOS didn't honour in time is undone; a move it didn't apply is
+    /// left to what the bar holds. A move counts as applied once the icon sits between its
+    /// `neighbours` in the draft, not just the anchors it was placed by: an icon with no saved
+    /// position between those can't be placed around, and that's named. Returns what failed.
+    private func applyLayout(_ changes: LayoutChanges, neighbours: [String: (left: MenuBarItem?, right: MenuBarItem?)],
+                             hiddenOrder: [BundleID], hiddenBefore: [BundleID]) async -> [Failure] {
+        var failures: [Failure] = []
+        var shown: [LayoutChanges.Show] = []
+        var hid: [BundleID] = []
+        var moved: [LayoutChanges.Move] = []
+        var placed: [LayoutChanges.Show] = []
+        for show in changes.shows {
+            do {
+                try await controller.show(show.id, waits: false)
+                shown.append(show)
+            } catch {
+                failures.append(Failure(what: "show \(show.id)", error: error))
+            }
+        }
+        for id in changes.hides {
+            do {
+                try await controller.hide(id, waits: false)
+                hid.append(id)
+            } catch {
+                failures.append(Failure(what: "hide \(id)", error: error))
+            }
+        }
+        for move in changes.moves {
+            do {
+                try controller.move(move.item, leftNeighbor: move.left, rightNeighbor: move.right)
+                moved.append(move)
+            } catch {
+                failures.append(Failure(what: "move \(move.item.id)", error: error))
+            }
+        }
+        for show in shown {
+            do {
+                try await controller.place(show.id, leftNeighbor: show.left, rightNeighbor: show.right)
+                placed.append(show)
+            } catch {
+                failures.append(Failure(what: "place \(show.id)", error: error))
+            }
+        }
+        controller.reorderHidden(hiddenOrder)
+
+        // One wait for everything. An app that isn't running draws nothing either way.
+        var running: Set<BundleID> = []
+        for id in shown.map(\.id) + hid where await controller.isRunning(id) { running.insert(id) }
+        let anchors = canAnchor
+        func outstanding(_ items: [MenuBarItem])
+            -> (hides: [BundleID], shows: [BundleID], unplaced: [BundleID], unmoved: [LayoutChanges.Move]) {
+            let drawn = { (id: BundleID) in items.contains { $0.bundleID == id } }
+            let unplaced = placed.filter { show in
+                running.contains(show.id) && drawn(show.id)
+                    && !LayoutRules.isPlaced(show.id, between: show.left, and: show.right, in: items, anchors: anchors)
+            }
+            let unmoved = moved.filter { move in
+                let next = neighbours[move.item.id] ?? (move.left, move.right)
+                return !Self.isOrdered(move.item.id, after: next.left?.id, before: next.right?.id, in: items)
+            }
+            return (hid.filter { running.contains($0) && drawn($0) }, shown.map(\.id).filter { running.contains($0) && !drawn($0) },
+                    unplaced.map(\.id), unmoved)
+        }
+        let deadline = ContinuousClock.now + applyTimeout
+        var left = outstanding([])
+        var polls = 0
+        while true {
+            polls += 1
+            await controller.refresh()
+            left = outstanding(LayoutRules.deduplicated(controller.items))
+            let done = left.hides.isEmpty && left.shows.isEmpty && left.unplaced.isEmpty && left.unmoved.isEmpty
+            if done || ContinuousClock.now >= deadline { break }
+            try? await Task.sleep(for: Self.applyPoll)
+        }
+        let written = "shown \(shown.map(\.id)), hidden \(hid), moved \(moved.map(\.item.id)), placed \(placed.map(\.id))"
+        let late = "\(left.hides + left.shows + left.unplaced + left.unmoved.map(\.item.id))"
+        Self.log.notice("Apply wrote \(written, privacy: .public); \(polls) poll(s); not shown in time: \(late, privacy: .public)")
+
+        // macOS didn't honour these switches: put them back, and the app back in its place in Hidden.
+        for id in left.hides {
+            try? await controller.show(id, waits: false)
+            failures.append(Failure(what: "hide \(id)", error: ControllerError.notHonored(id)))
+        }
+        for id in left.shows {
+            try? await controller.hide(id, waits: false)
+            failures.append(Failure(what: "show \(id)", error: ControllerError.notHonored(id)))
+        }
+        if !left.shows.isEmpty {
+            var order = hiddenOrder
+            for id in left.shows { order.insert(id, at: min(hiddenBefore.firstIndex(of: id) ?? order.count, order.count)) }
+            controller.reorderHidden(order)
+        }
+        for id in left.unplaced {
+            failures.append(Failure(what: "place \(id)", error: LayoutError.moveNotApplied))
+        }
+        // Next to an icon with no saved position, YeeHaw could only place it near; say so.
+        for move in left.unmoved {
+            let next = neighbours[move.item.id] ?? (move.left, move.right)
+            let unplaceable = [next.left, next.right].contains { $0.map { !anchors($0) } ?? false }
+            failures.append(Failure(what: "move \(move.item.id)",
+                                    error: unplaceable ? ControllerError.unresolvedNeighbor : LayoutError.moveNotApplied))
+        }
+        return failures
     }
 
     enum LayoutError: Error { case moveNotApplied }
@@ -363,6 +522,16 @@ final class LayoutModel {
     }
 
     // MARK: Text
+
+    /// One line per failure (the same reason twice reads once), offering "Fix…" for the first
+    /// missing grant. Nil for none.
+    static func message(for errors: [Error]) -> LayoutMessage? {
+        let messages = errors.map(message(for:))
+        guard !messages.isEmpty else { return nil }
+        var lines: [String] = []
+        for text in messages.map(\.text) where !lines.contains(text) { lines.append(text) }
+        return LayoutMessage(text: lines.joined(separator: "\n"), grant: messages.lazy.compactMap(\.grant).first)
+    }
 
     static func message(for error: Error) -> LayoutMessage {
         switch error {

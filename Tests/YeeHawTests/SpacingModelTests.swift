@@ -95,13 +95,22 @@ import YeeHawCore
         #expect(model.canApply)
     }
 
-    @Test func applyTitleNamesTheRestarts() {
-        #expect(SpacingModel.applyTitle(restarting: 0, writing: true) == "Apply")
-        #expect(SpacingModel.applyTitle(restarting: 1, writing: true) == "Apply and Restart 1 App")
-        #expect(SpacingModel.applyTitle(restarting: 3, writing: true) == "Apply and Restart 3 Apps")
-        #expect(SpacingModel.applyTitle(restarting: 0, writing: false) == "Apply")
-        #expect(SpacingModel.applyTitle(restarting: 1, writing: false) == "Restart 1 App")
-        #expect(SpacingModel.applyTitle(restarting: 4, writing: false) == "Restart 4 Apps")
+    @Test func theDraftNamesItsChange() {
+        let model = Self.model()
+        model.setApps([Self.app("DigUp"), Self.app("Flame")])
+        #expect(!model.isPending)
+        #expect(model.pendingPhrase == nil)
+        model.value = 8
+        #expect(model.isPending)
+        #expect(model.pendingPhrase == "Set spacing to 8 pt")
+        #expect(model.restartNames == ["DigUp", "Flame"])
+        model.revert()
+        #expect(model.value == 16)
+        #expect(!model.isPending)
+        model.setTicked(true, for: "com.example.flame")
+        #expect(model.pendingPhrase == "Restart Flame")
+        model.revert()
+        #expect(model.candidates.map(\.ticked) == [false, false])
     }
 
     @Test func applyRestartsOnlyTickedAppsAndReports() async {
@@ -125,12 +134,15 @@ import YeeHawCore
         let mac = Self.macAtEight()
         let model = Self.model(mac)
         model.setApps([Self.app("Flame", launched: mac.now - 60), Self.app("DigUp", launched: mac.now + 5)])
-        #expect(model.candidates.map(\.ticked) == [true, false])
+        // Noted, but not ticked until the user asks: opening the window isn't a change.
+        #expect(model.candidates.map(\.ticked) == [false, false])
         #expect(model.note(for: model.candidates[0]) == "Still at 16 pt")
         #expect(model.note(for: model.candidates[1]) == nil)
+        #expect(!model.isPending)
+        model.setTicked(true, for: "com.example.flame")
         #expect(model.canApply)
         #expect(!model.isWriting)
-        #expect(model.title == "Restart 1 App")
+        #expect(model.pendingPhrase == "Restart Flame")
         await model.apply()
         #expect(!mac.events.contains { $0.hasPrefix("write") })
         #expect(mac.events.filter { $0.hasPrefix("terminate") } == ["terminate Flame"])
@@ -148,7 +160,7 @@ import YeeHawCore
         #expect(model.candidates.map(\.ticked) == [false, true])
         #expect(model.note(for: model.candidates[0]) == "Already at 16 pt")
         #expect(model.note(for: model.candidates[1]) == nil)
-        #expect(model.title == "Apply and Restart 1 App")
+        #expect(model.restartNames == ["DigUp"])
     }
 
     @Test func appsLaunchedAfterAnOutsideChangeAreNotMarked() {

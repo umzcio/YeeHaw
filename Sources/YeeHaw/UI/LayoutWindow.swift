@@ -18,7 +18,8 @@ func showLayoutWindow(controller: MenuBarController, images: IconImageProvider,
 /// a regular app (see `AppWindows`).
 ///
 /// It reflects outside changes: it re-reads the bar when it becomes key, when an app launches or
-/// quits, and when the Allow list changes on disk (`allowListChanged`).
+/// quits, and when the Allow list changes on disk (`allowListChanged`). Its edits are a draft;
+/// closing it with changes not applied asks first, like a document window.
 @MainActor
 final class LayoutWindowController: NSObject, NSWindowDelegate {
     /// The open (or last opened) window; it's kept and reused.
@@ -47,10 +48,11 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
         super.init()
 
         window.delegate = self
+        model.spacing = spacing
         model.onDraggingChange = { [weak self] dragging in self?.watchEscape(dragging) }
         // Apps quit and reopen during Apply; read the list again once it's done.
         spacing.onApplied = { [weak self] in self?.refresh() }
-        // Layout edits wait while Apply restarts apps.
+        // Layout edits wait while the spacing's part of Apply restarts apps.
         spacing.onApplyingChange = { [weak model] applying in model?.spacingBusy = applying }
     }
 
@@ -150,7 +152,57 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
         inputMonitor = nil
     }
 
+    // MARK: Closing with changes
+
+    static let closeQuestion = "Apply your changes to the menu bar?"
+
+    /// Asks whether to apply the draft before closing (a sheet, so only this window waits):
+    /// Apply closes once everything applied (it stays open to show what didn't), Don't Apply
+    /// drops the draft and closes, Cancel keeps the window open.
+    private func askToApplyBeforeClosing() {
+        guard window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.messageText = Self.closeQuestion
+        alert.informativeText = closingDetail
+        alert.addButton(withTitle: "Apply")
+        let dontApply = alert.addButton(withTitle: "Don’t Apply")
+        dontApply.keyEquivalent = "d"
+        dontApply.keyEquivalentModifierMask = .command
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                switch response {
+                case .alertFirstButtonReturn:
+                    guard let applying = self.model.apply() else { return }
+                    Task {
+                        if await applying.value.isEmpty { self.window.close() }
+                    }
+                case .alertSecondButtonReturn:
+                    self.model.revert()
+                    self.window.close()
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    /// The draft's summary, and which apps the spacing change restarts.
+    private var closingDetail: String {
+        let summary = model.summary + "."
+        let restarting = model.restarting
+        return restarting.isEmpty ? summary : "\(summary) \(SpacingSection.restartNote(restarting))"
+    }
+
     // MARK: NSWindowDelegate
+
+    /// Quitting YeeHaw doesn't come through here: a draft is simply let go then.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard model.isDirty, !model.editsLocked else { return true }
+        askToApplyBeforeClosing()
+        return false
+    }
 
     func windowDidBecomeKey(_ notification: Notification) {
         guard !observers.isEmpty else { return } // The first show refreshes already.
