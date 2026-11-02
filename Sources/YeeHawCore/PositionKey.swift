@@ -47,6 +47,31 @@ public enum PositionKey {
         keys(prefixes: item.keyPrefixes, names: item.keyNames, indexInApp: item.indexInApp, table: table)
     }
 
+    /// `keys(for:table:)`, and when none of the item's own names has a slot, the one slot of its
+    /// app that none of the app's other drawn `items` accounts for, provided every other item of
+    /// the app has its own. MenuBarAgent names a slot after the status item's autosave name, which
+    /// Accessibility doesn't show (zStats' slot is `zStats.MenuBarLayout`; its item reads "zStats
+    /// system monitor"). With two slots, or two items, that could be it, nothing is guessed.
+    public static func keys(for item: MenuBarItem, among items: [MenuBarItem], table: PositionTable) -> [String] {
+        let own = keys(for: item, table: table)
+        let saved = { (keys: [String]) in keys.filter { table.values[$0] != nil } }
+        guard let id = item.bundleID, saved(own).isEmpty else { return own }
+        let siblings = items.filter { $0.bundleID == id && $0.id != item.id }
+            .reduce(into: [MenuBarItem]()) { list, next in if !list.contains(where: { $0.id == next.id }) { list.append(next) } }
+        let claimed = siblings.map { saved(keys(for: $0, table: table)) }
+        guard claimed.allSatisfy({ !$0.isEmpty }) else { return own }
+        let taken = Set(claimed.joined().map(slotName))
+        let slots = existingKeys(prefixes: item.keyPrefixes, table: table)
+        let free = Set(slots.map(slotName)).subtracting(taken)
+        guard free.count == 1, let name = free.first else { return own }
+        return slots.filter { slotName($0) == name }
+    }
+
+    /// The name part of `status:<prefix>::<name>`.
+    private static func slotName(_ key: String) -> String {
+        key.range(of: "::").map { String(key[$0.upperBound...]) } ?? key
+    }
+
     /// The table key of an Apple item, or nil when it can't be resolved. Control Center and the
     /// clock map to their fixed keys; anything else must match an existing `module:<Name>` key
     /// whose Name equals the identifier's suffix, ignoring case (`...menuextra.wifi` → `module:WiFi`).

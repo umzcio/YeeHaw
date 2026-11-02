@@ -273,14 +273,17 @@ public enum ControllerError: Error, Equatable {
 
     // MARK: Ordering
 
-    /// Places every key of `item` between its new neighbours. An Apple item moves by its `module:`
+    /// Places every key of `item` between its new neighbours; an item's keys, and a neighbour's,
+    /// are found with the last read's items beside it (`PositionKey.keys(for:among:table:)`), so a
+    /// slot named after an autosave name resolves too. An Apple item moves by its `module:`
     /// key (verified to move Apple icons on macOS 27.2) and throws `.unresolvedNeighbor` when it has none. A no-op for pinned items
     /// (macOS ignores their moves) and items with no known owner.
     public func move(_ item: MenuBarItem, leftNeighbor: MenuBarItem?, rightNeighbor: MenuBarItem?) throws {
         guard !item.isPinned, item.bundleID != nil || item.appleIdentifier != nil else { return }
         try guarded {
             let table = PositionTable(try readPositions())
-            let keys = item.bundleID != nil ? PositionKey.keys(for: item, table: table) : [try neighborKey(item, table)]
+            let keys = item.bundleID != nil
+                ? PositionKey.keys(for: item, among: items, table: table) : [try neighborKey(item, table)]
             let left = try leftNeighbor.map { try neighborKey($0, table) }
             let right = try rightNeighbor.map { try neighborKey($0, table) }
             try writePositions(table.placement(of: keys, leftNeighbor: left, rightNeighbor: right))
@@ -499,7 +502,7 @@ public enum ControllerError: Error, Equatable {
     private func neighborKey(_ item: MenuBarItem, _ table: PositionTable) throws -> String {
         let key: String?
         if item.bundleID != nil {
-            key = PositionKey.keys(for: item, table: table).first
+            key = PositionKey.keys(for: item, among: items, table: table).first
         } else if let apple = item.appleIdentifier {
             key = PositionKey.appleKey(appleIdentifier: apple, table: table)
         } else {

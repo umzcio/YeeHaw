@@ -76,6 +76,44 @@ import Testing
         #expect(PositionKey.prefixes(bundleID: "Nora", executableName: "Nora", notarized: false) == ["Nora"])
     }
 
+    // MARK: Slots named after an autosave name
+
+    static func item(_ id: String, index: Int = 0, names: [String], prefixes: [String]? = nil) -> MenuBarItem {
+        MenuBarItem(id: "\(id)#\(index)", bundleID: id, appleIdentifier: nil, indexInApp: index, label: "",
+                    keyNames: names, keyPrefixes: prefixes ?? [id], x: 0, width: 20, isPinned: false)
+    }
+
+    @Test func anItemsOnlyUnclaimedSlotIsItsOwn() {
+        // zStats on the owner's Mac: MenuBarAgent names the slot after the status item's autosave
+        // name, which Accessibility doesn't show; the item reads "zStats system monitor".
+        let zStats = Self.item("dev.zach.zStats", names: ["zStats system monitor"], prefixes: ["dev.zach.zStats", "zStats"])
+        let table = PositionTable(["status:dev.zach.zStats::zStats.MenuBarLayout": 256, "status:other::Item-0": 300])
+        #expect(PositionKey.keys(for: zStats, among: [zStats], table: table) == ["status:dev.zach.zStats::zStats.MenuBarLayout"])
+        // Under either prefix, every key with that name.
+        let both = PositionTable(["status:dev.zach.zStats::zStats.MenuBarLayout": 256, "status:zStats::zStats.MenuBarLayout": 256])
+        #expect(PositionKey.keys(for: zStats, among: [zStats], table: both)
+            == ["status:dev.zach.zStats::zStats.MenuBarLayout", "status:zStats::zStats.MenuBarLayout"])
+    }
+
+    @Test func aSlotAnotherIconOfTheAppHasIsntTaken() {
+        let first = Self.item("com.x", index: 0, names: ["Main"])
+        let second = Self.item("com.x", index: 1, names: ["Second"])
+        let table = PositionTable(["status:com.x::Main": 200, "status:com.x::Saved": 180])
+        #expect(PositionKey.keys(for: second, among: [first, second], table: table) == ["status:com.x::Saved"])
+        #expect(PositionKey.keys(for: first, among: [first, second], table: table) == ["status:com.x::Main"])
+    }
+
+    @Test func aGuessIsNeverMade() {
+        let item = Self.item("com.x", names: ["Shown"])
+        // Two slots it could be.
+        let two = PositionTable(["status:com.x::A": 200, "status:com.x::B": 180])
+        #expect(PositionKey.keys(for: item, among: [item], table: two) == ["status:com.x::Shown"])
+        // Two icons that could have the one slot.
+        let other = Self.item("com.x", index: 1, names: ["Other"])
+        let one = PositionTable(["status:com.x::A": 200])
+        #expect(PositionKey.keys(for: item, among: [item, other], table: one) == ["status:com.x::Shown"])
+    }
+
     @Test func constants() {
         #expect(PositionKey.clock == "module:Clock")
         #expect(PositionKey.controlCenter == "module:BentoBox-0")

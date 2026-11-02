@@ -673,6 +673,25 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(c.itemsWithoutPositions() == [])
     }
 
+    @Test func anIconWhoseSlotIsNamedAfterItsAutosaveNameCanAnchorAMove() async throws {
+        let zStats = "dev.zach.zStats"
+        let item = FakeSystem.item(zStats, names: ["zStats system monitor"], x: 200)
+        let rig = Self.rig(try FakeSystem(
+            allow: [(Self.a, true), (zStats, true)],
+            positions: ["status:\(Self.a)::Item-0": 300, "status:\(zStats)::zStats.MenuBarLayout": 256, PositionKey.clock: 0],
+            drawn: [zStats: [item]]))
+        let c = rig.controller()
+        await c.refresh()
+        #expect(c.itemsWithoutPositions().isEmpty)
+        // A placed right of zStats: between it and the clock.
+        try c.move(FakeSystem.item(Self.a), leftNeighbor: item, rightNeighbor: nil)
+        #expect(rig.system.positions["status:\(Self.a)::Item-0"] == 128)
+        // And zStats itself moves by its own slot.
+        try c.move(item, leftNeighbor: nil, rightNeighbor: FakeSystem.item(Self.a))
+        #expect(rig.system.positions["status:\(zStats)::zStats.MenuBarLayout"] == 138)
+        #expect(rig.system.positions["status:\(zStats)::Item-0"] == nil)
+    }
+
     @Test func moveOfPinnedOrUnownedItemIsNoOp() throws {
         let rig = Self.rig(try FakeSystem(
             allow: [(Self.a, true)],
