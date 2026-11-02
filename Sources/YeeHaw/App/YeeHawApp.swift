@@ -63,6 +63,11 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         self.controller = controller
         let icons = IconImageProvider()
         icons.barWrites = { [weak controller] in controller?.writeCount ?? 0 }
+        icons.proveOwnership = { [weak controller] items in
+            guard let controller else { return [] }
+            await controller.refresh()
+            return ItemMatcher.photographable(items, reread: controller.items, offApps: controller.switchedOff)
+        }
         self.icons = icons
         AppWindows.openSettings = { [weak self] in self?.openSettings() }
 

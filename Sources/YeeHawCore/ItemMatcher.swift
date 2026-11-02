@@ -46,10 +46,12 @@ public struct MenuBarItem: Equatable, Identifiable, Sendable {
     public var keyPrefixes: [String] // PositionKey.prefixes of the owner; empty with no owning app
     public var x, width: Double
     public var isPinned: Bool        // clock, control center
+    /// Another app, no more likely to be off, reports this frame too: the owner is a guess.
+    public var contested: Bool
 
     public init(id: String, bundleID: BundleID?, appleIdentifier: String?, indexInApp: Int,
                 label: String, keyNames: [String], keyPrefixes: [String],
-                x: Double, width: Double, isPinned: Bool) {
+                x: Double, width: Double, isPinned: Bool, contested: Bool = false) {
         self.id = id
         self.bundleID = bundleID
         self.appleIdentifier = appleIdentifier
@@ -60,11 +62,15 @@ public struct MenuBarItem: Equatable, Identifiable, Sendable {
         self.x = x
         self.width = width
         self.isPinned = isPinned
+        self.contested = contested
     }
 }
 
 public enum ItemMatcher {
     public static let tolerance: Double = 0.5
+    /// How far neighbouring items' frames may overlap: on 27.2 each third-party item's frame
+    /// reaches 2 pt into the next (zWhisper 1521 + 38 against DigUp at 1557).
+    public static let neighbourOverlap: Double = 4
 
     private static let pinnedIdentifiers: Set<String> = [
         "com.apple.menuextra.clock",
@@ -99,13 +105,17 @@ public enum ItemMatcher {
                 abs($0.x - d.x) <= tolerance && abs($0.width - d.width) <= tolerance
             }) {
                 let e = unused.remove(at: i)
+                let rivals = unused.filter {
+                    $0.bundleID != e.bundleID && tier($0) == tier(e)
+                        && abs($0.x - d.x) <= tolerance && abs($0.width - d.width) <= tolerance
+                }
                 items.append(MenuBarItem(
                     id: "\(e.bundleID)#\(e.indexInApp)", bundleID: e.bundleID, appleIdentifier: nil,
                     indexInApp: e.indexInApp, label: d.label,
                     keyNames: [e.identifier, e.title, e.description].filter { !$0.isEmpty },
                     keyPrefixes: PositionKey.prefixes(bundleID: e.bundleID, executableName: e.executableName,
                                                       notarized: e.notarized),
-                    x: d.x, width: d.width, isPinned: false))
+                    x: d.x, width: d.width, isPinned: false, contested: !rivals.isEmpty))
             } else {
                 items.append(MenuBarItem(
                     id: "unknown@\(Int(d.x))", bundleID: nil, appleIdentifier: nil, indexInApp: 0,
@@ -114,6 +124,28 @@ public enum ItemMatcher {
             }
         }
         return items.sorted { $0.x < $1.x }
+    }
+
+    /// The ids of `items` whose photograph, taken between that read and `reread`, can be stored as
+    /// their own: each is in both reads at the same frame (the bar didn't move under the shot), no
+    /// other item in either read overlaps it, neither read had to guess its owner (`contested`),
+    /// and its app isn't switched off. MenuBarAgent keeps listing an item for a moment after its
+    /// app is switched off, while the icon that slides into its place is what's drawn there.
+    public static func photographable(_ items: [MenuBarItem], reread: [MenuBarItem],
+                                      offApps: Set<BundleID>) -> Set<String> {
+        func overlaps(_ a: MenuBarItem, _ b: MenuBarItem) -> Bool {
+            min(a.x + a.width, b.x + b.width) - max(a.x, b.x) > neighbourOverlap
+        }
+        func alone(_ item: MenuBarItem, in read: [MenuBarItem]) -> Bool {
+            !read.contains { $0.id != item.id && overlaps($0, item) }
+        }
+        return Set(items.filter { item in
+            guard let again = reread.first(where: { $0.id == item.id }),
+                  abs(again.x - item.x) <= tolerance, abs(again.width - item.width) <= tolerance,
+                  !item.contested, !again.contested,
+                  !(item.bundleID.map(offApps.contains) ?? false) else { return false }
+            return alone(item, in: items) && alone(again, in: reread)
+        }.map(\.id))
     }
 
     /// Which of `id`'s items in a per-app read (`MenuBarReading.drawnBar(owning:)`) can really be

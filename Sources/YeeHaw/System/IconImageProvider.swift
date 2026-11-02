@@ -29,6 +29,11 @@ final class IconImageProvider {
     /// it changed may show items somewhere other than the frames being cropped (a reveal began or
     /// ended meanwhile), so it's thrown away rather than saved under the wrong app.
     var barWrites: @MainActor () -> Int = { 0 }
+    /// Re-reads the bar once a shot is taken and says which of the items it was taken for can be
+    /// stored as their own (`ItemMatcher.photographable`). By default none: a photograph that can't
+    /// be proven to be the app's own isn't kept, and its app icon stands in, in the strip as in the
+    /// Layout window.
+    var proveOwnership: @MainActor ([MenuBarItem]) async -> Set<String> = { _ in [] }
 
     init(directory: URL = IconImageProvider.defaultDirectory, capturesScreen: Bool = true) {
         self.directory = directory
@@ -101,8 +106,9 @@ final class IconImageProvider {
     }
 
     /// Photographs the third-party items in `items`, which must be drawn right now, with one
-    /// ScreenCaptureKit shot of each `MenuBarAgent` bar. Does nothing unless Screen Recording is
-    /// already granted; it never prompts.
+    /// ScreenCaptureKit shot of each `MenuBarAgent` bar, keeping only the photos
+    /// `proveOwnership` vouches for. Does nothing unless Screen Recording is already granted; it
+    /// never prompts.
     func captureIfPermitted(_ items: [MenuBarItem]) async {
         guard capturesScreen, CGPreflightScreenCaptureAccess() else { return }
         let targets = items.filter {
@@ -117,12 +123,20 @@ final class IconImageProvider {
             Self.log.error("Menu bar capture failed: \(error, privacy: .public)")
             return
         }
+        // The bar is read again after the shot: an item whose frame or owner is in any doubt is
+        // left out. On 27.2 a switched-off app stays listed at its slot for a moment while the
+        // icon sliding in is what's drawn there (a Fiddle photo of YeeHaw's own hat).
+        let proven = await proveOwnership(items)
         guard barWrites() == writesBefore else {
             Self.log.info("Menu bar capture dropped: the bar changed while it was taken")
             return
         }
         let drawn = items.sorted { $0.x < $1.x }
         for item in targets {
+            guard proven.contains(item.id) else {
+                Self.log.info("Not keeping a photo of \(item.id, privacy: .public): it can't be proven to be its own")
+                continue
+            }
             let column = item.bundleID == nil ? Self.widened(item, among: drawn) : (x: item.x, width: item.width)
             guard let bar = Self.bar(containing: item, in: bars),
                   let crop = bar.crop(x: column.x, width: column.width),

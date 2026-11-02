@@ -44,6 +44,13 @@ public enum ControllerError: Error, Equatable {
     /// Apps with an Allow-list entry as of YeeHaw's last read or write. Only these can be hidden;
     /// macOS adds an entry some time after an app first draws an icon.
     public var trackedApps: Set<BundleID> { Set(lastSnapshot.keys) }
+    /// Apps switched off as of YeeHaw's last read or write, less one being revealed: they aren't
+    /// drawn, whatever an earlier frame of theirs says.
+    public var switchedOff: Set<BundleID> {
+        var off = Set(lastSnapshot.filter { !$0.value }.keys)
+        if let revealed = state.pendingReveal?.bundleID { off.remove(revealed) }
+        return off
+    }
 
     private let allowFile: PreferencesFile
     private let positionFile: PreferencesFile
@@ -486,10 +493,7 @@ public enum ControllerError: Error, Equatable {
     /// claims another app's icon; an app being revealed (on or off) is tried after the apps that
     /// are on and before those that are off.
     private func reload() async {
-        let revealed = state.pendingReveal?.bundleID
-        var off = Set(lastSnapshot.filter { !$0.value }.keys)
-        if let revealed { off.remove(revealed) }
-        items = await reader.items(offApps: off, revealed: revealed)
+        items = await reader.items(offApps: switchedOff, revealed: state.pendingReveal?.bundleID)
     }
 
     private func neighborKey(_ item: MenuBarItem, _ table: PositionTable) throws -> String {

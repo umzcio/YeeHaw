@@ -453,6 +453,17 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(rig.system.positions["status:\(Self.b)::Named"] == 150)
     }
 
+    @Test func switchedOffAppsLeaveOutTheOneBeingRevealed() async throws {
+        let rig = Self.rig(try Self.revealSystem(), state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        try await c.launch()
+        #expect(c.switchedOff == [Self.a])
+        _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        #expect(c.switchedOff.isEmpty)
+        try await c.endReveal()
+        #expect(c.switchedOff == [Self.a])
+    }
+
     // MARK: failed edits roll back
 
     @Test func aHideMacOSDoesntHonorIsUndone() async throws {
