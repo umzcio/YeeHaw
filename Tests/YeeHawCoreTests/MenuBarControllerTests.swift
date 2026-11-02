@@ -22,6 +22,7 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     private var _positionWrites = 0
     private var _itemReads = 0
     private var _offAppsSeen: [Set<BundleID>] = []
+    private var _revealedSeen: [BundleID?] = []
 
     init(allow: [(BundleID, Bool)], positions: [String: Double] = [:], running: Set<BundleID>? = nil,
          drawn: [BundleID: [MenuBarItem]] = [:], appleItems: [MenuBarItem] = [],
@@ -142,13 +143,17 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
         }
     }
 
-    func items(offApps: Set<BundleID>) async -> [MenuBarItem] {
-        locked { $0._offAppsSeen.append(offApps) }
+    func items(offApps: Set<BundleID>, revealed: BundleID?) async -> [MenuBarItem] {
+        locked {
+            $0._offAppsSeen.append(offApps)
+            $0._revealedSeen.append(revealed)
+        }
         return await items()
     }
 
-    /// The `offApps` of every full read, in order.
+    /// The `offApps` and `revealed` of every full read, in order.
     var offAppsSeen: [Set<BundleID>] { locked { $0._offAppsSeen } }
+    var revealedSeen: [BundleID?] { locked { $0._revealedSeen } }
 
     func runningBundleIDs() async -> Set<BundleID> { locked { $0._running } }
 
@@ -1144,9 +1149,17 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         let c = rig.controller()
         try await c.launch()
         #expect(system.offAppsSeen.last == [Self.a])
-        // While A is revealed it's on, so its frame counts like anyone else's.
+        #expect(system.revealedSeen.last == .some(nil))
         try system.setExternally(Self.b, allowed: false)
         try await c.allowListChanged()
         #expect(system.offAppsSeen.last == [Self.a, Self.b])
+        // While A is revealed it's named as such, never as off.
+        try system.setExternally(Self.b, allowed: true)
+        try await c.allowListChanged()
+        _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        try system.setExternally(Self.b, allowed: false)
+        try await c.allowListChanged()
+        #expect(system.offAppsSeen.last == [Self.b])
+        #expect(system.revealedSeen.last == Self.a)
     }
 }

@@ -138,4 +138,61 @@ import Testing
         let extras = [AppExtra(bundleID: "r", indexInApp: 0, x: 1500, width: 24)]
         #expect(ItemMatcher.match(drawn: drawn, extras: extras, offApps: ["r"]).map(\.bundleID) == ["r"])
     }
+
+    // MARK: Revealed app
+
+    @Test func theRevealedAppComesAfterAppsThatAreOnAndBeforeAppsThatAreOff() {
+        // x (revealed) and o (off) both still report 1500, where w (on) is drawn; then 1470 is
+        // where both x and o could be: x, the one being revealed, gets it.
+        let drawn = [DrawnItem(x: 1470, width: 24, label: ""), DrawnItem(x: 1500, width: 24, label: "")]
+        let extras = [
+            AppExtra(bundleID: "o", indexInApp: 0, x: 1470, width: 24),
+            AppExtra(bundleID: "x", indexInApp: 0, x: 1500, width: 24),
+            AppExtra(bundleID: "x", indexInApp: 1, x: 1470, width: 24),
+            AppExtra(bundleID: "w", indexInApp: 0, x: 1500, width: 24),
+        ]
+        let items = ItemMatcher.match(drawn: drawn, extras: extras, offApps: ["o"], revealed: "x")
+        #expect(items.map(\.id) == ["x#1", "w#0"])
+    }
+
+    // MARK: Own items from a per-app read
+
+    static func item(_ owner: BundleID?, x: Double, width: Double = 24) -> MenuBarItem {
+        MenuBarItem(id: owner.map { "\($0)#0" } ?? "unknown@\(Int(x))", bundleID: owner, appleIdentifier: nil,
+                    indexInApp: 0, label: "", keyNames: [], keyPrefixes: [], x: x, width: width, isPinned: false)
+    }
+
+    @Test func ownItemsAreTrustedWhenTheBarGrewByThem() {
+        // Two items were drawn for others; now three, one of them the app's.
+        let bar = [Self.item(nil, x: 1440), Self.item("x", x: 1470), Self.item(nil, x: 1500)]
+        let lastRead = [Self.item("a", x: 1470), Self.item("w", x: 1500)]
+        let result = ItemMatcher.ownItems(in: bar, of: "x", othersDrawn: 2, lastRead: lastRead)
+        #expect(result.items.map(\.x) == [1470])
+        #expect(!result.inDoubt)
+    }
+
+    @Test func aStaleMatchOnAnotherAppsIconIsDropped() {
+        // Nothing new is drawn: x's frame is w's icon, as the last full read had it.
+        let bar = [Self.item(nil, x: 1470), Self.item("x", x: 1500)]
+        let lastRead = [Self.item("a", x: 1470), Self.item("w", x: 1500)]
+        let result = ItemMatcher.ownItems(in: bar, of: "x", othersDrawn: 2, lastRead: lastRead)
+        #expect(result.items.isEmpty)
+        #expect(result.inDoubt)
+    }
+
+    @Test func onlyTheMatchesTheBarCantHoldAreDropped() {
+        // x has two items: one really drawn at 1440 (the bar grew by one) and one stale on w.
+        let bar = [Self.item("x", x: 1440), Self.item(nil, x: 1470), Self.item("x", x: 1500)]
+        let lastRead = [Self.item("a", x: 1470), Self.item("w", x: 1500)]
+        let result = ItemMatcher.ownItems(in: bar, of: "x", othersDrawn: 2, lastRead: lastRead)
+        #expect(result.items.map(\.x) == [1440])
+        #expect(result.inDoubt)
+    }
+
+    @Test func aBarThatShrankHoldsNoneOfTheApp() {
+        let bar = [Self.item("x", x: 1500)]
+        let result = ItemMatcher.ownItems(in: bar, of: "x", othersDrawn: 2, lastRead: [])
+        #expect(result.items.isEmpty)
+        #expect(result.inDoubt)
+    }
 }

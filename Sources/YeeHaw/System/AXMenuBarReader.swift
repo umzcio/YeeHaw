@@ -12,11 +12,11 @@ struct AXMenuBarReader: MenuBarReading {
     static let appTimeout: Float = 0.3
 
     func items() async -> [MenuBarItem] {
-        await Self.readItems(offApps: [])
+        await Self.readItems(offApps: [], revealed: nil)
     }
 
-    func items(offApps: Set<BundleID>) async -> [MenuBarItem] {
-        await Self.readItems(offApps: offApps)
+    func items(offApps: Set<BundleID>, revealed: BundleID?) async -> [MenuBarItem] {
+        await Self.readItems(offApps: offApps, revealed: revealed)
     }
 
     func runningBundleIDs() async -> Set<BundleID> {
@@ -28,24 +28,25 @@ struct AXMenuBarReader: MenuBarReading {
         return PositionKey.prefixes(bundleID: id, executableName: app?.executableURL?.lastPathComponent)
     }
 
-    func items(of id: BundleID) async -> [MenuBarItem] {
-        await Self.readItems(of: id)
+    func drawnBar(owning id: BundleID) async -> [MenuBarItem] {
+        await Self.readBar(owning: id)
     }
 
-    /// The drawn bar plus one app's extras, so a reveal's poll doesn't message every app.
+    /// The drawn bar plus one app's extras, so a reveal's poll doesn't message every app. Every
+    /// drawn item is returned (others with no owner), so the caller can count them.
     @concurrent
-    private static func readItems(of id: BundleID) async -> [MenuBarItem] {
+    private static func readBar(owning id: BundleID) async -> [MenuBarItem] {
         let apps = NSWorkspace.shared.runningApplications
         guard let agent = apps.first(where: { $0.bundleIdentifier == agentBundleID }),
               let owner = apps.first(where: { $0.bundleIdentifier == id }) else { return [] }
         let drawn = drawnItems(agentPID: agent.processIdentifier)
         let extras = appExtras(pid: owner.processIdentifier, bundleID: id,
                                executableName: owner.executableURL?.lastPathComponent ?? "")
-        return ItemMatcher.match(drawn: drawn, extras: extras).filter { $0.bundleID == id }
+        return ItemMatcher.match(drawn: drawn, extras: extras)
     }
 
     @concurrent
-    private static func readItems(offApps: Set<BundleID>) async -> [MenuBarItem] {
+    private static func readItems(offApps: Set<BundleID>, revealed: BundleID?) async -> [MenuBarItem] {
         let apps = NSWorkspace.shared.runningApplications
         guard let agent = apps.first(where: { $0.bundleIdentifier == agentBundleID }) else { return [] }
         let owners = apps.compactMap { app -> (pid_t, BundleID, String)? in
@@ -54,7 +55,7 @@ struct AXMenuBarReader: MenuBarReading {
         }
         let drawn = drawnItems(agentPID: agent.processIdentifier)
         let extras = owners.flatMap { appExtras(pid: $0.0, bundleID: $0.1, executableName: $0.2) }
-        return ItemMatcher.match(drawn: drawn, extras: extras, offApps: offApps)
+        return ItemMatcher.match(drawn: drawn, extras: extras, offApps: offApps, revealed: revealed)
     }
 
     // MARK: What's drawn

@@ -191,9 +191,16 @@ written out below.
   3. Switch the app on.
   4. Wait, polling AX every 50 ms with a timeout of a few seconds, until the item is drawn. This
      took under 0.1 s in the test.
+     - The poll reads only the drawn bar and this app's own items, so a stale frame of the app's
+       (where it was last drawn) can match a neighbour's icon sitting there. A match counts only
+       when the bar has grown by the app's items since just before the switch-on; while it's in
+       doubt, one poll in ten is a full read (revised 2026-11-01).
   5. Press it: AX press first, then `AXShowMenu`, then a synthesized click at its frame as a last
      resort.
   6. When its menu or popover closes, switch the app off and restore the item's previous position.
+     The wait for it to go uses full reads, which try the revealed app's items after every app
+     that's on: an icon that slid into its place keeps its owner, and every icon's position is
+     current again afterwards.
   - **Expect icons to shift:** the icons left of the revealed one slide over by its width while it's
     open, and slide back afterwards. The owner accepted this because it only happens in response to
     their click. It is the one sanctioned exception to "icons never move on their own".

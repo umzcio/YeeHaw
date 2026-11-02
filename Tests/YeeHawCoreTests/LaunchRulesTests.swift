@@ -1,3 +1,4 @@
+import CoreServices
 import Foundation
 import Testing
 @testable import YeeHawCore
@@ -74,6 +75,28 @@ import Testing
         #expect(LaunchRules.QuitReason(code: code("rsdn")) == .shutdown)
         #expect(LaunchRules.QuitReason(code: code("shut")) == .shutdown)
         #expect(LaunchRules.QuitReason(code: code("abcd")) == .ordinary)
+    }
+
+    @Test func quitReasonCodesAreTheSDKsAppleEventConstants() {
+        // The SDK's own values, so a typo in a four-character code can't keep apps hidden after
+        // an ordinary quit, or switch them on at a real logout.
+        #expect(LaunchRules.QuitReason(code: kAELogOut) == .logout)
+        #expect(LaunchRules.QuitReason(code: kAEReallyLogOut) == .logout)
+        #expect(LaunchRules.QuitReason(code: kAEShowRestartDialog) == .restart)
+        #expect(LaunchRules.QuitReason(code: kAERestart) == .restart)
+        #expect(LaunchRules.QuitReason(code: kAEShowShutdownDialog) == .shutdown)
+        #expect(LaunchRules.QuitReason(code: kAEShutDown) == .shutdown)
+        // Other enum values that can ride on a quit event aren't a session ending.
+        #expect(LaunchRules.QuitReason(code: kAEQuitApplication) == .ordinary)
+    }
+
+    @Test func eachQuitIsDecidedFromItsOwnReason() {
+        // A logout another app cancelled leaves nothing behind: the next quit carries no reason
+        // and switches hidden apps back on.
+        let logout = LaunchRules.QuitReason(code: kAELogOut)
+        #expect(!LaunchRules.switchesBackOnAtTermination(logout, opensAtLogin: true))
+        let menuQuit = LaunchRules.QuitReason(code: nil)
+        #expect(LaunchRules.switchesBackOnAtTermination(menuQuit, opensAtLogin: true))
     }
 
     @Test func anOrdinaryQuitSwitchesHiddenAppsBackOn() {

@@ -358,7 +358,7 @@ extension SpacingSystem {
                 if hidden().contains(app.bundleID) {
                     return RunningMenuBarApps.instances(of: app).contains { $0.isFinishedLaunching }
                 }
-                return !(await AXMenuBarReader().items(of: app.bundleID)).isEmpty
+                return await AXMenuBarReader().drawnBar(owning: app.bundleID).contains { $0.bundleID == app.bundleID }
             },
             hide: { app in
                 for instance in RunningMenuBarApps.instances(of: app) where !instance.isHidden && !instance.isTerminated {

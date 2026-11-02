@@ -24,6 +24,8 @@ public enum ControllerError: Error, Equatable {
     public static let positionsKey = "TrailingItemPreferredPositions"
     public static let honorTimeout: Double = 5.0
     public static let pollInterval: Double = 0.05
+    /// While a reveal's per-app read is in doubt, one poll in this many is a full read.
+    public static let fullReadEvery = 10
 
     public private(set) var state: HidingState
     /// Receives a line at each step of a reveal (positions and Allow written, item drawn), for
@@ -279,6 +281,9 @@ public enum ControllerError: Error, Equatable {
             if state.pendingReveal != nil { try await finishReveal() }
             // Asked before the read, so nothing suspends between reading the table and writing it.
             let prefixes = await reader.keyPrefixes(of: id)
+            // Everything drawn now is someone else's (the app is off), so the bar must grow by
+            // the app's own items before a per-app read's matches can be them.
+            let othersDrawn = await reader.drawnBar(owning: id).count
             let values = try readPositions()
             let table = PositionTable(values)
             let yeehawKey = try neighborKey(yeehaw, table)
@@ -293,7 +298,7 @@ public enum ControllerError: Error, Equatable {
             try writeAllow([.switchOn(id)])
             revealTrace?("positions and Allow written")
             do {
-                let polls = try await waitUntil(id, drawn: true, fast: true)
+                let polls = try await waitUntilRevealDrawn(id, othersDrawn: othersDrawn)
                 revealTrace?("drawn after \(polls) poll(s)")
             } catch ControllerError.notHonored(let failed) where failed == id {
                 try await finishReveal()
@@ -326,7 +331,9 @@ public enum ControllerError: Error, Equatable {
             do {
                 try writeAllow([.switchOff(pending.bundleID)])
                 do {
-                    try await waitIfRunning(pending.bundleID, drawn: false, fast: true)
+                    // Full reads: a per-app read would match the app's stale frame to whichever
+                    // icon slid into its place, and they put every other icon back in place too.
+                    try await waitIfRunning(pending.bundleID, drawn: false)
                 } catch {
                     waitFailure = error
                 }
@@ -366,12 +373,14 @@ public enum ControllerError: Error, Equatable {
         stored = state
     }
 
-    /// A full read of the bar. Apps known to be off (except one being revealed) are named, so a
-    /// stale frame of theirs never claims another app's icon.
+    /// A full read of the bar. Apps known to be off are named, so a stale frame of theirs never
+    /// claims another app's icon; an app being revealed (on or off) is tried after the apps that
+    /// are on and before those that are off.
     private func reload() async {
+        let revealed = state.pendingReveal?.bundleID
         var off = Set(lastSnapshot.filter { !$0.value }.keys)
-        if let revealed = state.pendingReveal?.bundleID { off.remove(revealed) }
-        items = await reader.items(offApps: off)
+        if let revealed { off.remove(revealed) }
+        items = await reader.items(offApps: off, revealed: revealed)
     }
 
     private func neighborKey(_ item: MenuBarItem, _ table: PositionTable) throws -> String {
@@ -390,9 +399,9 @@ public enum ControllerError: Error, Equatable {
         return key
     }
 
-    private func waitIfRunning(_ id: BundleID, drawn: Bool, fast: Bool = false) async throws {
+    private func waitIfRunning(_ id: BundleID, drawn: Bool) async throws {
         if await reader.runningBundleIDs().contains(id) {
-            try await waitUntil(id, drawn: drawn, fast: fast)
+            try await waitUntil(id, drawn: drawn)
         } else {
             await reload()
         }
@@ -400,23 +409,43 @@ public enum ControllerError: Error, Equatable {
 
     /// Polls every `pollInterval` until the app's item appears (or disappears), for at most
     /// `honorTimeout`, counted in polls rather than wall time. No retry: throws `.notHonored`.
-    /// Returns how many polls it took.
-    ///
-    /// `fast` (reveals, where the wait is on screen) polls only the app's own drawn items and
-    /// patches them into `items`; other items keep their last read positions until the next full
-    /// read. Otherwise every poll is a full read.
+    /// Returns how many polls it took. Every poll is a full read.
     @discardableResult
-    private func waitUntil(_ id: BundleID, drawn: Bool, fast: Bool = false) async throws -> Int {
+    private func waitUntil(_ id: BundleID, drawn: Bool) async throws -> Int {
+        try await poll(id) {
+            await reload()
+            return items.contains { $0.bundleID == id } == drawn
+        }
+    }
+
+    /// A reveal's wait for the app to be drawn, which is on screen, so it polls the per-app read
+    /// and patches the app's items into `items`; other items keep their last read positions until
+    /// the next full read. Matches the bar can't hold beside `othersDrawn` aren't the app's
+    /// (`ItemMatcher.ownItems`). While the read is in doubt, every `fullReadEvery`th poll is a
+    /// full read instead, which settles it even when another icon came or went meanwhile.
+    private func waitUntilRevealDrawn(_ id: BundleID, othersDrawn: Int) async throws -> Int {
+        var inDoubt = false
+        var count = 0
+        return try await poll(id) {
+            count += 1
+            if inDoubt && count % Self.fullReadEvery == 0 {
+                await reload()
+            } else {
+                let read = await reader.drawnBar(owning: id)
+                let own = ItemMatcher.ownItems(in: read, of: id, othersDrawn: othersDrawn, lastRead: items)
+                inDoubt = own.inDoubt
+                items = (items.filter { $0.bundleID != id } + own.items).sorted { $0.x < $1.x }
+            }
+            return items.contains { $0.bundleID == id }
+        }
+    }
+
+    /// Runs `done` every `pollInterval` until it's true, for at most `honorTimeout`.
+    private func poll(_ id: BundleID, until done: () async -> Bool) async throws -> Int {
         let polls = Int((Self.honorTimeout / Self.pollInterval).rounded())
         var slept = 0
         while true {
-            if fast {
-                let own = await reader.items(of: id).filter { $0.bundleID == id }
-                items = (items.filter { $0.bundleID != id } + own).sorted { $0.x < $1.x }
-            } else {
-                await reload()
-            }
-            if items.contains(where: { $0.bundleID == id }) == drawn { return slept + 1 }
+            if await done() { return slept + 1 }
             guard slept < polls else { throw ControllerError.notHonored(id) }
             slept += 1
             await sleeper.sleep(seconds: Self.pollInterval)

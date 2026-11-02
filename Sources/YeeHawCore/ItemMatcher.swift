@@ -75,8 +75,16 @@ public enum ItemMatcher {
     /// reporting the frame its icon last had, and a neighbour that slid into that place has the
     /// same frame. Their extras are only tried after every other app's (spec: exact matching,
     /// combined with Apple's Allow list).
-    public static func match(drawn: [DrawnItem], extras: [AppExtra], offApps: Set<BundleID> = []) -> [MenuBarItem] {
-        var unused = extras.filter { !offApps.contains($0.bundleID) } + extras.filter { offApps.contains($0.bundleID) }
+    ///
+    /// `revealed` is the app a reveal is switching on or off: its frame may be stale too, so its
+    /// extras come after every app that's on, but before the apps that are off, since it's the one
+    /// most likely drawn at the reveal slot.
+    public static func match(drawn: [DrawnItem], extras: [AppExtra], offApps: Set<BundleID> = [],
+                             revealed: BundleID? = nil) -> [MenuBarItem] {
+        func tier(_ extra: AppExtra) -> Int {
+            extra.bundleID == revealed ? 1 : offApps.contains(extra.bundleID) ? 2 : 0
+        }
+        var unused = (0...2).flatMap { rank in extras.filter { tier($0) == rank } }
         var items: [MenuBarItem] = []
         for d in drawn {
             if let apple = d.appleIdentifier {
@@ -102,5 +110,25 @@ public enum ItemMatcher {
             }
         }
         return items.sorted { $0.x < $1.x }
+    }
+
+    /// Which of `id`'s items in a per-app read (`MenuBarReading.drawnBar(owning:)`) can really be
+    /// its own. That read matches only the app's own extras, and an app keeps reporting the frame
+    /// its icon last had, so a stale frame claims whatever icon is drawn there now.
+    ///
+    /// `othersDrawn` is how many items were drawn for everyone else when the wait began: the bar
+    /// can't hold the app's items on top of those unless it has grown by as many. When it hasn't,
+    /// the matches sitting where another app's item was in `lastRead` (the last full read) are
+    /// dropped first, then any still too many. `inDoubt` is true when anything was dropped.
+    public static func ownItems(in bar: [MenuBarItem], of id: BundleID, othersDrawn: Int,
+                                lastRead: [MenuBarItem]) -> (items: [MenuBarItem], inDoubt: Bool) {
+        let own = bar.filter { $0.bundleID == id }
+        let room = max(0, bar.count - othersDrawn)
+        guard own.count > room else { return (own, false) }
+        let others = lastRead.filter { $0.bundleID != id }
+        let unclaimed = own.filter { mine in
+            !others.contains { abs($0.x - mine.x) <= tolerance && abs($0.width - mine.width) <= tolerance }
+        }
+        return (Array(unclaimed.prefix(room)), true)
     }
 }

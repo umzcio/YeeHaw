@@ -17,25 +17,28 @@ public enum GrantError: Error { case needsGrant(GrantedFile) }
 public protocol MenuBarReading: Sendable {
     /// What is drawn right now, left to right.
     func items() async -> [MenuBarItem]
-    /// `items()`, knowing which apps are switched off: their stale frames are only matched after
-    /// every other app's (`ItemMatcher.match(drawn:extras:offApps:)`).
-    func items(offApps: Set<BundleID>) async -> [MenuBarItem]
+    /// `items()`, knowing which apps are switched off and which one a reveal is switching on or
+    /// off: stale frames of the off apps are only matched after every other app's, and the
+    /// revealed app's between the two (`ItemMatcher.match(drawn:extras:offApps:revealed:)`).
+    func items(offApps: Set<BundleID>, revealed: BundleID?) async -> [MenuBarItem]
+    /// Everything drawn right now, left to right, with only `id`'s items given an owner: a reader
+    /// can answer this much faster than `items()` by reading only the drawn bar and that app's own
+    /// items, so reveals poll it. Since nobody else's extras are read, a stale frame of `id`'s can
+    /// claim another app's icon; `ItemMatcher.ownItems` sorts that out.
+    func drawnBar(owning id: BundleID) async -> [MenuBarItem]
     func runningBundleIDs() async -> Set<BundleID>
     /// `PositionKey.prefixes` for the app, drawn or not (the executable name comes from the
     /// running app); just the bundle ID when it isn't running.
     func keyPrefixes(of id: BundleID) async -> [String]
-    /// What is drawn right now for one app, left to right. A reader can answer this much faster
-    /// than `items()`, by reading only the drawn bar and that app's own items; reveals poll it.
-    func items(of id: BundleID) async -> [MenuBarItem]
 }
 
 extension MenuBarReading {
-    public func items(offApps: Set<BundleID>) async -> [MenuBarItem] {
+    public func items(offApps: Set<BundleID>, revealed: BundleID?) async -> [MenuBarItem] {
         await items()
     }
 
-    public func items(of id: BundleID) async -> [MenuBarItem] {
-        await items().filter { $0.bundleID == id }
+    public func drawnBar(owning id: BundleID) async -> [MenuBarItem] {
+        await items()
     }
 }
 
