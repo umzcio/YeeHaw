@@ -160,25 +160,17 @@ final class MatchedBar: MenuBarReading, @unchecked Sendable {
         try await c.launch()
         _ = try await c.beginReveal(Self.x, nextTo: Self.yeehawItem)
         let sleepsBefore = rig.sleeper.count
+        // X stays drawn for three more looks after the switch-off; the wait must see it go.
+        rig.bar.lag = 3
 
         try await c.endReveal()
         // W slid back into 270, where X still says it is.
         #expect(!rig.bar.isDrawn(Self.x))
-        #expect(rig.sleeper.count - sleepsBefore <= 1)
+        #expect(rig.sleeper.count - sleepsBefore <= 4)
         #expect(!c.items.contains { $0.bundleID == Self.x })
         #expect(c.items.contains { $0.bundleID == Self.w && $0.x == 270 })
         #expect(c.state.pendingReveal == nil)
         #expect(rig.bar.system.allowSnapshot[Self.x] == false)
-    }
-
-    @Test func theEndWaitTriesTheRevealedAppAfterOthersButBeforeOffApps() async throws {
-        let rig = try Self.rig()
-        let c = rig.controller()
-        try await c.launch()
-        _ = try await c.beginReveal(Self.x, nextTo: Self.yeehawItem)
-        try await c.endReveal()
-        let ending = try #require(rig.bar.fullReads.last { $0.revealed == Self.x })
-        #expect(!ending.off.contains(Self.x))
     }
 
     @Test func anAmbiguousBarIsSettledByAFullRead() async throws {
@@ -194,5 +186,25 @@ final class MatchedBar: MenuBarReading, @unchecked Sendable {
         #expect(rig.bar.isDrawn(Self.x))
         #expect(item.x == 270)
         #expect(rig.sleeper.count < 20)
+        // That full read tried X after the apps that are on, not with the apps that are off.
+        let settling = try #require(rig.bar.fullReads.last)
+        #expect(settling.revealed == Self.x)
+        #expect(!settling.off.contains(Self.x))
+    }
+
+    @Test func anEndingRevealIsSeenGoneEvenWhenTheAppNeverDrew() async throws {
+        // The bar never drew X (its reveal timed out): nothing it shows is X's, so the stale
+        // match on W can't keep the end waiting.
+        let rig = try Self.rig()
+        rig.bar.lag = 1_000
+        let c = rig.controller()
+        try await c.launch()
+        await #expect(throws: ControllerError.notHonored(Self.x)) {
+            _ = try await c.beginReveal(Self.x, nextTo: Self.yeehawItem)
+        }
+        let sleeps = rig.sleeper.count
+        #expect(sleeps <= 101)
+        #expect(c.state.pendingReveal == nil)
+        #expect(!c.items.contains { $0.bundleID == Self.x })
     }
 }

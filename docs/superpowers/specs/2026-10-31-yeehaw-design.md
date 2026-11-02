@@ -198,9 +198,10 @@ written out below.
   5. Press it: AX press first, then `AXShowMenu`, then a synthesized click at its frame as a last
      resort.
   6. When its menu or popover closes, switch the app off and restore the item's previous position.
-     The wait for it to go uses full reads, which try the revealed app's items after every app
-     that's on: an icon that slid into its place keeps its owner, and every icon's position is
-     current again afterwards.
+     The wait for it to go uses the same per-app read and rule: once the app is off, its stale
+     frame is the icon that slid into its place, which the bar's item count gives away. Full
+     reads try the revealed app's items after every app that's on and before the apps that are
+     off.
   - **Expect icons to shift:** the icons left of the revealed one slide over by its width while it's
     open, and slide back afterwards. The owner accepted this because it only happens in response to
     their click. It is the one sanctioned exception to "icons never move on their own".

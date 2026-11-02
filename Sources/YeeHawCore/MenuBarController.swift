@@ -298,7 +298,7 @@ public enum ControllerError: Error, Equatable {
             try writeAllow([.switchOn(id)])
             revealTrace?("positions and Allow written")
             do {
-                let polls = try await waitUntilRevealDrawn(id, othersDrawn: othersDrawn)
+                let polls = try await waitForReveal(id, drawn: true, othersDrawn: othersDrawn)
                 revealTrace?("drawn after \(polls) poll(s)")
             } catch ControllerError.notHonored(let failed) where failed == id {
                 try await finishReveal()
@@ -328,12 +328,20 @@ public enum ControllerError: Error, Equatable {
         var writeFailure: Error?
         var waitFailure: Error?
         if state.journal.contains(pending.bundleID) {
+            let id = pending.bundleID
             do {
-                try writeAllow([.switchOff(pending.bundleID)])
+                // The app's own items are the ones the last reads vouched for; the rest of the
+                // bar is everyone else's, and stays when the app goes.
+                let running = await reader.runningBundleIDs().contains(id)
+                let othersDrawn = running
+                    ? await reader.drawnBar(owning: id).count - items.filter { $0.bundleID == id }.count : 0
+                try writeAllow([.switchOff(id)])
                 do {
-                    // Full reads: a per-app read would match the app's stale frame to whichever
-                    // icon slid into its place, and they put every other icon back in place too.
-                    try await waitIfRunning(pending.bundleID, drawn: false)
+                    if running {
+                        try await waitForReveal(id, drawn: false, othersDrawn: othersDrawn)
+                    } else {
+                        await reload()
+                    }
                 } catch {
                     waitFailure = error
                 }
@@ -418,12 +426,15 @@ public enum ControllerError: Error, Equatable {
         }
     }
 
-    /// A reveal's wait for the app to be drawn, which is on screen, so it polls the per-app read
-    /// and patches the app's items into `items`; other items keep their last read positions until
-    /// the next full read. Matches the bar can't hold beside `othersDrawn` aren't the app's
-    /// (`ItemMatcher.ownItems`). While the read is in doubt, every `fullReadEvery`th poll is a
-    /// full read instead, which settles it even when another icon came or went meanwhile.
-    private func waitUntilRevealDrawn(_ id: BundleID, othersDrawn: Int) async throws -> Int {
+    /// A reveal's wait for the app to be drawn (or gone), which is on screen or holds up the next
+    /// click, so it polls the per-app read and patches the app's items into `items`; other items
+    /// keep their last read positions until the next full read. Matches the bar can't hold beside
+    /// `othersDrawn` aren't the app's (`ItemMatcher.ownItems`): an app keeps reporting its last
+    /// frame, so once it's off that frame can be the icon that slid into its place. While the
+    /// read is in doubt, every `fullReadEvery`th poll is a full read instead, which settles it
+    /// even when another icon came or went meanwhile.
+    @discardableResult
+    private func waitForReveal(_ id: BundleID, drawn: Bool, othersDrawn: Int) async throws -> Int {
         var inDoubt = false
         var count = 0
         return try await poll(id) {
@@ -436,7 +447,7 @@ public enum ControllerError: Error, Equatable {
                 inDoubt = own.inDoubt
                 items = (items.filter { $0.bundleID != id } + own.items).sorted { $0.x < $1.x }
             }
-            return items.contains { $0.bundleID == id }
+            return items.contains { $0.bundleID == id } == drawn
         }
     }
 
