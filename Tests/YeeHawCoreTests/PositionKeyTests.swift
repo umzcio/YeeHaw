@@ -89,4 +89,14 @@ import Testing
         #expect(PositionKey.appleKey(appleIdentifier: "com.apple.menuextra.sound", table: table) == nil)
         #expect(PositionKey.appleKey(appleIdentifier: "com.other.thing", table: table) == nil)
     }
+
+    @Test func existingKeysAreEveryKeyUnderAnyPrefixSorted() {
+        let table = PositionTable([
+            "status:com.example.a::Item-1": 3, "status:com.example.a::Item-0": 2,
+            "status:A::Item-0": 1, "status:com.example.ab::Item-0": 9, "module:Clock": 0,
+        ])
+        let keys = PositionKey.existingKeys(prefixes: ["com.example.a", "A"], table: table)
+        #expect(keys == ["status:A::Item-0", "status:com.example.a::Item-0", "status:com.example.a::Item-1"])
+        #expect(PositionKey.existingKeys(prefixes: [], table: table).isEmpty)
+    }
 }

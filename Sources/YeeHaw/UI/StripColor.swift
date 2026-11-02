@@ -59,13 +59,6 @@ enum StripColor {
         return contrastRatio(luminance, 1) > contrastRatio(luminance, 0) ? .white : .black
     }
 
-    /// The mean colour of `image`'s pixels, weighted by their alpha so the result is opaque. Nil
-    /// when the image is entirely clear.
-    static func averageColor(of image: CGImage) -> StripRGB? {
-        guard let pixels = GlyphImage.Pixels(image) else { return nil }
-        return average(pixels) { _, _ in true }
-    }
-
     /// The bar's backdrop colour from a band captured twice: `composite` (the bar's backdrop over
     /// the wallpaper) and `menuBarLayer` (the bar's own window alone, which on 27.2 also draws the
     /// app menus and the clock).

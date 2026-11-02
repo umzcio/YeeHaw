@@ -226,7 +226,7 @@ private struct SpacingAppRow: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .help(candidate.app.hasVisibleWindows
+                        .help(candidate.app.hasOpenWindows
                               ? "Restarting \(candidate.app.name) closes its windows and interrupts what’s open in them."
                               : "\(candidate.app.name) opened before the spacing last changed.")
                 }
@@ -237,7 +237,7 @@ private struct SpacingAppRow: View {
         .toggleStyle(.checkbox)
         .padding(.horizontal, Self.horizontalPadding)
         .frame(height: height)
-        .accessibilityHint(candidate.app.hasVisibleWindows
+        .accessibilityHint(candidate.app.hasOpenWindows
                            ? "Restarting it closes its windows and interrupts what’s open in them." : "")
     }
 }
@@ -261,7 +261,7 @@ struct SpacingPreviewBar: View {
         let overflows = contentWidth > width
         HStack(spacing: 0) {
             ForEach(tiles) { tile in
-                let glyph = StripView.glyphSize(tile.image.size)
+                let glyph = GlyphMetrics.size(tile.image.size)
                 Image(nsImage: tile.image)
                     .renderingMode(tile.image.isTemplate ? .template : .original)
                     .resizable()
@@ -292,7 +292,7 @@ struct SpacingPreviewBar: View {
 
     private var contentWidth: CGFloat {
         tiles.reduce(Self.endPadding) {
-            $0 + SpacingPreview.itemWidth(glyph: StripView.glyphSize($1.image.size).width, spacing: spacing)
+            $0 + SpacingPreview.itemWidth(glyph: GlyphMetrics.size($1.image.size).width, spacing: spacing)
         }
     }
 

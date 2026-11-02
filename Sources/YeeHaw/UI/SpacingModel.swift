@@ -147,7 +147,7 @@ final class SpacingModel {
     /// The secondary note on a row: restarting interrupts open windows, the app still draws an
     /// older spacing, or it already has the one chosen.
     func note(for candidate: SpacingCandidate) -> String? {
-        if candidate.app.hasVisibleWindows { return "Has windows open" }
+        if candidate.app.hasOpenWindows { return "Has windows open" }
         guard let launched = candidate.spacingAtLaunch else { return nil }
         if launched != value, !isWriting { return "Still at \(launched) pt" }
         if launched == value, isWriting { return "Already at \(launched) pt" }
@@ -233,7 +233,7 @@ final class SpacingModel {
     private func retick() {
         for index in candidates.indices {
             let candidate = candidates[index]
-            let ticked = userTicks[candidate.id] ?? (!candidate.app.hasVisibleWindows && spacing(of: candidate) != value)
+            let ticked = userTicks[candidate.id] ?? (!candidate.app.hasOpenWindows && spacing(of: candidate) != value)
             if candidates[index].ticked != ticked { candidates[index].ticked = ticked }
         }
     }

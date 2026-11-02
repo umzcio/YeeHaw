@@ -8,7 +8,7 @@ import YeeHawCore
     static func app(_ name: String, windows: Bool = false, hidden: Bool = false,
                     launched: Date? = nil) -> RunningMenuBarApp {
         RunningMenuBarApp(bundleID: "com.example.\(name.lowercased())", bundlePath: "/Applications/\(name).app",
-                          name: name, hasVisibleWindows: windows, isHidden: hidden, launchDate: launched)
+                          name: name, hasOpenWindows: windows, isHidden: hidden, launchDate: launched)
     }
 
     static func model(_ mac: FakeSpacingMac = FakeSpacingMac()) -> SpacingModel {
@@ -79,9 +79,9 @@ import YeeHawCore
         let model = Self.model()
         model.setApps([
             RunningMenuBarApp(bundleID: "com.apple.Spotlight", bundlePath: "/System/Library/CoreServices/Spotlight.app",
-                              name: "Spotlight", hasVisibleWindows: false),
+                              name: "Spotlight", hasOpenWindows: false),
             RunningMenuBarApp(bundleID: "com.zapps.yeehaw", bundlePath: NSHomeDirectory() + "/Applications/YeeHaw.app",
-                              name: "YeeHaw", hasVisibleWindows: false),
+                              name: "YeeHaw", hasOpenWindows: false),
         ])
         #expect(model.candidates.isEmpty)
     }

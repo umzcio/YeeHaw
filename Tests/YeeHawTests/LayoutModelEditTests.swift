@@ -23,7 +23,7 @@ private final class StubBar: MenuBarReading, PreferencesFile, StateStoring, Slee
         allowBlob = try PropertyListSerialization.data(fromPropertyList: entries, format: .binary, options: 0)
         drawn = apps.flatMap { id in (0..<(icons[id] ?? 1)).map { (id, $0) } }.enumerated().map { slot, icon in
             MenuBarItem(id: "\(icon.0)#\(icon.1)", bundleID: icon.0, appleIdentifier: nil, indexInApp: icon.1,
-                        axIdentifier: "", label: icon.0, keyNames: [], keyPrefixes: [icon.0],
+                        label: icon.0, keyNames: [], keyPrefixes: [icon.0],
                         x: Double(100 + 40 * slot), width: 20, isPinned: false)
         }
     }

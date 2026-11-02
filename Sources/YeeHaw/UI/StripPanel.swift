@@ -8,6 +8,8 @@ struct StripEntry: Identifiable {
     let id: BundleID
     let image: NSImage
     let name: String
+    /// Whether the app is running; one that isn't has no icon to reveal and is drawn dimmed.
+    var isRunning = true
 }
 
 /// The strip under YeeHaw's icon that lists the hidden apps (spec "The strip", ruling R44). It's
@@ -16,8 +18,11 @@ struct StripEntry: Identifiable {
 /// `StripColorSampler`, or an opaque neutral without Screen Recording), with continuous corners
 /// and the window shadow.
 ///
-/// A borderless, non-activating panel: it can become key (for Esc) without activating YeeHaw or
-/// taking focus from the frontmost app.
+/// A borderless, non-activating panel: it can become key (for the keyboard) without activating
+/// YeeHaw or taking focus from the frontmost app. Like a status menu, Left and Right light tiles,
+/// Return or Space opens the lit one and Esc closes; ⌘L, ⌘, and ⌘Q do what the hat's menu does.
+///
+/// It fades in and out like the native status menus it sits among, rather than springing open.
 @MainActor
 final class StripPanel: NSPanel {
     /// Space between the bottom of the menu bar and the top of the strip.
@@ -32,12 +37,12 @@ final class StripPanel: NSPanel {
     /// How long after a Space switch to resample, so the new Space's wallpaper is on screen.
     static let spaceSettle: Duration = .milliseconds(600)
 
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "strip")
+    private static let log = Logger(subsystem: Log.subsystem, category: "strip")
     private let model: StripModel
     private let hosting: NSHostingView<StripView>
     /// The rounded, opaque fill everything sits on.
     private let surface = NSView()
-    private let sampler = StripColorSampler()
+    private let sampler: StripColorSampler
     private var monitors: [Any] = []
     private var observers: [NSObjectProtocol] = []
     /// Space and appearance watchers, kept for the panel's lifetime so the cache stays current.
@@ -58,11 +63,22 @@ final class StripPanel: NSPanel {
     /// that caused it can tell the strip was open.
     private(set) var lastAutoDismissal: ContinuousClock.Instant?
 
+    /// Called whenever the strip closes, for any reason.
+    var onDismiss: (() -> Void)?
+    /// The hat menu's commands, for their shortcuts while the strip has the keyboard.
+    private let onSettings: () -> Void
+    private let onQuit: () -> Void
+
     /// Why the strip closes.
     enum DismissReason { case requested, outsideClick, resignedKey }
 
-    init(onSelect: @escaping (BundleID) -> Void, onFix: @escaping () -> Void) {
-        model = StripModel(onSelect: onSelect, onFix: onFix)
+    init(sampler: StripColorSampler, onSelect: @escaping (BundleID) -> Void,
+         onNoticeAction: @escaping (StripNotice.Action) -> Void, onLayout: @escaping () -> Void,
+         onSettings: @escaping () -> Void, onQuit: @escaping () -> Void) {
+        self.sampler = sampler
+        self.onSettings = onSettings
+        self.onQuit = onQuit
+        model = StripModel(onSelect: onSelect, onNoticeAction: onNoticeAction, onLayout: onLayout)
         hosting = NSHostingView(rootView: StripView(model: model))
         // The window is sized from `measure`; the hosting view never resizes it.
         hosting.sizingOptions = []
@@ -101,9 +117,12 @@ final class StripPanel: NSPanel {
         dismiss(.resignedKey)
     }
 
-    /// Shows `items` (and `notice`, a one-line problem with a Fix… button) just below `anchor`,
+    /// Shows `items` (and `notice`, a one-line problem with its button) just below `anchor`,
     /// YeeHaw's icon in screen coordinates, kept fully on `screen` (the status button's screen).
-    func show(below anchor: NSRect, items: [StripEntry], notice: String? = nil, screen: NSScreen? = nil) {
+    /// `highlightFirst` lights the first tile, as a menu opened from the keyboard does; opened
+    /// with the pointer, nothing is lit until the pointer or an arrow key lights something.
+    func show(below anchor: NSRect, items: [StripEntry], notice: StripNotice? = nil, screen: NSScreen? = nil,
+              highlightFirst: Bool = false) {
         generation += 1
         iconRect = Self.iconHitRect(anchor)
         let target = screen ?? NSScreen.screens.first { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) }
@@ -114,6 +133,7 @@ final class StripPanel: NSPanel {
         displayID = target.flatMap(StripColorSampler.displayID)
         model.entries = items
         model.notice = notice
+        model.highlighted = highlightFirst ? items.first?.id : nil
         model.barHeight = barHeight
         model.maxWidth = frame.width - 2 * Self.screenInset
         surface.layer?.cornerRadius = Self.cornerRadius(barHeight: barHeight)
@@ -146,6 +166,7 @@ final class StripPanel: NSPanel {
         Self.log.info("Strip closing: \(String(describing: reason), privacy: .public)")
         if reason != .requested { lastAutoDismissal = .now }
         stopMonitoring()
+        onDismiss?()
         generation += 1
         let closing = generation
         NSAnimationContext.runAnimationGroup { context in
@@ -226,10 +247,7 @@ final class StripPanel: NSPanel {
     /// crossfades the strip if it's showing.
     private func resampleAllScreens() {
         let screens = NSScreen.screens.compactMap { screen in
-            StripColorSampler.displayID(of: screen).map {
-                ($0, Self.barHeight(screenFrame: screen.frame, visibleFrame: screen.visibleFrame,
-                                    fallback: Self.hiddenBarHeight(screen)))
-            }
+            StripColorSampler.displayID(of: screen).map { ($0, Self.barHeight(of: screen)) }
         }
         Task { [weak self] in
             guard let self else { return }
@@ -297,6 +315,11 @@ final class StripPanel: NSPanel {
         return inset >= 1 ? inset : fallback
     }
 
+    /// The bar's height on `screen`, shown or hidden.
+    static func barHeight(of screen: NSScreen) -> CGFloat {
+        barHeight(screenFrame: screen.frame, visibleFrame: screen.visibleFrame, fallback: hiddenBarHeight(screen))
+    }
+
     /// The bar's height on `screen` while it's hidden: the notch's safe area, else the status bar's thickness.
     static func hiddenBarHeight(_ screen: NSScreen) -> CGFloat {
         max(screen.safeAreaInsets.top, NSStatusBar.system.thickness)
@@ -336,11 +359,12 @@ final class StripPanel: NSPanel {
             }) {
             monitors.append(monitor)
         }
-        // Esc, while the strip is key.
+        // The keyboard, while the strip is key.
         if let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] event in
-            guard event.keyCode == 53 else { return event } // Escape
-            MainActor.assumeIsolated { self?.dismiss() }
-            return nil
+            let (code, flags) = (event.keyCode, event.modifierFlags.intersection(.deviceIndependentFlagsMask))
+            let key = event.charactersIgnoringModifiers
+            let handled = MainActor.assumeIsolated { self?.handleKey(code: code, flags: flags, characters: key) ?? false }
+            return handled ? nil : event
         }) {
             monitors.append(monitor)
         }
@@ -352,6 +376,45 @@ final class StripPanel: NSPanel {
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) {
             [weak self] _ in MainActor.assumeIsolated { self?.dismiss() }
         })
+    }
+
+    /// Key codes (US positions; the arrows, Return and Esc are the same on every layout).
+    private enum Key {
+        static let escape: UInt16 = 53, left: UInt16 = 123, right: UInt16 = 124
+        static let returnKey: UInt16 = 36, enter: UInt16 = 76, space: UInt16 = 49
+    }
+
+    /// Whether a key press was the strip's: Esc closes; Left and Right light tiles; Return or
+    /// Space opens the lit tile; ⌘L, ⌘, and ⌘Q are the hat menu's Layout…, Settings… and Quit.
+    private func handleKey(code: UInt16, flags: NSEvent.ModifierFlags, characters: String?) -> Bool {
+        if flags == .command {
+            switch characters?.lowercased() {
+            case "l": dismiss(); model.onLayout()
+            case ",": dismiss(); onSettings()
+            case "q": dismiss(); onQuit()
+            default: return false
+            }
+            return true
+        }
+        guard flags.subtracting([.numericPad, .function]).isEmpty else { return false }
+        switch code {
+        case Key.escape:
+            dismiss()
+        case Key.left:
+            model.moveHighlight(by: -1)
+        case Key.right:
+            model.moveHighlight(by: 1)
+        case Key.returnKey, Key.enter, Key.space:
+            if let id = model.highlighted, model.entries.contains(where: { $0.id == id }) {
+                model.onSelect(id)
+            } else if model.entries.isEmpty, code != Key.space {
+                dismiss()
+                model.onLayout()
+            }
+        default:
+            return false
+        }
+        return true
     }
 
     private func stopMonitoring() {

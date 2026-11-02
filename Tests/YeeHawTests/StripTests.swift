@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import YeeHawCore
 @testable import YeeHaw
 
 @Suite struct StripPlacementTests {
@@ -107,7 +108,7 @@ import Testing
 
     static func model(entries: Int, glyph: NSSize = NSSize(width: 16, height: 16),
                       maxWidth: CGFloat = .greatestFiniteMagnitude) -> StripModel {
-        let model = StripModel(onSelect: { _ in }, onFix: {})
+        let model = StripModel(onSelect: { _ in })
         let image = NSImage(size: glyph)
         model.entries = (0..<entries).map { StripEntry(id: "com.example.app\($0)", image: image, name: "App \($0)") }
         model.maxWidth = maxWidth
@@ -127,9 +128,9 @@ import Testing
     }
 
     @Test func glyphsScaleDownButNeverUp() {
-        #expect(StripView.glyphSize(NSSize(width: 10, height: 12)) == NSSize(width: 10, height: 12))
-        #expect(StripView.glyphSize(NSSize(width: 20, height: 36)) == NSSize(width: 10, height: 18))
-        #expect(StripView.glyphSize(NSSize(width: 30, height: 18)) == NSSize(width: 30, height: 18))
+        #expect(GlyphMetrics.size(NSSize(width: 10, height: 12)) == NSSize(width: 10, height: 12))
+        #expect(GlyphMetrics.size(NSSize(width: 20, height: 36)) == NSSize(width: 10, height: 18))
+        #expect(GlyphMetrics.size(NSSize(width: 30, height: 18)) == NSSize(width: 30, height: 18))
         let tall = StripPanel.measure(Self.model(entries: 1, glyph: NSSize(width: 40, height: 40)))
         #expect(tall == NSSize(width: 18 + 20 + 2 * 6, height: Self.barHeight))
     }
@@ -142,7 +143,7 @@ import Testing
 
     @Test func aNoticeAddsABarHighRow() {
         let model = Self.model(entries: 1)
-        model.notice = "YeeHaw needs access to the menu bar settings files."
+        model.notice = StripNotice(message: "YeeHaw needs access to the Menu Bar Allow List.", action: .openSettings)
         #expect(StripPanel.measure(model).height == 2 * Self.barHeight)
         model.entries = []
         #expect(StripPanel.measure(model).height == 2 * Self.barHeight)
@@ -181,5 +182,65 @@ import Testing
     @Test func quartzPointsFlipIntoAppKitScreenCoordinates() {
         #expect(StripPanel.appKitScreenPoint(CGPoint(x: 1538, y: 12), primaryHeight: 1329) == NSPoint(x: 1538, y: 1317))
         #expect(StripPanel.appKitScreenPoint(nil, primaryHeight: 1329) == nil)
+    }
+}
+
+@Suite @MainActor struct StripKeyboardTests {
+    @Test func arrowsWalkTheTilesAndWrapLikeAMenu() {
+        let ids = ["a", "b", "c"]
+        #expect(StripModel.moved(nil, in: ids, by: 1) == "a")
+        #expect(StripModel.moved(nil, in: ids, by: -1) == "c")
+        #expect(StripModel.moved("a", in: ids, by: 1) == "b")
+        #expect(StripModel.moved("c", in: ids, by: 1) == "a")
+        #expect(StripModel.moved("a", in: ids, by: -1) == "c")
+        #expect(StripModel.moved("gone", in: ids, by: 1) == "a")
+        #expect(StripModel.moved("a", in: [], by: 1) == nil)
+    }
+
+    @Test func onlyAStripOpenedWithoutThePointerLightsItsFirstTile() {
+        #expect(StatusItemController.isPointerEvent(.leftMouseDown))
+        #expect(StatusItemController.isPointerEvent(.leftMouseUp))
+        #expect(!StatusItemController.isPointerEvent(.keyDown))
+        #expect(!StatusItemController.isPointerEvent(nil))
+    }
+}
+
+@Suite @MainActor struct StripNoticeTests {
+    static func notice(_ grants: Set<GrantedFile> = [], _ problem: StatusItemController.RevealProblem? = nil,
+                       ownIconMissing: Bool = false) -> StripNotice? {
+        StatusItemController.notice(needsGrant: grants, problem: problem, ownIconMissing: ownIconMissing,
+                                    name: { $0 == "dig" ? "DigUp" : $0 })
+    }
+
+    @Test func nothingWrongShowsNothing() {
+        #expect(Self.notice() == nil)
+    }
+
+    @Test func onlyAMissingGrantOffersSettings() {
+        let one = Self.notice([.positions])
+        #expect(one == StripNotice(message: "YeeHaw needs access to the Menu Bar Layout.", action: .openSettings))
+        #expect(one?.actionTitle == "Fix…")
+        #expect(Self.notice([.positions, .allowList])?.message
+            == "YeeHaw needs access to the Menu Bar Allow List and the Menu Bar Layout.")
+        // It comes before any reveal problem.
+        #expect(Self.notice([.allowList], .didNotAppear("dig"))?.action == .openSettings)
+    }
+
+    @Test func aSlowRevealOffersToTryAgain() {
+        let notice = Self.notice([], .didNotAppear("dig"))
+        #expect(notice == StripNotice(message: "DigUp didn’t appear in the menu bar in time.", action: .retry("dig")))
+        #expect(notice?.actionTitle == "Try Again")
+    }
+
+    @Test func anAppThatIsntRunningOffersToOpenIt() {
+        let notice = Self.notice([], .notRunning("dig"))
+        #expect(notice?.action == .openApp("dig"))
+        #expect(notice?.actionTitle == "Open")
+    }
+
+    @Test func problemsSettingsCantFixHaveNoButton() {
+        #expect(Self.notice([], .failed("dig"))?.action == nil)
+        #expect(Self.notice([], .failed("dig"))?.actionTitle == nil)
+        #expect(Self.notice(ownIconMissing: true) == StripNotice(message: "YeeHaw can’t find its own menu bar icon."))
     }
 }

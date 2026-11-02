@@ -29,7 +29,7 @@ final class LoginItemModel {
     private(set) var error: String?
 
     @ObservationIgnored private let service: LoginItemService
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "settings")
+    private static let log = Logger(subsystem: Log.subsystem, category: "settings")
 
     init(service: LoginItemService) {
         self.service = service

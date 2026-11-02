@@ -17,6 +17,9 @@ public enum GrantError: Error { case needsGrant(GrantedFile) }
 public protocol MenuBarReading: Sendable {
     /// What is drawn right now, left to right.
     func items() async -> [MenuBarItem]
+    /// `items()`, knowing which apps are switched off: their stale frames are only matched after
+    /// every other app's (`ItemMatcher.match(drawn:extras:offApps:)`).
+    func items(offApps: Set<BundleID>) async -> [MenuBarItem]
     func runningBundleIDs() async -> Set<BundleID>
     /// `PositionKey.prefixes` for the app, drawn or not (the executable name comes from the
     /// running app); just the bundle ID when it isn't running.
@@ -27,6 +30,10 @@ public protocol MenuBarReading: Sendable {
 }
 
 extension MenuBarReading {
+    public func items(offApps: Set<BundleID>) async -> [MenuBarItem] {
+        await items()
+    }
+
     public func items(of id: BundleID) async -> [MenuBarItem] {
         await items().filter { $0.bundleID == id }
     }

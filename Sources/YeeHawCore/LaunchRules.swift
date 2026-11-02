@@ -18,11 +18,15 @@ public enum LaunchRules {
         /// `found` is the running version, as "27.0.1".
         case unsupportedSystem(found: String)
         case thawRunning
+        /// Another copy of YeeHaw is already running; two would overwrite each other's record of
+        /// what they switched off.
+        case alreadyRunning
 
         public var title: String {
             switch self {
             case .unsupportedSystem: "YeeHaw needs macOS 27.2 or later"
             case .thawRunning: "Quit Thaw first"
+            case .alreadyRunning: "YeeHaw is already running"
             }
         }
 
@@ -34,19 +38,36 @@ public enum LaunchRules {
                     + "then open YeeHaw again."
             case .thawRunning:
                 return "Thaw is running, and both apps change the same settings. Quit Thaw, then open YeeHaw again."
+            case .alreadyRunning:
+                return "Another copy of YeeHaw is open, and its hat is in the menu bar. Use that one, "
+                    + "or quit it before opening this copy."
             }
         }
     }
 
-    /// Whether YeeHaw may start: the system is checked first, then whether Thaw is running.
-    public static func check(os: OperatingSystemVersion, running: Set<String>) -> Outcome {
+    /// Whether YeeHaw may start: the system is checked first, then whether Thaw is running, then
+    /// whether another copy of YeeHaw already is (`isAnotherInstance`).
+    public static func check(os: OperatingSystemVersion, running: Set<String>,
+                             anotherInstance: Bool = false) -> Outcome {
         let current = (os.majorVersion, os.minorVersion, os.patchVersion)
         let minimum = (minimumSystem.majorVersion, minimumSystem.minorVersion, minimumSystem.patchVersion)
         if current < minimum {
             return .refuse(.unsupportedSystem(found: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"))
         }
         if running.contains(thawBundleID) { return .refuse(.thawRunning) }
+        if anotherInstance { return .refuse(.alreadyRunning) }
         return .proceed
+    }
+
+    /// Whether `other`, a process with YeeHaw's bundle ID, is the copy that keeps running rather
+    /// than this one (`mine`): the one launched first wins, then the lower process ID, so two
+    /// copies opened together never both quit. A copy whose launch date is unknown counts.
+    public static func isAnotherInstance(mine: (pid: Int32, launched: Date?),
+                                         other: (pid: Int32, launched: Date?)) -> Bool {
+        guard other.pid != mine.pid else { return false }
+        guard let theirs = other.launched, let ours = mine.launched else { return true }
+        if theirs != ours { return theirs < ours }
+        return other.pid < mine.pid
     }
 
     public enum Step: Equatable, Sendable {
@@ -92,23 +113,14 @@ public enum LaunchRules {
 
     /// An ordinary quit switches back on every app YeeHaw switched off. At logout, restart or
     /// shutdown they stay off and stay in the journal, so the next login doesn't flash every icon
-    /// before YeeHaw starts; that launch reconciles (spec "Logout and shutdown"). Decided from
-    /// the quit itself, so a logout another app cancelled leaves no trace on a later quit.
-    public static func switchesBackOnAtTermination(_ reason: QuitReason) -> Bool {
-        reason == .ordinary
-    }
-}
-
-/// Where YeeHaw's own icon sits relative to Control Center.
-public enum OwnIconPlacement {
-    public static let controlCenterIdentifier = "com.apple.menuextra.controlcenter"
-
-    /// True when one of `ownID`'s drawn items is immediately left of Control Center (by position;
-    /// each display's copy of the bar counts on its own).
-    public static func isNextToControlCenter(_ items: [MenuBarItem], ownID: BundleID) -> Bool {
-        let sorted = items.sorted { $0.x < $1.x }
-        return zip(sorted, sorted.dropFirst()).contains { left, right in
-            left.bundleID == ownID && right.appleIdentifier == controlCenterIdentifier
-        }
+    /// before YeeHaw starts and that launch reconciles (spec "Logout and shutdown"), but only when
+    /// YeeHaw opens at login (`opensAtLogin`: the login item is enabled, not merely waiting for
+    /// approval). Otherwise nothing would start it again, so they're switched back on as for an
+    /// ordinary quit.
+    ///
+    /// Known gap: when another app cancels a logout after YeeHaw has quit, the user stays logged in
+    /// with those apps hidden until YeeHaw is opened again, which Open at Login doesn't do mid-session.
+    public static func switchesBackOnAtTermination(_ reason: QuitReason, opensAtLogin: Bool) -> Bool {
+        reason == .ordinary || !opensAtLogin
     }
 }

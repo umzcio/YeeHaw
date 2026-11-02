@@ -8,19 +8,17 @@ import Testing
     static let c = "com.example.C"
 
     static func app(_ id: BundleID, index: Int = 0, x: Double) -> MenuBarItem {
-        MenuBarItem(id: "\(id)#\(index)", bundleID: id, appleIdentifier: nil, indexInApp: index, axIdentifier: "",
-                    label: id, keyNames: [], keyPrefixes: [id], x: x, width: 20, isPinned: false)
+        MenuBarItem(id: "\(id)#\(index)", bundleID: id, appleIdentifier: nil, indexInApp: index, label: id, keyNames: [], keyPrefixes: [id], x: x, width: 20, isPinned: false)
     }
 
     static func apple(_ name: String, x: Double, pinned: Bool = false) -> MenuBarItem {
         let id = "com.apple.menuextra.\(name)"
-        return MenuBarItem(id: id, bundleID: nil, appleIdentifier: id, indexInApp: 0, axIdentifier: "", label: name,
+        return MenuBarItem(id: id, bundleID: nil, appleIdentifier: id, indexInApp: 0, label: name,
                            keyNames: [], keyPrefixes: [], x: x, width: 20, isPinned: pinned)
     }
 
     static func unknown(x: Double) -> MenuBarItem {
-        MenuBarItem(id: "unknown@\(Int(x))", bundleID: nil, appleIdentifier: nil, indexInApp: 0, axIdentifier: "",
-                    label: "", keyNames: [], keyPrefixes: [], x: x, width: 20, isPinned: false)
+        MenuBarItem(id: "unknown@\(Int(x))", bundleID: nil, appleIdentifier: nil, indexInApp: 0, label: "", keyNames: [], keyPrefixes: [], x: x, width: 20, isPinned: false)
     }
 
     /// own, A#0, A#1, Wi-Fi, B, Control Center, Clock

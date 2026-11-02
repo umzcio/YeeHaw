@@ -72,9 +72,8 @@ reports and from tests run on the owner's Mac, on macOS 27.0.1 and then 27.2.
 ### The proof test
 
 A throwaway test app (`com.zapps.yeehaw.spike`, in `~/Applications/YeeHawSpike.app`) checked each
-building block. Its source was recreated at
-`/private/tmp/claude-501/-Users-zach-GitHub-YeeHaw/6b64ceb0-5672-46e7-a19b-3aec7b204806/scratchpad/spike/probe.swift`.
-That folder is temporary, so the techniques are written out below.
+building block. Its source lived in a temporary scratch folder and is gone, so the techniques are
+written out below.
 
 | Building block | Result |
 |---|---|

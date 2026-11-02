@@ -46,7 +46,7 @@ enum TileStyle: Equatable {
 /// macOS has applied it (or a timeout says it didn't).
 @MainActor @Observable
 final class LayoutModel {
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "layout")
+    private static let log = Logger(subsystem: Log.subsystem, category: "layout")
     /// How long to wait for macOS to apply a move before showing what the bar really holds.
     static let moveSettleTimeout: Duration = .seconds(5)
     static let moveSettlePoll: Duration = .milliseconds(250)
@@ -77,7 +77,8 @@ final class LayoutModel {
     @ObservationIgnored let controller: MenuBarController
     @ObservationIgnored let images: IconImageProvider
     @ObservationIgnored let requestGrant: (GrantedFile) async -> Bool
-    @ObservationIgnored private let sampler = StripColorSampler()
+    /// Shared with the strip, so both read one cache of the bar's colour.
+    @ObservationIgnored private let sampler = StripColorSampler.shared
     /// Set by the view while a tile is being dragged; reloads wait until the drag ends, so the
     /// rows don't change under the pointer.
     @ObservationIgnored var isDragging = false {
@@ -122,7 +123,7 @@ final class LayoutModel {
                         name: Self.name(of: item), image: images.image(for: item))
             }
         hidden = controller.state.hidden.map { id in
-            HiddenGroup(id: id, name: StatusItemController.name(of: id),
+            HiddenGroup(id: id, name: AppIdentity.name(of: id),
                         icons: images.iconIndices(for: id).map {
                             HiddenGroup.Icon(id: "\(id)#\($0)", image: images.image(for: id, indexInApp: $0))
                         })
@@ -211,8 +212,7 @@ final class LayoutModel {
 
     private func sampleBarColour() async {
         guard let screen = NSScreen.screens.first, let display = StripColorSampler.displayID(of: screen) else { return }
-        let height = max(screen.frame.maxY - screen.visibleFrame.maxY, NSStatusBar.system.thickness)
-        if case .sampled(let fill) = await sampler.sample(display: display, barHeight: height) {
+        if case .sampled(let fill) = await sampler.sample(display: display, barHeight: StripPanel.barHeight(of: screen)) {
             tileStyle = .bar(fill: fill, ink: StripColor.ink(for: fill))
         } else if let kept = sampler.cached(for: display) {
             tileStyle = .bar(fill: kept, ink: StripColor.ink(for: kept))
@@ -246,7 +246,7 @@ final class LayoutModel {
         guard !editsLocked, bar.indices.contains(from), bar[from].capability.canHide,
               let id = bar[from].item.bundleID else { return nil }
         let order = LayoutRules.hiddenOrder(hidden.map(\.id), placing: id, at: index)
-        let name = StatusItemController.name(of: id)
+        let name = AppIdentity.name(of: id)
         // The group gets a tile per icon the app draws right now.
         images.noteDrawn(controller.items)
         bar.removeAll { $0.item.bundleID == id }
@@ -273,7 +273,7 @@ final class LayoutModel {
             LayoutRules.showNeighbors(at: LayoutRules.clampedInsertion($0, in: items), in: items, anchors: canAnchor)
         }
         let anchors = canAnchor
-        let name = StatusItemController.name(of: id)
+        let name = AppIdentity.name(of: id)
         hidden.removeAll { $0.id == id }
         return perform("show \(name)", announcing: "\(name) is back in the menu bar") { [controller] in
             try await controller.show(id)
@@ -367,15 +367,15 @@ final class LayoutModel {
     static func message(for error: Error) -> LayoutMessage {
         switch error {
         case ControllerError.notHonored(let id):
-            LayoutMessage(text: "macOS didn’t update \(StatusItemController.name(of: id)) in time. Try again in a moment.")
+            LayoutMessage(text: "macOS didn’t update \(AppIdentity.name(of: id)) in time. Try again in a moment.")
         case ControllerError.needsGrant(let file):
-            LayoutMessage(text: "YeeHaw needs access to macOS’s \(describe(file)) to change the menu bar.", grant: file)
+            LayoutMessage(text: "YeeHaw needs access to the \(describe(file)) to change the menu bar.", grant: file)
         case ControllerError.notTracked(let id):
-            LayoutMessage(text: "\(StatusItemController.name(of: id)) can’t be hidden yet. macOS hasn’t listed it in its menu bar settings.")
+            LayoutMessage(text: "\(AppIdentity.name(of: id)) can’t be hidden yet. macOS hasn’t listed it in its menu bar settings.")
         case ControllerError.unresolvedNeighbor:
             LayoutMessage(text: "macOS hasn’t saved a position for an icon there yet, so YeeHaw can’t place it.")
         case ControllerError.malformed(let file):
-            LayoutMessage(text: "macOS’s \(describe(file)) holds something unexpected, so YeeHaw left it alone.")
+            LayoutMessage(text: "The \(describe(file)) holds something unexpected, so YeeHaw left it alone.")
         case LayoutError.moveNotApplied:
             LayoutMessage(text: "macOS didn’t apply the new order. The menu bar shows what it kept.")
         default:
@@ -383,17 +383,15 @@ final class LayoutModel {
         }
     }
 
+    /// The file's name as Settings and onboarding give it.
     private static func describe(_ file: GrantedFile) -> String {
-        switch file {
-        case .allowList: "menu bar settings file"
-        case .positions: "menu bar layout file"
-        }
+        AppPermission(file: file)?.title ?? file.rawValue
     }
 
     /// A short name: the owning app's, else the item's own label up to its first comma
     /// ("Wi‑Fi, connected, 3 bars" → "Wi‑Fi").
     static func name(of item: MenuBarItem) -> String {
-        if let id = item.bundleID { return StatusItemController.name(of: id) }
+        if let id = item.bundleID { return AppIdentity.name(of: id) }
         let label = item.label.split(separator: ",").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
         return label.isEmpty ? "Unknown icon" : label
     }

@@ -8,18 +8,18 @@ public struct RunningMenuBarApp: Equatable, Sendable {
     public var name: String
     /// Whether it has windows open, which a restart would interrupt: hidden (Command-H),
     /// minimized and other-Space windows count (see `SpacingPlan.hasOpenWindows`).
-    public var hasVisibleWindows: Bool
+    public var hasOpenWindows: Bool
     /// Hidden with Command-H; it's reopened hidden too.
     public var isHidden: Bool
     /// When this process launched, which says the spacing it picked up.
     public var launchDate: Date?
 
-    public init(bundleID: BundleID, bundlePath: String, name: String, hasVisibleWindows: Bool,
+    public init(bundleID: BundleID, bundlePath: String, name: String, hasOpenWindows: Bool,
                 isHidden: Bool = false, launchDate: Date? = nil) {
         self.bundleID = bundleID
         self.bundlePath = bundlePath
         self.name = name
-        self.hasVisibleWindows = hasVisibleWindows
+        self.hasOpenWindows = hasOpenWindows
         self.isHidden = isHidden
         self.launchDate = launchDate
     }
@@ -45,7 +45,6 @@ public enum SpacingPlan {
     public static let range = 0...32
     public static let spacingKey = "NSStatusItemSpacing"
     public static let selectionPaddingKey = "NSStatusItemSelectionPadding"
-    public static let keys = [spacingKey, selectionPaddingKey]
 
     /// The apps Apply may restart, one per app in the order given. Never `com.apple.*`, never an
     /// app outside `/Applications` or `~/Applications` (`home` is the user's home folder), and
@@ -58,7 +57,7 @@ public enum SpacingPlan {
             guard !app.bundleID.hasPrefix("com.apple."), app.bundleID != own,
                   isInApplicationsFolder(app.bundlePath, home: home),
                   seen.insert(app.bundleID).inserted else { return nil }
-            return RelaunchCandidate(app: app, tickedByDefault: !app.hasVisibleWindows)
+            return RelaunchCandidate(app: app, tickedByDefault: !app.hasOpenWindows)
         }
     }
 
@@ -76,19 +75,50 @@ public enum SpacingPlan {
     public static func clamped(_ value: Int) -> Int {
         min(max(value, range.lowerBound), range.upperBound)
     }
+}
 
-    /// What to store for `value`: both keys get it, except that the default deletes them (nil),
-    /// returning the Mac to stock rather than pinning a stored 16.
-    public static func preferenceValues(for value: Int) -> [String: Int?] {
-        let value = clamped(value)
-        let stored: Int? = value == defaultValue ? nil : value
-        return Dictionary(uniqueKeysWithValues: keys.map { ($0, stored) })
+extension SpacingPlan {
+    /// Stands for a stored preference that isn't a number.
+    public static let unreadable = Int.min
+
+    /// A stored preference as an unclamped whole number: nil when unset, `unreadable` when it
+    /// isn't a number.
+    public static func storedValue(_ raw: Any?) -> Int? {
+        switch raw {
+        case nil:
+            return nil
+        case let number as NSNumber:
+            let double = number.doubleValue
+            return double.isFinite ? Int(max(min(double, 1e9), -1e9).rounded()) : unreadable
+        case let string as String:
+            return Int(string.trimmingCharacters(in: .whitespaces)) ?? unreadable
+        default:
+            return unreadable
+        }
     }
 
-    /// The spacing a stored `NSStatusItemSpacing` stands for: a number or numeric string (as
-    /// `defaults write` stores it without `-int`), clamped into `range`; the default when unset
-    /// or unreadable.
-    public static func value(fromPreference raw: Any?) -> Int {
-        StoredSpacing(spacing: storedValue(raw)).value
+    /// Whether restarting the app would interrupt open windows: whatever Accessibility lists
+    /// (hidden and minimized windows too), anything on screen, and for a regular app, any window
+    /// the window server knows of (it may be full screen in another Space, which Accessibility
+    /// doesn't list; a false positive only leaves the app unticked). An accessory app's off-screen
+    /// windows don't count: menu bar apps keep closed windows around. `exempt` holds processes
+    /// YeeHaw hid itself after restarting them (some open their main window at launch); they
+    /// count as windowless while they stay hidden.
+    public static func hasOpenWindows(_ facts: WindowFacts, exempt: Set<Int32> = []) -> Bool {
+        if facts.isHidden, exempt.contains(facts.pid) { return false }
+        if let ax = facts.axWindows, ax > 0 { return true }
+        if facts.onScreenWindows > 0 { return true }
+        return facts.isRegular && facts.windowsAnywhere > 0
+    }
+
+    /// The apps owning a third-party item, once each: those drawn, in the bar's order, then the
+    /// ones YeeHaw hides.
+    public static func appOrder(drawn: [BundleID?], hidden: [BundleID]) -> [BundleID] {
+        var order: [BundleID] = []
+        var seen: Set<BundleID> = []
+        for id in drawn.compactMap(\.self) + hidden where seen.insert(id).inserted {
+            order.append(id)
+        }
+        return order
     }
 }

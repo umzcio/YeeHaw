@@ -68,7 +68,9 @@ final class SpacingApplier {
         var skipped: [Skip] = []
     }
 
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "spacing")
+    static let log = Logger(subsystem: Log.subsystem, category: "spacing")
+    /// Live appliers (not test ones), so quitting YeeHaw can wait for one that's mid-Apply.
+    private static var live: [WeakApplier] = []
     static let pollInterval: Duration = .milliseconds(100)
     /// How long an app gets to quit, and a reopened app to draw its item: 10 s each.
     static let quitPolls = 100
@@ -85,6 +87,11 @@ final class SpacingApplier {
     /// app still counts as windowless until it's shown or quits (`forgetHidden`).
     private(set) var hiddenAfterRestart: Set<Int32> = []
     private var observers: [NSObjectProtocol] = []
+    /// Whether `apply` is running.
+    private(set) var isApplying = false
+    /// Set by `stopAfterCurrentApp`: no further app is asked to quit.
+    private var stopRequested = false
+    private var whenStopped: [() -> Void] = []
 
     init(system: SpacingSystem, own: BundleID = OwnIconLocator.bundleID) {
         self.system = system
@@ -101,16 +108,6 @@ final class SpacingApplier {
                       padding: SpacingPlan.storedValue(system.readPreference(SpacingPlan.selectionPaddingKey, .current)),
                       anySpacing: SpacingPlan.storedValue(system.readPreference(SpacingPlan.spacingKey, .any)),
                       anyPadding: SpacingPlan.storedValue(system.readPreference(SpacingPlan.selectionPaddingKey, .any)))
-    }
-
-    /// The spacing apps launched from now on get; 16 when nothing is stored.
-    func currentValue() -> Int {
-        storedState().value
-    }
-
-    /// Whether storing `value` changes anything (a stray or mismatched key counts).
-    func needsWrite(_ value: Int) -> Bool {
-        !storedState().isCanonical(for: value)
     }
 
     /// The spacings YeeHaw has stored, and when. If the stored value no longer matches (it was
@@ -133,13 +130,15 @@ final class SpacingApplier {
     /// Whether `app` is reopened hidden: it was hidden before, or had no windows open (it comes
     /// back the way a login item does, without a window or the focus).
     static func reopensHidden(_ app: RunningMenuBarApp) -> Bool {
-        app.isHidden || !app.hasVisibleWindows
+        app.isHidden || !app.hasOpenWindows
     }
 
     /// Stores `value` (the default deletes the keys, back to stock; keys already right are left
     /// alone) and restarts `relaunch` in order. Apple's apps, apps outside an Applications folder
     /// and YeeHaw are never restarted, whoever asks. If saving fails, nothing is restarted.
     func apply(_ value: Int, relaunch: [RunningMenuBarApp]) async -> Result {
+        isApplying = true
+        defer { finishApplying() }
         let value = SpacingPlan.clamped(value)
         let allowed = SpacingPlan.candidates(relaunch, own: own).map(\.app)
         for app in relaunch where !allowed.contains(app) {
@@ -166,6 +165,10 @@ final class SpacingApplier {
 
         var stillQuitting: [RunningMenuBarApp] = []
         for (index, app) in allowed.enumerated() {
+            if stopRequested {
+                Self.log.notice("Spacing: YeeHaw is quitting; \(allowed.count - index, privacy: .public) app(s) left as they are")
+                break
+            }
             onProgress?(app, index, allowed.count)
             switch await restart(app) {
             case .success(let restart):
@@ -191,11 +194,44 @@ final class SpacingApplier {
         return result
     }
 
+    /// Asks a running Apply to stop once the app it's restarting is open again (later apps are
+    /// left running, as they were), then calls `done`; at once when nothing is applying. Quitting
+    /// YeeHaw waits on this, so an app it just quit isn't left closed.
+    func stopAfterCurrentApp(then done: @escaping () -> Void) {
+        guard isApplying else { return done() }
+        stopRequested = true
+        whenStopped.append(done)
+    }
+
+    /// Whether any live applier is mid-Apply.
+    static var anyApplying: Bool { live.contains { $0.applier?.isApplying == true } }
+
+    /// `stopAfterCurrentApp` for every live applier that's applying; `done` once all have stopped.
+    static func stopAllAfterCurrentApp(then done: @escaping () -> Void) {
+        let applying = live.compactMap(\.applier).filter(\.isApplying)
+        guard !applying.isEmpty else { return done() }
+        var left = applying.count
+        for applier in applying {
+            applier.stopAfterCurrentApp {
+                left -= 1
+                if left == 0 { done() }
+            }
+        }
+    }
+
+    private func finishApplying() {
+        isApplying = false
+        stopRequested = false
+        let waiting = whenStopped
+        whenStopped = []
+        waiting.forEach { $0() }
+    }
+
     /// Quits and reopens one app.
     private func restart(_ app: RunningMenuBarApp) async -> Swift.Result<Restart, SkipReason> {
         guard system.isRunning(app) else { return .failure(.notRunning) }
         // The list may be minutes old: an app that opened a window since isn't interrupted.
-        if !app.hasVisibleWindows, await system.hasOpenWindows(app, hiddenAfterRestart) {
+        if !app.hasOpenWindows, await system.hasOpenWindows(app, hiddenAfterRestart) {
             return .failure(.openedWindows)
         }
         guard system.terminate(app) else { return .failure(.refusedToQuit) }
@@ -218,7 +254,7 @@ final class SpacingApplier {
         Self.log.notice("Spacing: restarted \(app.bundleID, privacy: .public); item drawn: \(drawn, privacy: .public) after \(elapsed, privacy: .public)")
         if Self.reopensHidden(app) {
             await keepHidden(app)
-            if !app.hasVisibleWindows { hiddenAfterRestart.insert(pid) }
+            if !app.hasOpenWindows { hiddenAfterRestart.insert(pid) }
         }
         return Restart(app: app, iconReturned: drawn)
     }
@@ -252,6 +288,8 @@ extension SpacingApplier {
     /// drawn, so for them "back" means finished launching.
     convenience init(hidden: @escaping @MainActor () -> Set<BundleID>) {
         self.init(system: .live(hidden: hidden))
+        Self.live.removeAll { $0.applier == nil }
+        Self.live.append(WeakApplier(applier: self))
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didUnhideApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
@@ -261,6 +299,10 @@ extension SpacingApplier {
             })
         }
     }
+}
+
+private struct WeakApplier {
+    weak var applier: SpacingApplier?
 }
 
 extension SpacingSystem {
@@ -308,8 +350,7 @@ extension SpacingSystem {
                                                                                configuration: configuration)
                     return running.processIdentifier
                 } catch {
-                    Logger(subsystem: "com.zapps.yeehaw", category: "spacing")
-                        .error("Couldn't open \(app.bundlePath, privacy: .public): \(error, privacy: .public)")
+                    SpacingApplier.log.error("Couldn't open \(app.bundlePath, privacy: .public): \(error, privacy: .public)")
                     return nil
                 }
             },

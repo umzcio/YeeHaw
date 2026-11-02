@@ -9,7 +9,7 @@ import YeeHawCore
 final class RevealCoordinator {
     /// An inactivity timeout, not a hard limit: it restarts on the app's own activity (a menu or
     /// window opening, a click inside its windows), so someone still working in a window the reveal
-    /// opened isn't cut off. The reveal ends after this long with no such activity (ruling R32).
+    /// opened isn't cut off. The reveal ends after this long with no such activity.
     static let inactivityTimeout: Double = 30
     /// How long one AX press may block. An app busy tracking the menu it just opened can run past
     /// this and return `-25204`, so a timeout isn't treated as a failure.
@@ -21,11 +21,14 @@ final class RevealCoordinator {
     static let findInterval: Double = 0.1
     /// Before retrying a failed `endReveal`.
     static let endRetryDelay: Double = 1
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "reveal")
+    private static let log = Logger(subsystem: Log.subsystem, category: "reveal")
 
     private let controller: MenuBarController
     private let trace: @MainActor (String) -> Void
     private var busy = false
+    /// The click waiting for the open reveal to end: resumed with true to run next, or false when
+    /// a later click replaced it.
+    private var waiting: CheckedContinuation<Bool, Never>?
 
     /// Started once the revealed item is drawn (the strip photographs it). It runs in its own
     /// task, so the press and `endReveal` never wait on it.
@@ -41,14 +44,15 @@ final class RevealCoordinator {
     enum Outcome {
         /// The app was drawn next to YeeHaw (whatever happened with the press afterwards).
         case revealed
-        /// Another reveal was open, so this one never started.
+        /// A later click replaced this one while it waited for the open reveal to end.
         case ignored
         /// `beginReveal` threw; the reveal was ended.
         case failed(Error)
     }
 
-    /// Reveal → press → wait until the app is done with its menu → `endReveal`. While one reveal
-    /// is open, further calls are ignored, so two reveals never share the controller's one slot.
+    /// Reveal → press → wait until the app is done with its menu → `endReveal`. A click made while
+    /// a reveal is open (or still ending) waits for it and then runs, so two reveals never share
+    /// the controller's one slot and the click isn't lost; only the latest waiting click runs.
     @discardableResult
     func open(_ id: BundleID, nextTo yeehaw: MenuBarItem) async -> Outcome {
         let start = ContinuousClock.now
@@ -57,12 +61,32 @@ final class RevealCoordinator {
             Self.log.notice("\(line, privacy: .public)")
             trace(line)
         }
-        guard !busy else {
-            step("ignored, another reveal is open")
-            return .ignored
+        if busy {
+            step("waiting for the open reveal to end")
+            waiting?.resume(returning: false)
+            let runs = await withCheckedContinuation { waiting = $0 }
+            guard runs else {
+                step("replaced by a later click")
+                return .ignored
+            }
+        } else {
+            busy = true
         }
-        busy = true
-        defer { busy = false }
+        defer { handOff() }
+        return await run(id, nextTo: yeehaw, step: step)
+    }
+
+    /// Passes the coordinator to the waiting click, if any (it stays busy), else frees it.
+    private func handOff() {
+        if let next = waiting {
+            waiting = nil
+            next.resume(returning: true)
+        } else {
+            busy = false
+        }
+    }
+
+    private func run(_ id: BundleID, nextTo yeehaw: MenuBarItem, step: @escaping @MainActor (String) -> Void) async -> Outcome {
         controller.revealTrace = { text in MainActor.assumeIsolated { step(text) } }
         defer { controller.revealTrace = nil }
 
@@ -229,8 +253,8 @@ final class RevealCoordinator {
 ///
 /// The app is done with its menu on: `AXMenuClosed` for its outermost menu; its popover or window
 /// losing focus (`AXFocusedWindowChanged`) or being destroyed (`AXUIElementDestroyed`); the app
-/// being deactivated (`AXApplicationDeactivated`, e.g. Cmd-Tab away); a global left mouse-down
-/// outside its windows; or `RevealCoordinator.inactivityTimeout` with none of the app's own
+/// being deactivated (`AXApplicationDeactivated`, e.g. Cmd-Tab away); a global mouse-down (any
+/// button, so a right-click on YeeHaw's icon counts) outside its windows; or `RevealCoordinator.inactivityTimeout` with none of the app's own
 /// activity (menus or windows opening, clicks inside its windows).
 @MainActor
 private final class RevealSession {
@@ -284,7 +308,7 @@ private final class RevealSession {
     func startWatching() {
         // Mouse-downs from before now (the synthesized click among them) don't count.
         let since = ProcessInfo.processInfo.systemUptime
-        monitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
             let timestamp = event.timestamp
             let location = event.locationInWindow
             MainActor.assumeIsolated {
@@ -332,7 +356,7 @@ private final class RevealSession {
         if timer != nil { restartTimer() }
     }
 
-    /// Inactivity, not a hard limit (R32): `activity()` calls this again on the app's own activity.
+    /// Inactivity, not a hard limit: `activity()` calls this again on the app's own activity.
     private func restartTimer() {
         timer?.cancel()
         timer = Task { [weak self] in

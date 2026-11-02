@@ -29,7 +29,7 @@ extension GrantedFile {
 /// Keeps one security-scoped bookmark per protected file, in `UserDefaults` under `grant.<file>`.
 /// YeeHaw isn't sandboxed; the bookmark records the user's one-time pick in an open panel.
 final class FileGrantStore: Sendable {
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "grants")
+    private static let log = Logger(subsystem: Log.subsystem, category: "grants")
 
     private static func key(_ file: GrantedFile) -> String { "grant.\(file.rawValue)" }
 

@@ -21,6 +21,7 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     private var _allowWrites = 0
     private var _positionWrites = 0
     private var _itemReads = 0
+    private var _offAppsSeen: [Set<BundleID>] = []
 
     init(allow: [(BundleID, Bool)], positions: [String: Double] = [:], running: Set<BundleID>? = nil,
          drawn: [BundleID: [MenuBarItem]] = [:], appleItems: [MenuBarItem] = [],
@@ -44,13 +45,13 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     static func item(_ id: BundleID, index: Int = 0, names: [String] = [], x: Double = 100,
                      prefixes: [String]? = nil) -> MenuBarItem {
         MenuBarItem(id: "\(id)#\(index)", bundleID: id, appleIdentifier: nil, indexInApp: index,
-                    axIdentifier: names.first ?? "", label: id, keyNames: names, keyPrefixes: prefixes ?? [id],
+                    label: id, keyNames: names, keyPrefixes: prefixes ?? [id],
                     x: x, width: 20, isPinned: false)
     }
 
     static func appleItem(_ identifier: String, x: Double = 900) -> MenuBarItem {
         MenuBarItem(id: identifier, bundleID: nil, appleIdentifier: identifier, indexInApp: 0,
-                    axIdentifier: "", label: identifier, keyNames: [], keyPrefixes: [], x: x, width: 20, isPinned: false)
+                    label: identifier, keyNames: [], keyPrefixes: [], x: x, width: 20, isPinned: false)
     }
 
     static func blob(_ entries: [(BundleID, Bool)]) throws -> Data {
@@ -140,6 +141,14 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
             return (thirdParty + s._appleItems).sorted { $0.x < $1.x }
         }
     }
+
+    func items(offApps: Set<BundleID>) async -> [MenuBarItem] {
+        locked { $0._offAppsSeen.append(offApps) }
+        return await items()
+    }
+
+    /// The `offApps` of every full read, in order.
+    var offAppsSeen: [Set<BundleID>] { locked { $0._offAppsSeen } }
 
     func runningBundleIDs() async -> Set<BundleID> { locked { $0._running } }
 
@@ -452,7 +461,7 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         var clock = FakeSystem.appleItem("com.apple.menuextra.clock", x: 990)
         clock.isPinned = true
         let unknown = MenuBarItem(id: "unknown@40", bundleID: nil, appleIdentifier: nil, indexInApp: 0,
-                                  axIdentifier: "", label: "", keyNames: [], keyPrefixes: [], x: 40, width: 20,
+                                  label: "", keyNames: [], keyPrefixes: [], x: 40, width: 20,
                                   isPinned: false)
         let rig = Self.rig(try FakeSystem(
             allow: [(Self.a, true), (Self.b, true)],
@@ -476,7 +485,7 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         controlCenter.isPinned = true
         try c.move(controlCenter, leftNeighbor: FakeSystem.item(Self.a), rightNeighbor: nil)
         let unknown = MenuBarItem(id: "unknown@40", bundleID: nil, appleIdentifier: nil, indexInApp: 0,
-                                  axIdentifier: "", label: "", keyNames: [], keyPrefixes: [], x: 40, width: 20,
+                                  label: "", keyNames: [], keyPrefixes: [], x: 40, width: 20,
                                   isPinned: false)
         try c.move(unknown, leftNeighbor: FakeSystem.item(Self.a), rightNeighbor: nil)
         #expect(rig.system.positionWrites == 0)
@@ -1014,5 +1023,130 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
             try await c.placeOwnIcon(Self.yeehaw, name: "YeeHaw")
         }
         #expect(c.state.needsGrant == [.positions])
+    }
+
+    // MARK: final review
+
+    @Test func quitDuringARevealPutsTheAppBack() async throws {
+        let system = try Self.revealSystem()
+        let original = system.positions
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        try c.quit()
+        #expect(system.positions == original)
+        #expect(system.allowSnapshot[Self.a] == true)
+        #expect(c.state.pendingReveal == nil)
+        #expect(c.state.journal.isEmpty)
+        #expect(rig.store.load().pendingReveal == nil)
+        #expect(rig.store.load().hidden == [Self.a])
+    }
+
+    @Test func quitWithAFailedPositionWriteKeepsThePendingReveal() async throws {
+        let system = try Self.revealSystem()
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        system.failWrites(.positions)
+        #expect(throws: WriteFailed.self) { try c.quit() }
+        // The switch-on landed, so the journal is clear; the positions are left for the next launch.
+        #expect(system.allowSnapshot[Self.a] == true)
+        #expect(rig.store.load().journal.isEmpty)
+        #expect(rig.store.load().pendingReveal?.bundleID == Self.a)
+    }
+
+    @Test func showingTheAppBeingRevealedEndsTheRevealAtOnce() async throws {
+        let system = try Self.revealSystem()
+        let original = system.positions
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        try await c.show(Self.a)
+        #expect(system.positions == original)
+        #expect(c.state.pendingReveal == nil)
+        #expect(rig.store.load().pendingReveal == nil)
+        // A Layout placement made now is never undone by the reveal ending.
+        let writes = system.positionWrites
+        try await c.endReveal()
+        #expect(system.positionWrites == writes)
+        #expect(system.allowSnapshot[Self.a] == true)
+    }
+
+    @Test func endRevealRestoresPositionsEvenWhenTheSwitchOffFails() async throws {
+        let system = try Self.revealSystem()
+        let original = system.positions
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        system.failWrites(.allowList)
+        await #expect(throws: WriteFailed.self) { try await c.endReveal() }
+        #expect(system.positions == original)
+        // Kept, so a retry (or the next launch) still switches the app off.
+        #expect(c.state.pendingReveal?.bundleID == Self.a)
+        #expect(c.state.journal == [Self.a])
+    }
+
+    @Test func revealOfAnAppThatIsntRunningWritesNothing() async throws {
+        let system = try FakeSystem(
+            allow: [(Self.a, false), (Self.yeehaw, true)],
+            positions: ["status:\(Self.a)::Item-0": 300, "status:\(Self.yeehaw)::Item-0": 10, PositionKey.clock: 0],
+            running: [Self.yeehaw])
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        await #expect(throws: ControllerError.notRunning(Self.a)) {
+            _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        }
+        #expect(system.allowWrites == 0)
+        #expect(system.positionWrites == 0)
+        #expect(rig.store.saveCount == 0)
+        #expect(rig.sleeper.count == 0)
+    }
+
+    @Test func launchRestoresRevealPositionsEvenWhenTheAllowWriteFails() async throws {
+        let system = try Self.revealSystem()
+        try system.setExternally(Self.a, allowed: true)
+        let original = system.positions
+        var moved = original
+        moved["status:\(Self.a)::Item-0"] = 55
+        let pending = PendingReveal(bundleID: Self.a, originalPositions: ["status:\(Self.a)::Item-0": 300])
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a], pendingReveal: pending))
+        // Positions as a crash mid-reveal left them.
+        try system.write(.positions, MenuBarController.positionsKey, moved)
+        system.failWrites(.allowList)
+        let c = rig.controller()
+        await #expect(throws: WriteFailed.self) { try await c.launch() }
+        #expect(system.positions == original)
+    }
+
+    @Test func showKeepsAGrantFlagClearedByItsOwnRead() async throws {
+        let system = try FakeSystem(allow: [(Self.a, false)])
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a], needsGrant: [.allowList]))
+        let c = rig.controller()
+        try await c.show(Self.a)
+        #expect(c.state.needsGrant.isEmpty)
+        #expect(rig.store.load().needsGrant.isEmpty)
+    }
+
+    @Test func launchKeepsAGrantFlagClearedByItsOwnRead() async throws {
+        let system = try Self.revealSystem()
+        let pending = PendingReveal(bundleID: Self.a, originalPositions: ["status:\(Self.a)::Item-0": 300])
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a], pendingReveal: pending,
+                                                      needsGrant: [.positions]))
+        let c = rig.controller()
+        try await c.launch()
+        #expect(c.state.needsGrant.isEmpty)
+        #expect(rig.store.load().needsGrant.isEmpty)
+    }
+
+    @Test func fullReadsNameTheAppsKnownToBeOff() async throws {
+        let system = try Self.revealSystem()
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        try await c.launch()
+        #expect(system.offAppsSeen.last == [Self.a])
+        // While A is revealed it's on, so its frame counts like anyone else's.
+        try system.setExternally(Self.b, allowed: false)
+        try await c.allowListChanged()
+        #expect(system.offAppsSeen.last == [Self.a, Self.b])
     }
 }

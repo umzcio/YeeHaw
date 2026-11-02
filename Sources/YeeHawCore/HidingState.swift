@@ -30,6 +30,18 @@ public struct HidingState: Codable, Equatable, Sendable {
     }
 
     public static let empty = HidingState()
+
+    private enum CodingKeys: String, CodingKey { case hidden, journal, pendingReveal, needsGrant }
+
+    /// Every field may be missing (a state saved by an older YeeHaw), so a newer field never
+    /// makes the whole record unreadable.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hidden = try c.decodeIfPresent([BundleID].self, forKey: .hidden) ?? []
+        journal = try c.decodeIfPresent(Set<BundleID>.self, forKey: .journal) ?? []
+        pendingReveal = try c.decodeIfPresent(PendingReveal.self, forKey: .pendingReveal)
+        needsGrant = try c.decodeIfPresent(Set<GrantedFile>.self, forKey: .needsGrant) ?? []
+    }
 }
 
 public enum AllowAction: Equatable, Sendable { case switchOn(BundleID), switchOff(BundleID) }
@@ -41,7 +53,9 @@ public enum Reconciler {
         _ s: HidingState, allow: AllowSnapshot
     ) -> (actions: [AllowAction], restorePositions: [String: Double?], state: HidingState) {
         var state = s
-        state.hidden = s.hidden.filter { allow[$0] != nil }
+        // An app that's off but not in the journal was switched off by the user, even if it's in
+        // Hidden (they did it while YeeHaw wasn't running): Apple's switch wins, and it's theirs.
+        state.hidden = s.hidden.filter { allow[$0] == true || (allow[$0] == false && s.journal.contains($0)) }
         let hiddenSet = Set(state.hidden)
         let offs = state.hidden.filter { allow[$0] == true }
         let ons = s.journal.filter { allow[$0] != nil && !hiddenSet.contains($0) }.sorted()
@@ -51,10 +65,15 @@ public enum Reconciler {
         return (offs.map(AllowAction.switchOff) + ons.map(AllowAction.switchOn), restore, state)
     }
 
-    public static func onQuit(_ s: HidingState) -> (actions: [AllowAction], state: HidingState) {
+    /// Switches the journal back on and puts a revealed app's positions back, so nothing is left
+    /// at the reveal slot next to YeeHaw's icon once it's gone.
+    public static func onQuit(
+        _ s: HidingState
+    ) -> (actions: [AllowAction], restorePositions: [String: Double?], state: HidingState) {
         var state = s
         state.journal = []
-        return (s.journal.sorted().map(AllowAction.switchOn), state)
+        state.pendingReveal = nil
+        return (s.journal.sorted().map(AllowAction.switchOn), s.pendingReveal?.originalPositions ?? [:], state)
     }
 
     public static func hide(
@@ -82,6 +101,11 @@ public enum Reconciler {
         var state = s
         for id in s.journal where before[id] == false && after[id] == true {
             state.journal.remove(id)
+            state.hidden.removeAll { $0 == id }
+        }
+        // A hidden app YeeHaw hasn't switched off (a launch that couldn't hide it yet) that the
+        // user switches off is theirs from then on.
+        for id in s.hidden where !s.journal.contains(id) && before[id] != false && after[id] == false {
             state.hidden.removeAll { $0 == id }
         }
         return state

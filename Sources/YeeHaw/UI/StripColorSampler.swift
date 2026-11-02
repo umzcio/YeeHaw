@@ -41,6 +41,9 @@ final class StripColorSampler {
     private var started: [CGDirectDisplayID: Int] = [:]
     private var applied: [CGDirectDisplayID: Int] = [:]
 
+    /// The app's one sampler, shared by the strip and the Layout window so they keep one cache.
+    static let shared = StripColorSampler()
+
     init(permitted: @escaping @MainActor () -> Bool = { CGPreflightScreenCaptureAccess() },
          capture: @escaping Capture = { display, height in await StripColorSampler.screenCapture(display: display, barHeight: height) }) {
         self.permitted = permitted

@@ -12,7 +12,11 @@ struct AXMenuBarReader: MenuBarReading {
     static let appTimeout: Float = 0.3
 
     func items() async -> [MenuBarItem] {
-        await Self.readItems()
+        await Self.readItems(offApps: [])
+    }
+
+    func items(offApps: Set<BundleID>) async -> [MenuBarItem] {
+        await Self.readItems(offApps: offApps)
     }
 
     func runningBundleIDs() async -> Set<BundleID> {
@@ -41,7 +45,7 @@ struct AXMenuBarReader: MenuBarReading {
     }
 
     @concurrent
-    private static func readItems() async -> [MenuBarItem] {
+    private static func readItems(offApps: Set<BundleID>) async -> [MenuBarItem] {
         let apps = NSWorkspace.shared.runningApplications
         guard let agent = apps.first(where: { $0.bundleIdentifier == agentBundleID }) else { return [] }
         let owners = apps.compactMap { app -> (pid_t, BundleID, String)? in
@@ -50,7 +54,7 @@ struct AXMenuBarReader: MenuBarReading {
         }
         let drawn = drawnItems(agentPID: agent.processIdentifier)
         let extras = owners.flatMap { appExtras(pid: $0.0, bundleID: $0.1, executableName: $0.2) }
-        return ItemMatcher.match(drawn: drawn, extras: extras)
+        return ItemMatcher.match(drawn: drawn, extras: extras, offApps: offApps)
     }
 
     // MARK: What's drawn
@@ -104,7 +108,6 @@ struct AXMenuBarReader: MenuBarReading {
                 bundleID: bundleID, indexInApp: index, x: frame.minX, width: frame.width,
                 identifier: string(item, kAXIdentifierAttribute),
                 title: string(item, kAXTitleAttribute),
-                help: string(item, kAXHelpAttribute),
                 description: string(item, kAXDescriptionAttribute),
                 executableName: executableName)
         }

@@ -8,8 +8,6 @@ enum LayoutMetrics {
     static let tileMinWidth: CGFloat = 34
     /// Space either side of a glyph that's wider than the square tile allows.
     static let glyphPadding: CGFloat = 9
-    /// Tallest a glyph is drawn; smaller glyphs are never scaled up.
-    static let maxGlyphHeight: CGFloat = 18
     static let tileRadius: CGFloat = 8
     static let tileSpacing: CGFloat = 6
     /// Space between an app group's tiles, and the group's backing around them.
@@ -23,13 +21,8 @@ enum LayoutMetrics {
     static let liftScale: CGFloat = 1.1
     static let liftRotation: Double = -3
 
-    static func glyphSize(_ size: NSSize) -> CGSize {
-        guard size.height > maxGlyphHeight, size.height > 0 else { return size }
-        return CGSize(width: size.width * maxGlyphHeight / size.height, height: maxGlyphHeight)
-    }
-
     static func tileWidth(_ image: NSImage) -> CGFloat {
-        max(tileMinWidth, glyphSize(image.size).width + 2 * glyphPadding)
+        max(tileMinWidth, GlyphMetrics.size(image.size).width + 2 * glyphPadding)
     }
 
     /// Tiles `widths` wide laid side by side, `spacing` apart.
@@ -178,7 +171,7 @@ struct TileFace: View {
     @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
-        let glyph = LayoutMetrics.glyphSize(image.size)
+        let glyph = GlyphMetrics.size(image.size)
         RoundedRectangle(cornerRadius: LayoutMetrics.tileRadius, style: .continuous)
             .fill(fill)
             .overlay {

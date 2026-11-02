@@ -40,3 +40,14 @@ enum StatusGlyph {
         return p
     }
 }
+
+/// How menu bar glyphs are sized wherever YeeHaw draws them (the strip, the Layout window, the
+/// spacing preview): at their own size, scaled down to `maxHeight` if taller, never up.
+enum GlyphMetrics {
+    static let maxHeight: CGFloat = 18
+
+    static func size(_ size: NSSize) -> NSSize {
+        guard size.height > maxHeight, size.height > 0 else { return size }
+        return NSSize(width: size.width * maxHeight / size.height, height: maxHeight)
+    }
+}

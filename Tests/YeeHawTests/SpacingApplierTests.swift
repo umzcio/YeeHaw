@@ -99,14 +99,14 @@ final class FakeSpacingMac {
 @MainActor
 @Suite struct SpacingApplierTests {
     static let digUp = RunningMenuBarApp(bundleID: "com.abdurrahim.DigUp", bundlePath: "/Applications/DigUp.app",
-                                         name: "DigUp", hasVisibleWindows: false)
+                                         name: "DigUp", hasOpenWindows: false)
     static let windowed = RunningMenuBarApp(bundleID: "com.abdurrahim.DigUp", bundlePath: "/Applications/DigUp.app",
-                                            name: "DigUp", hasVisibleWindows: true)
+                                            name: "DigUp", hasOpenWindows: true)
     static let other = RunningMenuBarApp(bundleID: "com.example.other", bundlePath: "/Applications/Other.app",
-                                         name: "Other", hasVisibleWindows: false)
+                                         name: "Other", hasOpenWindows: false)
     /// Another app that happens to have the same name.
     static let otherNamesake = RunningMenuBarApp(bundleID: "com.example.other2", bundlePath: "/Applications/Other 2.app",
-                                                 name: "Other", hasVisibleWindows: false)
+                                                 name: "Other", hasOpenWindows: false)
 
     static func applier(_ mac: FakeSpacingMac) -> SpacingApplier {
         SpacingApplier(system: mac.system)
@@ -114,20 +114,20 @@ final class FakeSpacingMac {
 
     // MARK: Reading
 
-    @Test func currentValueIsSixteenWhenUnset() {
-        #expect(Self.applier(FakeSpacingMac()).currentValue() == 16)
+    @Test func storedValueIsSixteenWhenUnset() {
+        #expect(Self.applier(FakeSpacingMac()).storedState().value == 16)
     }
 
-    @Test func currentValueReadsTheSpacingKey() {
+    @Test func storedValueReadsTheSpacingKey() {
         let mac = FakeSpacingMac()
         mac.preferences["NSStatusItemSpacing"] = 8
-        #expect(Self.applier(mac).currentValue() == 8)
+        #expect(Self.applier(mac).storedState().value == 8)
     }
 
-    @Test func currentValueFallsBackToTheAnyHostKey() {
+    @Test func storedValueFallsBackToTheAnyHostKey() {
         let mac = FakeSpacingMac()
         mac.anyHostPreferences["NSStatusItemSpacing"] = 6
-        #expect(Self.applier(mac).currentValue() == 6)
+        #expect(Self.applier(mac).storedState().value == 6)
         #expect(Self.applier(mac).storedState() == StoredSpacing(anySpacing: 6))
     }
 
@@ -152,18 +152,18 @@ final class FakeSpacingMac {
         _ = await applier.apply(16, relaunch: [])
         #expect(mac.preferences.isEmpty)
         #expect(mac.anyHostPreferences.isEmpty)
-        #expect(applier.currentValue() == 16)
+        #expect(applier.storedState().value == 16)
     }
 
     @Test func strayPaddingKeyIsDeletedAtTheDefault() async {
         let mac = FakeSpacingMac()
         mac.preferences = ["NSStatusItemSelectionPadding": 4]
         let applier = Self.applier(mac)
-        #expect(applier.currentValue() == 16)
-        #expect(applier.needsWrite(16))
+        #expect(applier.storedState().value == 16)
+        #expect(!applier.storedState().isCanonical(for: 16))
         _ = await applier.apply(16, relaunch: [])
         #expect(mac.preferences.isEmpty)
-        #expect(!applier.needsWrite(16))
+        #expect(applier.storedState().isCanonical(for: 16))
     }
 
     @Test func sameValueWritesNothingButStillRestarts() async {
@@ -214,6 +214,29 @@ final class FakeSpacingMac {
 
     // MARK: Restarting
 
+    @Test func quittingYeeHawMidApplyFinishesTheCurrentAppAndLeavesTheRest() async {
+        let mac = FakeSpacingMac()
+        let applier = Self.applier(mac)
+        var stopped = false
+        // YeeHaw is asked to quit while DigUp is being restarted.
+        mac.onTerminate = { [applier] in
+            if mac.events.last == "terminate DigUp" { applier.stopAfterCurrentApp { stopped = true } }
+        }
+        #expect(applier.isApplying == false)
+        let result = await applier.apply(8, relaunch: [Self.digUp, Self.other])
+        // DigUp, already quit, is opened again; Other is never touched.
+        #expect(mac.events.dropFirst(2) == ["terminate DigUp", "open DigUp", "hide DigUp"])
+        #expect(result.restarted.map(\.app) == [Self.digUp])
+        #expect(stopped)
+        #expect(applier.isApplying == false)
+    }
+
+    @Test func stoppingWhileIdleRunsAtOnce() {
+        var stopped = false
+        Self.applier(FakeSpacingMac()).stopAfterCurrentApp { stopped = true }
+        #expect(stopped)
+    }
+
     @Test func restartsOneAtATimeInOrder() async {
         let mac = FakeSpacingMac()
         mac.quitAfterPolls = [Self.digUp.bundleID: 3]
@@ -227,14 +250,14 @@ final class FakeSpacingMac {
         let mac = FakeSpacingMac()
         let spotlight = RunningMenuBarApp(bundleID: "com.apple.Spotlight",
                                           bundlePath: "/System/Library/CoreServices/Spotlight.app",
-                                          name: "Spotlight", hasVisibleWindows: false)
+                                          name: "Spotlight", hasOpenWindows: false)
         let music = RunningMenuBarApp(bundleID: "com.apple.Music", bundlePath: "/Applications/Music.app",
-                                      name: "Music", hasVisibleWindows: false)
+                                      name: "Music", hasOpenWindows: false)
         let downloaded = RunningMenuBarApp(bundleID: "com.example.dl", bundlePath: "/Users/x/Downloads/D.app",
-                                           name: "D", hasVisibleWindows: false)
+                                           name: "D", hasOpenWindows: false)
         let own = RunningMenuBarApp(bundleID: OwnIconLocator.bundleID,
                                     bundlePath: NSHomeDirectory() + "/Applications/YeeHaw.app",
-                                    name: "YeeHaw", hasVisibleWindows: false)
+                                    name: "YeeHaw", hasOpenWindows: false)
         let result = await Self.applier(mac).apply(8, relaunch: [spotlight, music, downloaded, own, Self.digUp])
         #expect(mac.events.filter { $0.hasPrefix("terminate") } == ["terminate DigUp"])
         #expect(result.restarted.map(\.app) == [Self.digUp])

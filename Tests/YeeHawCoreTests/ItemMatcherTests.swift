@@ -12,7 +12,7 @@ import Testing
         #expect(items.map(\.bundleID) == ["com.example.fiddle", "com.example.digup"])
         #expect(items.map(\.label) == ["Flame", "DigUp"])
         #expect(items.map(\.id) == ["com.example.fiddle#0", "com.example.digup#2"])
-        #expect(items[1].axIdentifier == "digup-id")
+        #expect(items[1].keyNames == ["digup-id"])
         #expect(items[1].indexInApp == 2)
     }
 
@@ -119,5 +119,23 @@ import Testing
         let extras = [AppExtra(bundleID: "a", indexInApp: 0, x: 10, width: 20,
                                identifier: "Id", title: "Title", description: "Desc")]
         #expect(ItemMatcher.match(drawn: drawn, extras: extras)[0].keyNames == ["Id", "Title", "Desc"])
+    }
+
+    @Test func anOffAppsStaleFrameNeverTakesAnAllowedAppsIcon() {
+        // R was removed and L slid into exactly R's old frame. R still reports that frame and
+        // comes first in the app list, but it's off, so the drawn icon is L's.
+        let drawn = [DrawnItem(x: 1500, width: 24, label: "")]
+        let extras = [
+            AppExtra(bundleID: "r", indexInApp: 0, x: 1500, width: 24),
+            AppExtra(bundleID: "l", indexInApp: 0, x: 1500, width: 24),
+        ]
+        let items = ItemMatcher.match(drawn: drawn, extras: extras, offApps: ["r"])
+        #expect(items.map(\.bundleID) == ["l"])
+    }
+
+    @Test func anOffAppStillMatchesWhenNothingElseDoes() {
+        let drawn = [DrawnItem(x: 1500, width: 24, label: "")]
+        let extras = [AppExtra(bundleID: "r", indexInApp: 0, x: 1500, width: 24)]
+        #expect(ItemMatcher.match(drawn: drawn, extras: extras, offApps: ["r"]).map(\.bundleID) == ["r"])
     }
 }

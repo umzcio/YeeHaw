@@ -5,12 +5,14 @@ import YeeHawCore
 /// YeeHaw's own menu bar icon and the strip it opens (spec "Your menu bar icon", "The strip").
 ///
 /// A plain click toggles the strip. Right-click, Control-click and Option-click show the small
-/// menu (Layout…, Settings…, Quit YeeHaw); right-clicks were verified to arrive on 27.2 (R44).
+/// menu (Layout…, Settings…, Quit YeeHaw); right-clicks were verified to arrive on macOS 27.2.
+/// VoiceOver gets the same three as actions on the icon.
 @MainActor
 final class StatusItemController: NSObject {
-    /// The status item's autosave name. It keeps YeeHaw's existing position key (R29).
+    /// The status item's autosave name, which keeps YeeHaw's existing position key (`--reveal`'s
+    /// stand-in icon uses it too).
     static let autosaveName = "YeeHaw"
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "status")
+    private nonisolated static let log = Logger(subsystem: Log.subsystem, category: "status")
 
     /// YeeHaw's own drawn item, the neighbour reveals open next to. Nil until it's drawn and has
     /// a position key.
@@ -24,15 +26,16 @@ final class StatusItemController: NSObject {
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private var strip: StripPanel!
-    /// The last reveal's failure, when macOS didn't draw the app in time; cleared by a success.
-    private var revealFailure: BundleID?
+    /// Why the last click in the strip didn't open an app's menu, shown in the strip until it next
+    /// closes or a reveal works.
+    private var revealProblem: RevealProblem?
     /// Set when a click in the strip found no drawn YeeHaw icon to reveal next to.
     private var ownIconMissing = false
     private var refreshTask: Task<Void, Never>?
     /// Opens the menu straight from a secondary mouse-down (see `watchSecondaryClicks`).
     private var secondaryClickMonitor: Any?
     /// A click on the icon within this long after the strip closed by itself is the click that
-    /// closed it (ruling I2), so it leaves the strip closed instead of reopening it.
+    /// closed it, so it leaves the strip closed instead of reopening it.
     nonisolated static let reopenGuard: Duration = .milliseconds(300)
 
     init(controller: MenuBarController, reveal: RevealCoordinator, icons: IconImageProvider,
@@ -49,6 +52,12 @@ final class StatusItemController: NSObject {
         if let button = statusItem.button {
             button.image = StatusGlyph.image()
             button.setAccessibilityLabel("YeeHaw")
+            button.setAccessibilityHelp("Shows the hidden menu bar icons")
+            button.setAccessibilityCustomActions([
+                NSAccessibilityCustomAction(name: "Open Layout") { [weak self] in self?.layoutChosen(); return true },
+                NSAccessibilityCustomAction(name: "Open Settings") { [weak self] in self?.settingsChosen(); return true },
+                NSAccessibilityCustomAction(name: "Quit YeeHaw") { [weak self] in self?.quitChosen(); return true },
+            ])
             button.target = self
             button.action = #selector(iconClicked(_:))
             button.sendAction(on: [.leftMouseDown, .rightMouseDown])
@@ -56,17 +65,23 @@ final class StatusItemController: NSObject {
         buildMenu()
         watchSecondaryClicks()
         strip = StripPanel(
+            sampler: .shared,
             onSelect: { [weak self] id in self?.select(id) },
-            onFix: { [weak self] in
-                self?.strip.dismiss()
-                self?.openSettings()
-            })
+            onNoticeAction: { [weak self] action in self?.noticeAction(action) },
+            onLayout: { [weak self] in self?.layoutChosen() },
+            onSettings: { [weak self] in self?.settingsChosen() },
+            onQuit: { [weak self] in self?.quitChosen() })
+        // A problem is shown once, in the strip that opens after it; closing that strip clears it.
+        strip.onDismiss = { [weak self] in
+            self?.revealProblem = nil
+            self?.ownIconMissing = false
+        }
         // Photograph a revealed item while it's drawn; a hidden one can't be photographed later.
         reveal.onDrawn = { [icons] item in await icons.captureIfPermitted([item]) }
     }
 
     /// Call before `controller.launch()`: photographs the saved hidden apps that are drawn right
-    /// now (after a quit switched them back on), before the launch hides them again (ruling I3).
+    /// now (after a quit switched them back on), before the launch hides them again.
     /// Static: it runs before YeeHaw's own icon is shown (`LaunchRules.steps`).
     static func captureHiddenBeforeLaunch(controller: MenuBarController, icons: IconImageProvider) async {
         let hidden = Set(controller.state.hidden)
@@ -87,6 +102,11 @@ final class StatusItemController: NSObject {
     nonisolated static func isSecondaryClick(type: NSEvent.EventType, modifiers: NSEvent.ModifierFlags) -> Bool {
         type == .rightMouseDown || type == .rightMouseUp
             || !modifiers.intersection([.control, .option]).isEmpty
+    }
+
+    nonisolated static func isPointerEvent(_ type: NSEvent.EventType?) -> Bool {
+        guard let type else { return false }
+        return [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp].contains(type)
     }
 
     enum ClickAction: Equatable { case open, close, stayClosed }
@@ -110,7 +130,8 @@ final class StatusItemController: NSObject {
         switch Self.clickAction(stripShown: strip.isShown,
                                 sinceAutoDismissal: strip.lastAutoDismissal.map { .now - $0 }) {
         case .close: strip.dismiss()
-        case .open: openStrip()
+        // Opened without the pointer (VoiceOver, Full Keyboard Access): light the first tile.
+        case .open: openStrip(highlightFirst: !Self.isPointerEvent(event?.type))
         case .stayClosed: break
         }
     }
@@ -142,7 +163,7 @@ final class StatusItemController: NSObject {
 
     private func buildMenu() {
         let items: [(String, Selector, String)] = [
-            ("Layout…", #selector(layoutChosen), ""),
+            ("Layout…", #selector(layoutChosen), "l"),
             ("Settings…", #selector(settingsChosen), ","),
         ]
         for (title, action, key) in items {
@@ -179,13 +200,14 @@ final class StatusItemController: NSObject {
 
     // MARK: Strip
 
-    private func openStrip() {
+    private func openStrip(highlightFirst: Bool = false) {
         guard let button = statusItem.button, let window = button.window else { return }
         // Hidden with Hide YeeHaw (while a window was open), no window of YeeHaw's shows,
         // the strip included, until it's unhidden.
         if NSApp.isHidden { NSApp.unhideWithoutActivation() }
         let anchor = window.convertToScreen(button.convert(button.bounds, to: nil))
-        strip.show(below: anchor, items: entries(), notice: notice(), screen: window.screen)
+        strip.show(below: anchor, items: entries(), notice: currentNotice(), screen: window.screen,
+                   highlightFirst: highlightFirst)
 
         // Re-read the bar in the background: YeeHaw's icon may have moved, and drawn items get
         // fresh photographs. The strip itself opens at once from the saved state.
@@ -201,22 +223,67 @@ final class StatusItemController: NSObject {
         }
     }
 
-    /// The hidden apps, in strip order.
+    /// The hidden apps, in strip order. Only apps YeeHaw switched off: one the user switched off
+    /// in System Settings is theirs and never shows here.
     private func entries() -> [StripEntry] {
-        controller.state.hidden.map { StripEntry(id: $0, image: icons.image(for: $0), name: Self.name(of: $0)) }
+        controller.state.hidden.filter(controller.state.journal.contains).map { id in
+            StripEntry(id: id, image: icons.image(for: id), name: AppIdentity.name(of: id),
+                       isRunning: !NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty)
+        }
     }
 
-    private func notice() -> String? {
-        if !controller.state.needsGrant.isEmpty {
-            return "YeeHaw needs access to the menu bar settings files."
+    /// Why a click in the strip didn't open an app's menu.
+    enum RevealProblem: Equatable {
+        /// macOS didn't draw the app in time.
+        case didNotAppear(BundleID)
+        /// The app isn't running, so it has no icon.
+        case notRunning(BundleID)
+        /// Anything else (an unreadable file, no position for YeeHaw's icon yet).
+        case failed(BundleID)
+    }
+
+    private func currentNotice() -> StripNotice? {
+        Self.notice(needsGrant: controller.state.needsGrant, problem: revealProblem, ownIconMissing: ownIconMissing,
+                    name: AppIdentity.name(of:))
+    }
+
+    /// The strip's notice, most pressing first: a missing grant (Settings fixes it), then why the
+    /// last click failed, each with the button that helps, if one can.
+    static func notice(needsGrant: Set<GrantedFile>, problem: RevealProblem?, ownIconMissing: Bool,
+                       name: (BundleID) -> String) -> StripNotice? {
+        if !needsGrant.isEmpty {
+            let files = [GrantedFile.allowList, .positions].filter(needsGrant.contains)
+                .compactMap(AppPermission.init(file:)).map(\.title)
+            return StripNotice(message: "YeeHaw needs access to the \(files.joined(separator: " and the ")).",
+                               action: .openSettings)
         }
-        if let id = revealFailure {
-            return "\(Self.name(of: id)) didn't appear in the menu bar in time."
+        switch problem {
+        case .didNotAppear(let id):
+            return StripNotice(message: "\(name(id)) didn’t appear in the menu bar in time.", action: .retry(id))
+        case .notRunning(let id):
+            return StripNotice(message: "\(name(id)) isn’t open, so it has no menu to show.", action: .openApp(id))
+        case .failed(let id):
+            return StripNotice(message: "YeeHaw couldn’t show \(name(id))’s menu.")
+        case nil:
+            break
         }
-        if ownIconMissing {
-            return "YeeHaw can't find its own menu bar icon."
-        }
+        if ownIconMissing { return StripNotice(message: "YeeHaw can’t find its own menu bar icon.") }
         return nil
+    }
+
+    private func noticeAction(_ action: StripNotice.Action) {
+        strip.dismiss()
+        switch action {
+        case .openSettings:
+            openSettings()
+        case .retry(let id):
+            select(id)
+        case .openApp(let id):
+            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return }
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                if let error { Self.log.error("Could not open \(id, privacy: .public): \(error, privacy: .public)") }
+            }
+        }
     }
 
     private func select(_ id: BundleID) {
@@ -228,29 +295,31 @@ final class StatusItemController: NSObject {
             }
             guard let yeehaw = yeehawItem else {
                 Self.log.error("Cannot open \(id, privacy: .public): YeeHaw's own icon isn't drawn")
-                ownIconMissing = true
+                reportProblem(nil, ownIconMissing: true)
                 return
             }
-            ownIconMissing = false
             switch await reveal.open(id, nextTo: yeehaw) {
             case .revealed:
-                revealFailure = nil
-            case .failed(ControllerError.notHonored(let failed)):
-                revealFailure = failed
-            case .failed, .ignored:
+                revealProblem = nil
+            case .ignored:
                 break
+            case .failed(ControllerError.notHonored(let failed)):
+                reportProblem(.didNotAppear(failed))
+            case .failed(ControllerError.notRunning(let failed)):
+                reportProblem(.notRunning(failed))
+            case .failed(ControllerError.needsGrant):
+                reportProblem(nil) // The grant notice says it.
+            case .failed:
+                reportProblem(.failed(id))
             }
         }
     }
 
-    /// The app's display name: the running app's, else its bundle's, else the bundle ID.
-    static func name(of id: BundleID) -> String {
-        if let name = NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.localizedName {
-            return name
-        }
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) {
-            return url.deletingPathExtension().lastPathComponent
-        }
-        return id
+    /// Opens the strip again with the notice, so a click that came to nothing says why.
+    private func reportProblem(_ problem: RevealProblem?, ownIconMissing: Bool = false) {
+        strip.dismiss()
+        revealProblem = problem
+        self.ownIconMissing = ownIconMissing
+        openStrip()
     }
 }

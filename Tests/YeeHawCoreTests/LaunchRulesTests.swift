@@ -77,13 +77,41 @@ import Testing
     }
 
     @Test func anOrdinaryQuitSwitchesHiddenAppsBackOn() {
-        #expect(LaunchRules.switchesBackOnAtTermination(.ordinary))
+        #expect(LaunchRules.switchesBackOnAtTermination(.ordinary, opensAtLogin: true))
+        #expect(LaunchRules.switchesBackOnAtTermination(.ordinary, opensAtLogin: false))
     }
 
-    @Test func logoutRestartAndShutdownKeepAppsHidden() {
+    @Test func logoutRestartAndShutdownKeepAppsHiddenWhenYeeHawOpensAtLogin() {
         for reason in [LaunchRules.QuitReason.logout, .restart, .shutdown] {
-            #expect(!LaunchRules.switchesBackOnAtTermination(reason))
+            #expect(!LaunchRules.switchesBackOnAtTermination(reason, opensAtLogin: true))
         }
+    }
+
+    @Test func logoutRestartAndShutdownSwitchBackOnWhenNothingReopensYeeHaw() {
+        for reason in [LaunchRules.QuitReason.logout, .restart, .shutdown] {
+            #expect(LaunchRules.switchesBackOnAtTermination(reason, opensAtLogin: false))
+        }
+    }
+
+    @Test func anotherCopyOfYeeHawRunningRefuses() {
+        let outcome = LaunchRules.check(os: LaunchRules.minimumSystem, running: [], anotherInstance: true)
+        #expect(outcome == .refuse(.alreadyRunning))
+        #expect(!LaunchRules.Refusal.alreadyRunning.title.isEmpty)
+        #expect(!LaunchRules.Refusal.alreadyRunning.message.isEmpty)
+    }
+
+    @Test func theOldestCopyIsTheOneThatRuns() {
+        let early = Date(timeIntervalSince1970: 100)
+        let late = Date(timeIntervalSince1970: 200)
+        // Another copy launched earlier: this one steps aside.
+        #expect(LaunchRules.isAnotherInstance(mine: (pid: 20, launched: late), other: (pid: 10, launched: early)))
+        // This one was first: the newcomer steps aside, not this one.
+        #expect(!LaunchRules.isAnotherInstance(mine: (pid: 10, launched: early), other: (pid: 20, launched: late)))
+        // Same instant: the lower process ID wins.
+        #expect(LaunchRules.isAnotherInstance(mine: (pid: 20, launched: early), other: (pid: 10, launched: early)))
+        #expect(!LaunchRules.isAnotherInstance(mine: (pid: 10, launched: early), other: (pid: 20, launched: early)))
+        // Unknown launch date for the other copy: it counts as running.
+        #expect(LaunchRules.isAnotherInstance(mine: (pid: 20, launched: late), other: (pid: 10, launched: nil)))
     }
 }
 
@@ -92,7 +120,7 @@ import Testing
 
     static func item(_ id: String, x: Double, apple: Bool = false) -> MenuBarItem {
         MenuBarItem(id: id, bundleID: apple ? nil : id, appleIdentifier: apple ? id : nil, indexInApp: 0,
-                    axIdentifier: "", label: id, keyNames: [], keyPrefixes: apple ? [] : [id],
+                    label: id, keyNames: [], keyPrefixes: apple ? [] : [id],
                     x: x, width: 24, isPinned: apple)
     }
 

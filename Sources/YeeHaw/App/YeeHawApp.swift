@@ -1,11 +1,12 @@
 import AppKit
 import os
+import ServiceManagement
 import YeeHawCore
 
 @main
 @MainActor
 final class YeeHawApp: NSObject, NSApplicationDelegate {
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "app")
+    private static let log = Logger(subsystem: Log.subsystem, category: "app")
 
     private var controller: MenuBarController?
     private var grants: FileGrantStore?
@@ -14,6 +15,10 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
     private var watcher: AllowListWatcher?
     /// Why this quit is happening, read from the quit Apple event in `applicationShouldTerminate`.
     private var quitReason = LaunchRules.QuitReason.ordinary
+    /// Turns SIGTERM (`kill`, `pkill`) into an ordinary quit, so hidden apps are switched back on.
+    private var terminationSignal: DispatchSourceSignal?
+    /// Watches for Thaw starting while YeeHaw runs.
+    private var thawObserver: NSObjectProtocol?
 
     static func main() {
         let app = NSApplication.shared
@@ -24,31 +29,39 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if let command = DebugCommand(arguments: CommandLine.arguments) {
-            Task {
-                await command.run()
-                // exit, not terminate: a debug run must never reach any quit-time writes.
-                exit(0)
-            }
+        let command = DebugCommand(arguments: CommandLine.arguments)
+        if let command, command.isReadOnly {
+            run(command)
             return
         }
 
-        let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        // Before anything is written, debug runs that write included.
+        let apps = NSWorkspace.shared.runningApplications
         if case .refuse(let refusal) = LaunchRules.check(os: ProcessInfo.processInfo.operatingSystemVersion,
-                                                         running: running) {
+                                                         running: Set(apps.compactMap(\.bundleIdentifier)),
+                                                         anotherInstance: Self.anotherInstanceRuns(among: apps)) {
+            if command != nil {
+                DebugCommand.refused(refusal)
+                exit(1)
+            }
             refuseToStart(refusal)
             return
         }
+        if let command {
+            run(command)
+            return
+        }
         Self.log.notice("YeeHaw started")
+        quitOnTerminationSignal()
+        watchForThaw()
 
         let grants = FileGrantStore()
-        let controller = MenuBarController(
-            allowFile: GrantedPreferencesFile(file: .allowList, grants: grants),
-            positionFile: GrantedPreferencesFile(file: .positions, grants: grants),
-            reader: AXMenuBarReader(), store: DefaultsStateStore(), sleeper: TaskSleeper())
+        let controller = MenuBarController.live(grants: grants)
         self.grants = grants
         self.controller = controller
-        icons = IconImageProvider()
+        let icons = IconImageProvider()
+        icons.barWrites = { [weak controller] in controller?.writeCount ?? 0 }
+        self.icons = icons
         AppWindows.openSettings = { [weak self] in self?.openSettings() }
 
         let steps = LaunchRules.steps(onboardingComplete: OnboardingRecord.isComplete,
@@ -56,6 +69,66 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         Task {
             for step in steps { await perform(step) }
         }
+    }
+
+    /// A debug command, then exit; `exit`, not `terminate`, so it never reaches quit-time writes.
+    private func run(_ command: DebugCommand) {
+        Task {
+            await command.run()
+            exit(0)
+        }
+    }
+
+    /// Whether another copy of YeeHaw (a build run from elsewhere, or `open -n`) is the one that
+    /// keeps running. Two copies would each save their own record of what they switched off over
+    /// the other's.
+    private static func anotherInstanceRuns(among apps: [NSRunningApplication]) -> Bool {
+        let me = NSRunningApplication.current
+        let ownID = Bundle.main.bundleIdentifier ?? OwnIconLocator.bundleID
+        return apps.contains { app in
+            app.bundleIdentifier == ownID && !app.isTerminated
+                && LaunchRules.isAnotherInstance(mine: (me.processIdentifier, me.launchDate),
+                                                 other: (app.processIdentifier, app.launchDate))
+        }
+    }
+
+    /// SIGTERM is ignored as a signal and handled on the main queue as an ordinary quit instead,
+    /// which switches hidden apps back on (by default it would end the process on the spot).
+    private func quitOnTerminationSignal() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            MainActor.assumeIsolated {
+                Self.log.notice("SIGTERM received; quitting the ordinary way")
+                NSApp.terminate(nil)
+            }
+        }
+        source.resume()
+        terminationSignal = source
+    }
+
+    /// Thaw edits the same two files. If it starts while YeeHaw runs, YeeHaw stops editing: it
+    /// switches back on what it hid, says why, and quits.
+    private func watchForThaw() {
+        thawObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard app?.bundleIdentifier == LaunchRules.thawBundleID else { return }
+            MainActor.assumeIsolated { self?.thawStarted() }
+        }
+    }
+
+    private func thawStarted() {
+        Self.log.notice("Thaw started; switching hidden apps back on and quitting")
+        watcher = nil
+        if let controller {
+            do {
+                try controller.quit()
+            } catch {
+                Self.log.error("Quit could not switch hidden apps back on: \(error, privacy: .public)")
+            }
+        }
+        refuseToStart(.thawRunning)
     }
 
     // MARK: Launch steps
@@ -136,7 +209,7 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         }())
     }
 
-    /// The macOS-version and Thaw guards: says why, then quits. Nothing has been written.
+    /// The launch guards (and Thaw starting later): says why, then quits.
     private func refuseToStart(_ refusal: LaunchRules.Refusal) {
         Self.log.error("Not starting: \(refusal.title, privacy: .public)")
         NSApp.activate()
@@ -157,16 +230,24 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         let event = NSAppleEventManager.shared().currentAppleEvent
         let code = event?.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue
         quitReason = LaunchRules.QuitReason(code: code)
+        // An app Spacing Apply just quit is opened again before YeeHaw goes; the rest are left
+        // running, as they were.
+        if SpacingApplier.anyApplying {
+            Self.log.notice("Quit waits for Spacing Apply to reopen the app it's restarting")
+            SpacingApplier.stopAllAfterCurrentApp { NSApp.reply(toApplicationShouldTerminate: true) }
+            return .terminateLater
+        }
         return .terminateNow
     }
 
     /// Every ordinary quit goes through the controller, which switches back on everything YeeHaw
     /// switched off. A second call, after the status menu's own, finds nothing to do. At logout,
-    /// restart and shutdown hidden apps stay hidden (`LaunchRules.switchesBackOnAtTermination`).
-    /// Debug runs exit before this.
+    /// restart and shutdown hidden apps stay hidden when YeeHaw opens at login
+    /// (`LaunchRules.switchesBackOnAtTermination`). Debug runs exit before this.
     func applicationWillTerminate(_ notification: Notification) {
         guard let controller else { return }
-        guard LaunchRules.switchesBackOnAtTermination(quitReason) else {
+        let opensAtLogin = SMAppService.mainApp.status == .enabled
+        guard LaunchRules.switchesBackOnAtTermination(quitReason, opensAtLogin: opensAtLogin) else {
             Self.log.notice("Quitting for \(String(describing: self.quitReason), privacy: .public); hidden apps stay hidden until next launch")
             return
         }

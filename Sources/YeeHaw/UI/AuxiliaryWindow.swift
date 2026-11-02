@@ -7,7 +7,7 @@ import os
 /// menu bar.
 @MainActor
 enum AppWindows {
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "windows")
+    private static let log = Logger(subsystem: Log.subsystem, category: "windows")
 
     /// How long after opening to ask for activation again: the status menu has closed by then.
     static let activationRetryDelay: Duration = .milliseconds(150)

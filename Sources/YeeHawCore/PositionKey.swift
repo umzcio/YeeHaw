@@ -10,6 +10,13 @@ public enum PositionKey {
         return [bundleID, executableName]
     }
 
+    /// Every key in `table` under any of `prefixes` (`status:<prefix>::…`), sorted: all of an
+    /// app's slots, whatever macOS named them.
+    public static func existingKeys(prefixes: [String], table: PositionTable) -> [String] {
+        let starts = prefixes.map { "status:\($0)::" }
+        return table.values.keys.filter { key in starts.contains { key.hasPrefix($0) } }.sorted()
+    }
+
     /// All table keys for one item. macOS may name a slot after the item's identifier, AX
     /// description or title, or `Item-<indexInApp>`, under any of the app's prefixes, so every
     /// candidate that exists in `table` is returned (prefixes in order, names in candidate order

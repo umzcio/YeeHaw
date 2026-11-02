@@ -20,9 +20,8 @@ final class AllowListWatcher {
     /// Re-opening the replaced file: a few tries, a moment apart, before falling back to polling.
     static let reopenAttempts = 5
     static let reopenDelay: Duration = .milliseconds(100)
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "watcher")
+    private static let log = Logger(subsystem: Log.subsystem, category: "watcher")
 
-    private(set) var mode: Mode = .poll
     private let grants: FileGrantStore
     private let onChange: @MainActor () -> Void
     private var source: DispatchSourceFileSystemObject?
@@ -36,7 +35,6 @@ final class AllowListWatcher {
         self.grants = grants
         self.onChange = onChange
         if armFileWatch() {
-            mode = .file
             Self.log.notice("Watching the Allow list file")
         } else {
             startPolling()
@@ -110,7 +108,6 @@ final class AllowListWatcher {
             }
             guard let self, !Task.isCancelled else { return }
             Self.log.error("Allow list file could not be re-opened; polling instead")
-            self.mode = .poll
             self.startPolling()
         }
     }
@@ -118,7 +115,6 @@ final class AllowListWatcher {
     // MARK: Polling
 
     private func startPolling() {
-        mode = .poll
         Self.log.notice("Polling the Allow list every \(Self.pollInterval, privacy: .public)")
         poller?.cancel()
         poller = Task { [weak self] in
@@ -130,7 +126,6 @@ final class AllowListWatcher {
                 if sinceRetry >= Self.fileRetryInterval {
                     sinceRetry = .zero
                     if self.armFileWatch() {
-                        self.mode = .file
                         Self.log.notice("Watching the Allow list file again; polling stopped")
                         self.poller = nil
                         self.onChange() // anything missed between the last poll and the watch

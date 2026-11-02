@@ -60,6 +60,14 @@ enum AppPermission: CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// The permission that covers one of the two protected files.
+    init?(file: GrantedFile) {
+        switch file {
+        case .allowList: self = .allowList
+        case .positions: self = .layoutFile
+        }
+    }
+
     /// The protected file a grant opens, for the two file permissions.
     var file: GrantedFile? {
         switch self {

@@ -6,13 +6,7 @@ import Testing
     static let home = "/Users/x"
 
     static func app(_ id: BundleID, path: String, name: String = "App", windows: Bool = false) -> RunningMenuBarApp {
-        RunningMenuBarApp(bundleID: id, bundlePath: path, name: name, hasVisibleWindows: windows)
-    }
-
-    @Test func valuesMatchMacOSDefaults() {
-        #expect(SpacingPlan.defaultValue == 16)
-        #expect(SpacingPlan.range == 0...32)
-        #expect(SpacingPlan.range.contains(SpacingPlan.defaultValue))
+        RunningMenuBarApp(bundleID: id, bundlePath: path, name: name, hasOpenWindows: windows)
     }
 
     @Test func excludesAppleAndNonApplications() {
@@ -77,41 +71,5 @@ import Testing
         #expect(SpacingPlan.clamped(-3) == 0)
         #expect(SpacingPlan.clamped(40) == 32)
         #expect(SpacingPlan.clamped(8) == 8)
-    }
-
-    // MARK: Preferences
-
-    @Test func bothKeysGetTheValue() {
-        #expect(SpacingPlan.keys == ["NSStatusItemSpacing", "NSStatusItemSelectionPadding"])
-        #expect(SpacingPlan.preferenceValues(for: 8) == ["NSStatusItemSpacing": 8, "NSStatusItemSelectionPadding": 8])
-    }
-
-    @Test func defaultValueDeletesTheKeys() {
-        // Back to stock: macOS's own default, not a stored 16.
-        let values = SpacingPlan.preferenceValues(for: SpacingPlan.defaultValue)
-        #expect(values.count == 2)
-        #expect(values.values.allSatisfy { $0 == nil })
-    }
-
-    @Test func outOfRangeValueIsClampedBeforeWriting() {
-        #expect(SpacingPlan.preferenceValues(for: 99)["NSStatusItemSpacing"] == 32)
-    }
-
-    @Test func unsetPreferenceReadsAsDefault() {
-        #expect(SpacingPlan.value(fromPreference: nil) == 16)
-    }
-
-    @Test func storedNumbersAndStringsAreRead() {
-        #expect(SpacingPlan.value(fromPreference: NSNumber(value: 8)) == 8)
-        #expect(SpacingPlan.value(fromPreference: 4) == 4)
-        // `defaults write` without -int stores a string.
-        #expect(SpacingPlan.value(fromPreference: "6") == 6)
-        #expect(SpacingPlan.value(fromPreference: NSNumber(value: 7.6)) == 8)
-    }
-
-    @Test func unreadableOrOutOfRangePreferenceIsHandled() {
-        #expect(SpacingPlan.value(fromPreference: "wide") == 16)
-        #expect(SpacingPlan.value(fromPreference: Data()) == 16)
-        #expect(SpacingPlan.value(fromPreference: 100) == 32)
     }
 }

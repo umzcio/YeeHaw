@@ -5,7 +5,7 @@ import YeeHawCore
 @MainActor @Suite struct LayoutModelTests {
     static func item(_ id: String, label: String = "", bundle: Bool = true) -> MenuBarItem {
         MenuBarItem(id: id, bundleID: bundle ? id : nil, appleIdentifier: bundle ? nil : id, indexInApp: 0,
-                    axIdentifier: "", label: label, keyNames: [], keyPrefixes: [], x: 0, width: 20, isPinned: false)
+                    label: label, keyNames: [], keyPrefixes: [], x: 0, width: 20, isPinned: false)
     }
 
     @Test func aMoveIsAppliedOnceTheItemSitsBetweenItsNeighbours() {

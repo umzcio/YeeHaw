@@ -3,9 +3,10 @@ import ApplicationServices
 import Foundation
 import YeeHawCore
 
-/// Hands-on checks run from the command line. `--probe` and `--grant` only read (apart from saving
-/// a grant the user picks) and never start the controller; `--hide`, `--show` and `--reveal` do.
-/// `--onboarding-preview` shows the first-run window against the Mac as it is.
+/// Hands-on checks run from the command line. `--probe` only reads, so it may run next to a running
+/// YeeHaw. `--grant` saves the grants the user picks, `--reveal` starts the controller, and
+/// `--onboarding-preview` shows the first-run window against the Mac as it is; those three pass the
+/// same launch checks as YeeHaw itself (macOS version, Thaw, another copy running) first.
 /// Output goes to stdout and to `~/Library/Logs/YeeHaw/probe.txt`, since an app launched with
 /// `open` has no visible stdout.
 enum DebugCommand {
@@ -13,14 +14,10 @@ enum DebugCommand {
     case probe
     /// `--grant`: asks for both file grants in turn.
     case grant
-    /// `--onboarding-preview`: the onboarding window against live state (ruling R50). Steps already
+    /// `--onboarding-preview`: the onboarding window against live state. Steps already
     /// satisfied show as done; nothing is written unless a step's button is clicked, and finishing
     /// doesn't record onboarding as complete. The controller isn't launched.
     case onboardingPreview
-    /// `--hide <bundleID>`: launches the controller and hides the app.
-    case hide(BundleID)
-    /// `--show <bundleID>`: launches the controller and shows the app.
-    case show(BundleID)
     /// `--reveal <bundleID>`: shows a stand-in YeeHaw icon and runs one reveal next to it.
     case reveal(BundleID)
     /// One of the bundle ID arguments was given without a bundle ID.
@@ -42,20 +39,26 @@ enum DebugCommand {
             self = .onboardingPreview
             return
         }
-        let flags: [(String, (BundleID) -> DebugCommand)] = [
-            ("--hide", DebugCommand.hide), ("--show", DebugCommand.show), ("--reveal", DebugCommand.reveal),
-        ]
-        for (flag, command) in flags {
-            guard let index = arguments.firstIndex(of: flag) else { continue }
-            let next = arguments.index(after: index)
-            guard next < arguments.endIndex, !arguments[next].hasPrefix("-") else {
-                self = .missingBundleID(flag: flag)
-                return
-            }
-            self = command(arguments[next])
+        guard let index = arguments.firstIndex(of: "--reveal") else { return nil }
+        let next = arguments.index(after: index)
+        guard next < arguments.endIndex, !arguments[next].hasPrefix("-") else {
+            self = .missingBundleID(flag: "--reveal")
             return
         }
-        return nil
+        self = .reveal(arguments[next])
+    }
+
+    /// Whether the command only reads, so it needn't pass the launch checks.
+    var isReadOnly: Bool {
+        switch self {
+        case .probe, .missingBundleID: true
+        case .grant, .onboardingPreview, .reveal: false
+        }
+    }
+
+    /// Reports why the command didn't run.
+    static func refused(_ refusal: LaunchRules.Refusal) {
+        emit(["not running: \(refusal.title). \(refusal.message)"])
     }
 
     @MainActor
@@ -70,45 +73,15 @@ enum DebugCommand {
                 lines.append("grant \(file.rawValue): \(await grants.requestGrant(for: file))")
             }
         case .onboardingPreview:
-            let system = LiveOnboardingSystem(controller: Self.makeController(grants: grants), grants: grants)
+            let system = LiveOnboardingSystem(controller: .live(grants: grants), grants: grants)
             let finished = await OnboardingWindowController.run(model: OnboardingModel(system: system))
             lines = ["onboarding preview closed (finished: \(finished)); completion not recorded"]
-        case .hide(let id):
-            lines = await Self.setHidden(id, true, grants: grants)
-        case .show(let id):
-            lines = await Self.setHidden(id, false, grants: grants)
         case .reveal(let id):
             lines = await Self.reveal(id, grants: grants)
         case .missingBundleID(let flag):
             lines = ["\(flag) needs a bundle ID, for example \(flag) com.example.app"]
         }
         Self.emit(lines)
-    }
-
-    @MainActor
-    private static func makeController(grants: FileGrantStore) -> MenuBarController {
-        MenuBarController(
-            allowFile: GrantedPreferencesFile(file: .allowList, grants: grants),
-            positionFile: GrantedPreferencesFile(file: .positions, grants: grants),
-            reader: AXMenuBarReader(), store: DefaultsStateStore(), sleeper: TaskSleeper())
-    }
-
-    /// `--hide` / `--show`. The process exits right after, without `quit()`, so a hidden app stays hidden.
-    @MainActor
-    private static func setHidden(_ id: BundleID, _ hide: Bool, grants: FileGrantStore) async -> [String] {
-        let verb = hide ? "hide" : "show"
-        let controller = makeController(grants: grants)
-        do {
-            try await controller.launch()
-        } catch {
-            return ["launch failed: \(error)"]
-        }
-        do {
-            if hide { try await controller.hide(id) } else { try await controller.show(id) }
-        } catch {
-            return ["\(verb) \(id) failed: \(error)"]
-        }
-        return ["\(verb) \(id): ok", "hidden: \(listed(controller.state.hidden))"]
     }
 
     /// `--reveal`. Shows a stand-in YeeHaw icon (the real glyph, without the strip), waits until it's drawn and has a position key,
@@ -127,7 +100,7 @@ enum DebugCommand {
             return lines
         }
 
-        let controller = makeController(grants: grants)
+        let controller = MenuBarController.live(grants: grants)
         do {
             try await controller.launch()
         } catch {
@@ -142,8 +115,8 @@ enum DebugCommand {
     @MainActor
     private static func probe(grants: FileGrantStore) async -> [String] {
         var lines: [String] = []
-        // The value of kAXTrustedCheckOptionPrompt, which Swift 6 can't read from a global var.
-        if !AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) {
+        // Never prompts: asking for Accessibility is onboarding's job, when the user clicks it.
+        if !AXIsProcessTrusted() {
             lines.append("accessibility: not trusted")
         }
         for item in await AXMenuBarReader().items() {

@@ -5,7 +5,7 @@ import YeeHawCore
 /// position key `beginReveal` will resolve for it present in the layout file. Shared by the app
 /// and `--reveal`.
 enum OwnIconLocator {
-    static let bundleID = "com.zapps.yeehaw"
+    static let bundleID = Log.subsystem
     /// How long `waitUntilReady` waits for the icon to be drawn and get a position key.
     static let timeout: Double = 5
     static let pollInterval: Double = 0.1
@@ -32,7 +32,7 @@ enum OwnIconLocator {
                 let table = PositionTable(try positions.read(MenuBarController.positionsKey) as? [String: Double] ?? [:])
                 readError = nil
                 let prefixes = drawn?.keyPrefixes ?? [bundleID]
-                keys = table.values.keys.filter { key in prefixes.contains { key.hasPrefix("status:\($0)::") } }.sorted()
+                keys = PositionKey.existingKeys(prefixes: prefixes, table: table)
                 if let drawn, let key = PositionKey.keys(for: drawn, table: table).first, table.values[key] != nil {
                     log("YeeHaw icon ready at x \(format(drawn.x)) width \(format(drawn.width)), key \(key)")
                     return drawn

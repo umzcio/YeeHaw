@@ -7,7 +7,7 @@ import YeeHawCore
 /// "Spacing Apply" 1). The decisions are `SpacingPlan.appOrder` and `SpacingPlan.hasOpenWindows`;
 /// this gathers the facts they need from the Mac.
 enum RunningMenuBarApps {
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "spacing")
+    private static let log = Logger(subsystem: Log.subsystem, category: "spacing")
     /// Per-app messaging timeout for Accessibility's window list.
     static let timeout: Float = 0.3
     /// Windows smaller than this either way are strips and overlays, not windows a user works in.
@@ -30,7 +30,7 @@ enum RunningMenuBarApps {
             let open = SpacingPlan.hasOpenWindows(facts, exempt: exempt)
             summary.append("\(id) ax \(facts.axWindows.map(String.init) ?? "-") on \(facts.onScreenWindows) all \(facts.windowsAnywhere)"
                            + "\(facts.isHidden ? " hidden" : "")\(facts.isRegular ? " regular" : "") -> \(open ? "windows" : "none")")
-            return RunningMenuBarApp(bundleID: id, bundlePath: url.path, name: name, hasVisibleWindows: open,
+            return RunningMenuBarApp(bundleID: id, bundlePath: url.path, name: name, hasOpenWindows: open,
                                      isHidden: app.isHidden, launchDate: app.launchDate)
         }
     }

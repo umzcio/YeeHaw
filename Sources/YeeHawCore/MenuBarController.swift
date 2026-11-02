@@ -3,6 +3,8 @@ import Foundation
 public enum ControllerError: Error, Equatable {
     case notTracked(BundleID)
     case notHonored(BundleID)
+    /// The app isn't running, so it has no icon to reveal.
+    case notRunning(BundleID)
     case needsGrant(GrantedFile)
     /// A move neighbour (or YeeHaw's own item) whose position key isn't in the table.
     case unresolvedNeighbor
@@ -31,6 +33,9 @@ public enum ControllerError: Error, Equatable {
     private var stored: HidingState
     /// Last read, drawn only.
     public private(set) var items: [MenuBarItem] = []
+    /// How many times YeeHaw has written either file, so a caller can tell the bar may have
+    /// changed under something it started earlier (a screenshot of the bar).
+    public private(set) var writeCount = 0
     /// Apps with an Allow-list entry as of YeeHaw's last read or write. Only these can be hidden;
     /// macOS adds an entry some time after an app first draws an icon.
     public var trackedApps: Set<BundleID> { Set(lastSnapshot.keys) }
@@ -60,7 +65,8 @@ public enum ControllerError: Error, Equatable {
     // MARK: Lifecycle
 
     /// Reconciles crash leftovers in one Allow write (no per-app wait), then restores any
-    /// reveal positions. Switched-on apps and `pendingReveal` stay saved until their writes land.
+    /// reveal positions, even when the Allow write failed. Switched-on apps and `pendingReveal`
+    /// stay saved until their own writes land.
     public func launch() async throws {
         try await gated {
             let allow = try readAllow().snapshot
@@ -69,21 +75,44 @@ public enum ControllerError: Error, Equatable {
             var interim = r.state
             interim.journal.formUnion(Self.switchedOn(r.actions))
             interim.pendingReveal = state.pendingReveal
-            if interim != state { save(interim) }
-            if !r.actions.isEmpty { try writeAllow(r.actions) }
-            if !r.restorePositions.isEmpty { try writePositions(r.restorePositions) }
-            if r.state != state { save(r.state) }
+            save(interim)
+            try finish(allow: r.actions, journal: r.state.journal, restoring: r.restorePositions)
             await reload()
         }
     }
 
-    /// Switches everything in the journal back on in one write, without waiting, then clears it.
+    /// Switches everything in the journal back on in one write, without waiting, then clears it,
+    /// and puts back the positions of a reveal that's still open (or still ending), so the app
+    /// isn't left at the slot next to YeeHaw's icon. Synchronous and outside the gate: it runs as
+    /// YeeHaw quits, whatever else is in flight.
     public func quit() throws {
         try guarded {
             let r = Reconciler.onQuit(state)
-            if !r.actions.isEmpty { try writeAllow(r.actions) }
-            if r.state != state { save(r.state) }
+            try finish(allow: r.actions, journal: r.state.journal, restoring: r.restorePositions)
         }
+    }
+
+    /// Writes `actions`, then `restoring` (each attempted even if the other fails), and saves:
+    /// the journal becomes `journal` only once the Allow write landed, and `pendingReveal` clears
+    /// only once the positions did. Rethrows the first failure.
+    private func finish(allow actions: [AllowAction], journal: Set<BundleID>,
+                        restoring positions: [String: Double?]) throws {
+        var next = state
+        var failure: Error?
+        do {
+            if !actions.isEmpty { try writeAllow(actions) }
+            next.journal = journal
+        } catch {
+            failure = error
+        }
+        do {
+            if !positions.isEmpty { try writePositions(positions) }
+            next.pendingReveal = nil
+        } catch {
+            failure = failure ?? error
+        }
+        save(next)
+        if let failure { throw failure }
     }
 
     /// Reads `file` once through its grant: true when that works, which clears a `needsGrant`
@@ -125,16 +154,28 @@ public enum ControllerError: Error, Equatable {
         }
     }
 
+    /// Switches the app back on for good. Showing the app that's being revealed also ends the
+    /// reveal here and now (its positions go back), so a Layout placement made right after isn't
+    /// undone when the reveal would have ended.
     public func show(_ id: BundleID) async throws {
         try await gated {
             let r = Reconciler.show(id, state)
             var interim = r.state
             interim.journal = state.journal
-            if interim != state { save(interim) }
-            guard !r.actions.isEmpty else { return }
-            try writeAllow(r.actions)
-            save(r.state)
-            try await waitIfRunning(id, drawn: true)
+            save(interim)
+            if !r.actions.isEmpty {
+                try writeAllow(r.actions)
+                var next = state
+                next.journal = r.state.journal
+                save(next)
+            }
+            if let pending = state.pendingReveal, pending.bundleID == id {
+                try writePositions(pending.originalPositions)
+                var next = state
+                next.pendingReveal = nil
+                save(next)
+            }
+            if !r.actions.isEmpty { try await waitIfRunning(id, drawn: true) }
         }
     }
 
@@ -213,8 +254,7 @@ public enum ControllerError: Error, Equatable {
             let prefixes = await reader.keyPrefixes(of: id)
             let values = try readPositions()
             guard values[PositionKey.controlCenter] != nil else { throw ControllerError.unresolvedNeighbor }
-            let starts = prefixes.map { "status:\($0)::" }
-            var keys = values.keys.filter { key in starts.contains { key.hasPrefix($0) } }.sorted()
+            var keys = PositionKey.existingKeys(prefixes: prefixes, table: PositionTable(values))
             // No key yet: one under every prefix, since which one macOS files YeeHaw under
             // depends on how the build is signed (an unused key is inert, as in revealKeys).
             if keys.isEmpty { keys = prefixes.map { "status:\($0)::\(name)" } }
@@ -234,6 +274,8 @@ public enum ControllerError: Error, Equatable {
             guard state.hidden.contains(id), state.journal.contains(id) else {
                 throw ControllerError.notTracked(id)
             }
+            // Switching on an app that isn't running would draw nothing; nothing is written.
+            guard await reader.runningBundleIDs().contains(id) else { throw ControllerError.notRunning(id) }
             if state.pendingReveal != nil { try await finishReveal() }
             // Asked before the read, so nothing suspends between reading the table and writing it.
             let prefixes = await reader.keyPrefixes(of: id)
@@ -273,25 +315,39 @@ public enum ControllerError: Error, Equatable {
 
     // MARK: Private
 
-    /// Ungated: callers already hold the gate.
+    /// Ungated: callers already hold the gate. The positions go back even when switching the app
+    /// off fails. If the switch-off write itself failed, `pendingReveal` stays so a retry (or the
+    /// next launch) switches it off; if only the wait ran out, the write landed and it clears.
     private func finishReveal() async throws {
         guard let pending = state.pendingReveal else { return }
+        var writeFailure: Error?
+        var waitFailure: Error?
         if state.journal.contains(pending.bundleID) {
-            try writeAllow([.switchOff(pending.bundleID)])
-            try await waitIfRunning(pending.bundleID, drawn: false, fast: true)
+            do {
+                try writeAllow([.switchOff(pending.bundleID)])
+                do {
+                    try await waitIfRunning(pending.bundleID, drawn: false, fast: true)
+                } catch {
+                    waitFailure = error
+                }
+            } catch {
+                writeFailure = error
+            }
         }
         try writePositions(pending.originalPositions)
-        state.pendingReveal = nil
-        save(state)
+        if let writeFailure { throw writeFailure }
+        var next = state
+        next.pendingReveal = nil
+        save(next)
+        if let waitFailure { throw waitFailure }
     }
 
     /// Every existing key of the app under any of its prefixes (hiding is per app, so the whole
     /// app appears), else `Item-0` under the first prefix. The prefixes come from the reader, so
     /// they're known even while the app is hidden and not drawn.
     private static func revealKeys(prefixes: [String], _ table: PositionTable) -> [String] {
-        let starts = prefixes.map { "status:\($0)::" }
-        let existing = table.values.keys.filter { key in starts.contains { key.hasPrefix($0) } }.sorted()
-        return existing.isEmpty ? starts.prefix(1).map { $0 + "Item-0" } : existing
+        let existing = PositionKey.existingKeys(prefixes: prefixes, table: table)
+        return existing.isEmpty ? prefixes.prefix(1).map { "status:\($0)::Item-0" } : existing
     }
 
     private static func switchedOn(_ actions: [AllowAction]) -> [BundleID] {
@@ -299,15 +355,23 @@ public enum ControllerError: Error, Equatable {
     }
 
     /// Makes `next` the state, writing the store only when it differs from what the store holds.
+    /// `needsGrant` always stays the live one: it's changed only by reads and writes as they
+    /// happen, never by a state worked out before them.
     private func save(_ next: HidingState) {
+        let flags = state.needsGrant
         state = next
+        state.needsGrant = flags
         guard state != stored else { return }
         store.save(state)
         stored = state
     }
 
+    /// A full read of the bar. Apps known to be off (except one being revealed) are named, so a
+    /// stale frame of theirs never claims another app's icon.
     private func reload() async {
-        items = await reader.items()
+        var off = Set(lastSnapshot.filter { !$0.value }.keys)
+        if let revealed = state.pendingReveal?.bundleID { off.remove(revealed) }
+        items = await reader.items(offApps: off)
     }
 
     private func neighborKey(_ item: MenuBarItem, _ table: PositionTable) throws -> String {
@@ -394,6 +458,7 @@ public enum ControllerError: Error, Equatable {
         }
         if written.contains(where: { before[$0.key] != $0.value }) {
             try allowFile.write(Self.allowKey, try list.encoded())
+            writeCount += 1
         }
         lastSnapshot.merge(written) { _, new in new }
     }
@@ -414,6 +479,7 @@ public enum ControllerError: Error, Equatable {
         for (key, value) in changes { values[key] = value }
         guard values != before else { return }
         try positionFile.write(Self.positionsKey, values)
+        writeCount += 1
     }
 
     private func writePositions(_ changes: [String: Double]) throws {

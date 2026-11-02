@@ -245,9 +245,15 @@ struct SwitchedOffList: View {
 enum AppIdentity {
     private static var icons: [BundleID: NSImage] = [:]
 
-    /// The running app's name, else its bundle's, else the bundle ID.
+    /// The app's display name: the running app's, else its bundle's, else the bundle ID.
     static func name(of id: BundleID) -> String {
-        StatusItemController.name(of: id)
+        if let name = NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.localizedName {
+            return name
+        }
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) {
+            return url.deletingPathExtension().lastPathComponent
+        }
+        return id
     }
 
     static func isInstalled(_ id: BundleID) -> Bool {

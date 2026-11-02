@@ -10,7 +10,7 @@ import YeeHawCore
 final class IconImageProvider {
     /// Edge of the app-icon fallback, in points (the strip draws it at this size).
     static let fallbackSize: CGFloat = 18
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "glyphs")
+    private static let log = Logger(subsystem: Log.subsystem, category: "glyphs")
     static let defaultDirectory = URL.applicationSupportDirectory.appending(path: "YeeHaw/Glyphs", directoryHint: .isDirectory)
 
     private let directory: URL
@@ -25,6 +25,10 @@ final class IconImageProvider {
 
     /// Whether `captureIfPermitted` photographs at all; off in tests, which have no menu bar.
     private let capturesScreen: Bool
+    /// Counts YeeHaw's own writes to the bar (`MenuBarController.writeCount`). A shot taken while
+    /// it changed may show items somewhere other than the frames being cropped (a reveal began or
+    /// ended meanwhile), so it's thrown away rather than saved under the wrong app.
+    var barWrites: @MainActor () -> Int = { 0 }
 
     init(directory: URL = IconImageProvider.defaultDirectory, capturesScreen: Bool = true) {
         self.directory = directory
@@ -105,11 +109,16 @@ final class IconImageProvider {
             ($0.bundleID != nil && $0.bundleID != OwnIconLocator.bundleID) || $0.appleIdentifier != nil
         }
         guard !targets.isEmpty else { return }
+        let writesBefore = barWrites()
         let bars: [BarShot]
         do {
             bars = try await Self.captureBars()
         } catch {
             Self.log.error("Menu bar capture failed: \(error, privacy: .public)")
+            return
+        }
+        guard barWrites() == writesBefore else {
+            Self.log.info("Menu bar capture dropped: the bar changed while it was taken")
             return
         }
         let drawn = items.sorted { $0.x < $1.x }
@@ -185,9 +194,7 @@ final class IconImageProvider {
 
     private func appIcon(_ id: BundleID) -> NSImage {
         if let cached = fallbacks[id] { return cached }
-        let icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id)
-            .map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSWorkspace.shared.icon(for: .application)
-        let sized = Self.sized(icon)
+        let sized = Self.sized(AppIdentity.icon(for: id))
         fallbacks[id] = sized
         return sized
     }

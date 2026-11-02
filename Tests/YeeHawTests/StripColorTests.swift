@@ -45,27 +45,7 @@ func band(_ colors: [(Int, Int, Int, Int)], width: Int = 8) -> CGImage {
     }
 }
 
-@Suite struct StripAverageColorTests {
-    @Test func aSolidImageReturnsItsColour() throws {
-        let color = try #require(StripColor.averageColor(of: band([(14, 15, 27, 255)])))
-        #expect(color.byteTriple == [14, 15, 27])
-    }
-
-    @Test func aTwoColourImageReturnsTheMean() throws {
-        let color = try #require(StripColor.averageColor(of: band([(10, 20, 30, 255), (30, 60, 90, 255)])))
-        #expect(color.byteTriple == [20, 40, 60])
-    }
-
-    @Test func theResultIsOpaque() throws {
-        let color = try #require(StripColor.averageColor(of: band([(200, 100, 50, 128)])))
-        #expect(color.cgColor.alpha == 1)
-        #expect(color.byteTriple.enumerated().allSatisfy { abs($0.element - [200, 100, 50][$0.offset]) <= 1 })
-    }
-
-    @Test func aClearImageHasNoColour() {
-        #expect(StripColor.averageColor(of: band([(0, 0, 0, 0)])) == nil)
-    }
-
+@Suite struct StripBackdropColorTests {
     @Test func menuTitlesInTheMenuBarLayerAreLeftOut() throws {
         // The bar layer is clear except for a white menu title over the last quarter.
         let composite = band([(14, 15, 27, 255), (14, 15, 27, 255), (14, 15, 27, 255), (255, 255, 255, 255)])

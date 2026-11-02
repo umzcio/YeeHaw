@@ -90,8 +90,7 @@ func crop(width: Int = 60, height: Int = 78, ink: CGRect, color: CGColor = .whit
     }
 
     static func drawn(_ id: BundleID, index: Int) -> MenuBarItem {
-        MenuBarItem(id: "\(id)#\(index)", bundleID: id, appleIdentifier: nil, indexInApp: index, axIdentifier: "",
-                    label: id, keyNames: [], keyPrefixes: [id], x: Double(index) * 30, width: 20, isPinned: false)
+        MenuBarItem(id: "\(id)#\(index)", bundleID: id, appleIdentifier: nil, indexInApp: index, label: id, keyNames: [], keyPrefixes: [id], x: Double(index) * 30, width: 20, isPinned: false)
     }
 
     @Test func aHiddenAppGetsATilePerIconItLastDrew() throws {
@@ -129,7 +128,7 @@ func crop(width: Int = 60, height: Int = 78, ink: CGRect, color: CGColor = .whit
 @Suite struct AppleCropTests {
     static func item(_ id: String, x: Double, width: Double, apple: Bool = true) -> MenuBarItem {
         MenuBarItem(id: id, bundleID: apple ? nil : id, appleIdentifier: apple ? id : nil, indexInApp: 0,
-                    axIdentifier: "", label: id, keyNames: [], keyPrefixes: [], x: x, width: width, isPinned: false)
+                    label: id, keyNames: [], keyPrefixes: [], x: x, width: width, isPinned: false)
     }
 
     @Test func theClockReachesIntoTheEmptyBarOnItsRight() {

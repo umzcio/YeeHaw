@@ -4,13 +4,11 @@ import os
 import YeeHawCore
 
 /// The first-run steps, in order (spec "First run").
-enum OnboardingStep: Int, CaseIterable, Identifiable, Comparable {
+enum OnboardingStep: Int, CaseIterable, Identifiable {
     case accessibility, allowList, layoutFile, review, placeIcon
 
     var id: Int { rawValue }
     var number: Int { rawValue + 1 }
-
-    static func < (a: Self, b: Self) -> Bool { a.rawValue < b.rawValue }
 }
 
 /// What onboarding asks of the Mac.
@@ -59,7 +57,7 @@ final class OnboardingModel {
     @ObservationIgnored var onFinish: (() -> Void)?
 
     @ObservationIgnored private let system: OnboardingSystem
-    private static let log = Logger(subsystem: "com.zapps.yeehaw", category: "onboarding")
+    private static let log = Logger(subsystem: Log.subsystem, category: "onboarding")
 
     init(system: OnboardingSystem) {
         self.system = system
