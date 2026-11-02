@@ -11,6 +11,8 @@ final class RevealCoordinator {
     /// window opening, a click inside its windows), so someone still working in a window the reveal
     /// opened isn't cut off. The reveal ends after this long with no such activity.
     static let inactivityTimeout: Double = 30
+    /// How often a reveal checks whether the app's menu or popover is still on screen.
+    static let windowPollInterval: Double = 0.25
     /// How long one AX press may block. An app busy tracking the menu it just opened can run past
     /// this and return `-25204`, so a timeout isn't treated as a failure.
     nonisolated static let pressTimeout: Float = 0.2
@@ -29,10 +31,6 @@ final class RevealCoordinator {
     /// The click waiting for the open reveal to end: resumed with true to run next, or false when
     /// a later click replaced it.
     private var waiting: CheckedContinuation<Bool, Never>?
-
-    /// Started once the revealed item is drawn (the strip photographs it). It runs in its own
-    /// task, so the press and `endReveal` never wait on it.
-    var onDrawn: (@MainActor (MenuBarItem) async -> Void)?
 
     /// Awaited just before the press (the strip's fade-out has to finish first; see
     /// `StripPanel.waitUntilOffScreen`).
@@ -105,7 +103,6 @@ final class RevealCoordinator {
             return .failed(error)
         }
         step("reveal done, drawn at x \(item.x) width \(item.width)")
-        if let onDrawn { Task { await onDrawn(item) } }
 
         guard let pid = NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.processIdentifier else {
             step("app is not running")
@@ -287,6 +284,12 @@ private final class RevealSession {
     private var waiter: CheckedContinuation<String, Never>?
     /// Every AX notification received, in order, for the debug log.
     private var seen: [String] = []
+    /// The app's on-screen windows before the press. A window that appears after it and goes away
+    /// again is the menu or popover closing, which AX doesn't always announce (a popover opened by
+    /// AXPress sends no notification at all on 27.2).
+    private let windowsBeforePress: Set<CGWindowID>
+    private var windowsSincePress: Set<CGWindowID> = []
+    private var windowWatch: Task<Void, Never>?
 
     var seenSummary: String { "[" + seen.joined(separator: ", ") + "]" }
 
@@ -301,6 +304,7 @@ private final class RevealSession {
     /// Observes the app's AX notifications right away, so a menu that opens during the press is seen.
     init(pid: pid_t) {
         self.pid = pid
+        windowsBeforePress = Self.onScreenWindows(of: pid)
         app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, Self.messagingTimeout)
         var created: AXObserver?
@@ -325,6 +329,13 @@ private final class RevealSession {
             }
         }
         restartTimer()
+        windowWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(RevealCoordinator.windowPollInterval))
+                guard let self, !Task.isCancelled else { return }
+                self.checkWindows()
+            }
+        }
     }
 
     func waitForClose() async -> String {
@@ -335,6 +346,8 @@ private final class RevealSession {
     func tearDown() {
         timer?.cancel()
         timer = nil
+        windowWatch?.cancel()
+        windowWatch = nil
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
         if let observer {
@@ -417,6 +430,26 @@ private final class RevealSession {
             AXUIElementSetMessagingTimeout(window, Self.messagingTimeout)
             AXObserverAddNotification(observer, window, kAXUIElementDestroyedNotification as CFString, refcon)
         }
+    }
+
+    /// Closes once every window that appeared after the press is gone again.
+    private func checkWindows() {
+        guard reason == nil else { return }
+        let new = Self.onScreenWindows(of: pid).subtracting(windowsBeforePress)
+        if !new.isEmpty {
+            windowsSincePress.formUnion(new)
+        } else if !windowsSincePress.isEmpty {
+            close("the app's menu or popover went off screen")
+        }
+    }
+
+    private static func onScreenWindows(of pid: pid_t) -> Set<CGWindowID> {
+        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+        let windows = info as? [[String: Any]] ?? []
+        return Set(windows.compactMap { window in
+            guard (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init) == pid else { return nil }
+            return (window[kCGWindowNumber as String] as? Int).map(CGWindowID.init)
+        })
     }
 
     private func mouseDown(at screenPoint: NSPoint) {

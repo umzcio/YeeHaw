@@ -76,8 +76,9 @@ final class StatusItemController: NSObject {
             self?.revealProblem = nil
             self?.ownIconMissing = false
         }
-        // Photograph a revealed item while it's drawn; a hidden one can't be photographed later.
-        reveal.onDrawn = { [icons] item in await icons.captureIfPermitted([item]) }
+        // A revealed item isn't photographed: the bar reports its final frames at once while the
+        // icons are still sliding (a zWhisper photo with Wi-Fi across it), and once pressed it's
+        // drawn highlighted. Hidden apps keep the photo taken before launch hides them.
         reveal.beforePress = { [strip] in await strip.waitUntilOffScreen() }
     }
 
