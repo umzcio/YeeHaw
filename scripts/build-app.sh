@@ -15,6 +15,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/YeeHaw" "$APP/Contents/MacOS/YeeHaw"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+# The app icon: Assets.car (the macOS 27 icon, from the Icon Composer file) plus AppIcon.icns.
+xcrun actool --compile "$APP/Contents/Resources" --platform macosx --minimum-deployment-target 27.2 \
+    --app-icon AppIcon --output-partial-info-plist "$(mktemp -t yeehaw-icon)" Resources/AppIcon.icon >/dev/null
 
 codesign --force --sign "$IDENTITY" --options runtime --timestamp "$APP"
 

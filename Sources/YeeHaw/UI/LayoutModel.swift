@@ -371,7 +371,7 @@ final class LayoutModel {
         case ControllerError.needsGrant(let file):
             LayoutMessage(text: "YeeHaw needs access to the \(describe(file)) to change the menu bar.", grant: file)
         case ControllerError.notTracked(let id):
-            LayoutMessage(text: "\(AppIdentity.name(of: id)) can’t be hidden yet. macOS hasn’t listed it in its menu bar settings.")
+            LayoutMessage(text: LayoutView.notHideableYet(AppIdentity.name(of: id)))
         case ControllerError.unresolvedNeighbor:
             LayoutMessage(text: "macOS hasn’t saved a position for an icon there yet, so YeeHaw can’t place it.")
         case ControllerError.malformed(let file):

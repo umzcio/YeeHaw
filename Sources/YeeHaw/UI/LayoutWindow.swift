@@ -29,7 +29,7 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
 
     private let model: LayoutModel
     private let spacing: SpacingModel
-    private let window: NSWindow
+    private let window: AuxiliaryPanel
     private var observers: [NSObjectProtocol] = []
     private var refreshTask: Task<Void, Never>?
     /// Watches the window's own key and mouse-down events, to show the focus ring only for the
@@ -43,12 +43,9 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
     init(controller: MenuBarController, images: IconImageProvider, requestGrant: @escaping (GrantedFile) async -> Bool) {
         model = LayoutModel(controller: controller, images: images, requestGrant: requestGrant)
         spacing = SpacingModel(applier: SpacingApplier(hidden: { Set(controller.state.hidden) }))
-        window = AuxiliaryPanel(width: 560, title: "Layout")
+        window = AuxiliaryPanel(width: 560, title: "Layout", content: LayoutView(model: model, spacing: spacing))
         super.init()
 
-        let hosting = NSHostingController(rootView: LayoutView(model: model, spacing: spacing))
-        hosting.sizingOptions = [.preferredContentSize]
-        window.contentViewController = hosting
         window.delegate = self
         model.onDraggingChange = { [weak self] dragging in self?.watchEscape(dragging) }
         // Apps quit and reopen during Apply; read the list again once it's done.
@@ -60,11 +57,9 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
     func show() {
         let wasVisible = window.isVisible
         updateMaxRowWidth()
-        if !placed, let content = window.contentView {
+        if !placed {
             // Sized to its content first, so it's centred at its real size.
-            content.layoutSubtreeIfNeeded()
-            window.setContentSize(content.fittingSize)
-            window.center()
+            window.sizeToContentAndCenter()
             placed = true
         }
         // Regardless: YeeHaw usually isn't the active app (see `AppWindows.bringForward`).

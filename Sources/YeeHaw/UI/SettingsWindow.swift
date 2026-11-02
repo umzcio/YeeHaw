@@ -26,23 +26,17 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     private init(model: SettingsModel) {
         self.model = model
-        window = AuxiliaryPanel(width: SettingsView.width, title: "YeeHaw Settings")
+        window = AuxiliaryPanel(width: SettingsView.width, title: "Settings", content: SettingsView(model: model))
         super.init()
-        window.styleMask.insert(.miniaturizable)
         window.keepsTopEdge = true
-        let hosting = NSHostingController(rootView: SettingsView(model: model))
-        hosting.sizingOptions = [.preferredContentSize]
-        window.contentViewController = hosting
         window.delegate = self
     }
 
     private func show() {
         let wasVisible = window.isVisible
         model.refresh()
-        if !placed, let content = window.contentView {
-            content.layoutSubtreeIfNeeded()
-            window.setContentSize(content.fittingSize)
-            window.center()
+        if !placed {
+            window.sizeToContentAndCenter()
             placed = true
         }
         AppWindows.bringForward(window, name: "Settings")
@@ -89,7 +83,8 @@ struct SettingsView: View {
                         }
                     }
                 }
-                footnote("YeeHaw changes only the menu bar’s own settings and never reads your windows or what you type.")
+                footnote("YeeHaw only changes menu bar settings and reads the menu bar itself. It never reads "
+                         + "what’s in your windows or what you type.")
             }
             .padding(.top, Self.sectionGap)
             section("Switched-Off Apps") {

@@ -12,7 +12,7 @@ struct StripEntry: Identifiable {
     var isRunning = true
 }
 
-/// The strip under YeeHaw's icon that lists the hidden apps (spec "The strip", ruling R44). It's
+/// The strip under YeeHaw's icon that lists the hidden apps (spec "The strip"). It's
 /// built to read as a piece of the menu bar hanging down under the hat: a solid bar as tall as the
 /// menu bar, 1 pt below it, centred under the icon, filled with the bar's own colour (sampled by
 /// `StripColorSampler`, or an opaque neutral without Screen Recording), with continuous corners

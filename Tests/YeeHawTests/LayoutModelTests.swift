@@ -32,6 +32,6 @@ import YeeHawCore
 
     @Test func refusalsSayWhy() {
         #expect(LayoutView.refusalText(.apple, name: "Wi‑Fi") == "Wi‑Fi belongs to macOS and stays in the menu bar.")
-        #expect(LayoutView.refusalText(.notTrackedYet, name: "Tailscale").hasPrefix("Tailscale isn’t hideable yet."))
+        #expect(LayoutView.refusalText(.notTrackedYet, name: "Tailscale").hasPrefix("Tailscale can’t be hidden yet."))
     }
 }

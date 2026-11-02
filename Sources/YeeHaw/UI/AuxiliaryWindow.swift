@@ -1,5 +1,6 @@
 import AppKit
 import os
+import SwiftUI
 
 /// How YeeHaw's windows (Layout, Settings, onboarding) come forward and go away. YeeHaw is a menu
 /// bar app: while one of them is open it becomes a regular app (in Command-Tab, with its own
@@ -108,12 +109,28 @@ final class AuxiliaryPanel: NSPanel {
         collectionBehavior.insert(.fullScreenNone)
     }
 
-    /// A titled, closable panel of `width`, its content hosted from SwiftUI.
-    convenience init(width: CGFloat, title: String) {
+    /// A titled, closable panel of `width` hosting `content`, sized to it as it changes. Every
+    /// YeeHaw window is put away by closing it: there's nothing to minimize or zoom, so those
+    /// buttons are hidden.
+    convenience init<Content: View>(width: CGFloat, title: String, content: Content) {
         self.init(contentRect: NSRect(x: 0, y: 0, width: width, height: 300),
                   styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: true)
         self.title = title
         titlebarAppearsTransparent = true
+        standardWindowButton(.miniaturizeButton)?.isHidden = true
+        standardWindowButton(.zoomButton)?.isHidden = true
+        let hosting = NSHostingController(rootView: content)
+        hosting.sizingOptions = [.preferredContentSize]
+        contentViewController = hosting
+    }
+
+    /// Sizes the window to its content's fitting size and centres it on screen.
+    func sizeToContentAndCenter() {
+        if let content = contentView {
+            content.layoutSubtreeIfNeeded()
+            setContentSize(content.fittingSize)
+        }
+        center()
     }
 
     /// When the content changes height (onboarding's steps opening and closing), grow and shrink

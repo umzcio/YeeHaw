@@ -31,17 +31,12 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
     private init(model: OnboardingModel, completion: CheckedContinuation<Bool, Never>) {
         self.model = model
         self.completion = completion
-        window = AuxiliaryPanel(width: OnboardingView.width, title: "Welcome to YeeHaw")
+        window = AuxiliaryPanel(width: OnboardingView.width, title: "Welcome to YeeHaw",
+                                content: OnboardingView(model: model))
         super.init()
 
         window.titleVisibility = .hidden
         window.keepsTopEdge = true
-        // Onboarding is finished, not put away: no minimize, and nothing to zoom.
-        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        window.standardWindowButton(.zoomButton)?.isHidden = true
-        let hosting = NSHostingController(rootView: OnboardingView(model: model))
-        hosting.sizingOptions = [.preferredContentSize]
-        window.contentViewController = hosting
         window.delegate = self
         model.onFinish = { [weak self] in
             self?.finished = true
@@ -55,11 +50,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
     }
 
     private func show() {
-        if let content = window.contentView {
-            content.layoutSubtreeIfNeeded()
-            window.setContentSize(content.fittingSize)
-        }
-        window.center()
+        window.sizeToContentAndCenter()
         AppWindows.bringForward(window, name: "Onboarding")
         let timer = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.model.tick() }
@@ -102,8 +93,8 @@ struct OnboardingView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 14) {
-            HatBadge()
+        HStack(spacing: 8) {
+            AppIconBadge()
             VStack(alignment: .leading, spacing: 3) {
                 Text("Welcome to YeeHaw")
                     .font(.title2.weight(.semibold))
@@ -150,33 +141,19 @@ struct OnboardingView: View {
     }
 }
 
-extension Color {
-    /// YeeHaw's own colour, the same on every Mac (the system accent varies), for its hat tile.
-    static let yeehawBrand = Color(red: 0.84, green: 0.35, blue: 0.17)
-}
-
-/// YeeHaw's hat on a tile in its brand colour, standing in for the app icon at the top.
-private struct HatBadge: View {
-    @Environment(\.colorSchemeContrast) private var contrast
+/// YeeHaw's app icon at the top, as a Mac app's welcome window shows its own.
+private struct AppIconBadge: View {
+    static let size: CGFloat = 64
+    /// The empty margin around the icon's rounded square (100 of 1024 on Apple's icon grid),
+    /// taken back so the square lines up with the steps' box below.
+    static let margin: CGFloat = size * 100 / 1024
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-        shape
-            .fill(Color.yeehawBrand.gradient)
-            .overlay {
-                Image(nsImage: StatusGlyph.image())
-                    .renderingMode(.template)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 38, height: 38)
-                    .foregroundStyle(.white)
-                    .offset(y: 1)
-            }
-            .overlay {
-                shape.strokeBorder(.black.opacity(contrast == .increased ? 0.4 : 0.12), lineWidth: 0.5)
-            }
-            .frame(width: 52, height: 52)
-            .shadow(color: .black.opacity(0.18), radius: 1.5, y: 1)
+        Image(nsImage: NSApp.applicationIconImage)
+            .resizable()
+            .interpolation(.high)
+            .frame(width: Self.size, height: Self.size)
+            .padding(.leading, -Self.margin)
             .accessibilityHidden(true)
     }
 }
@@ -385,7 +362,7 @@ private struct OnboardingStepDetail: View {
     private var placeIcon: some View {
         actionRow(note: model.placementError, warning: true) {
             if isDone {
-                doneLabel(model.placement == .placed ? "Next to Control Center" : "Left where macOS puts it")
+                doneLabel(model.summary(of: .placeIcon) ?? "")
             } else {
                 if model.isPlacing {
                     ProgressView().controlSize(.small)
@@ -496,7 +473,7 @@ extension OnboardingModel {
                 return review.adoptedCount == 1 ? "1 app moved to Hidden" : "\(review.adoptedCount) apps moved to Hidden"
             }
             return reviewed ? "Left as they are" : "None switched off"
-        case .placeIcon: return placement == .placed ? "Next to Control Center" : "Skipped"
+        case .placeIcon: return placement == .placed ? "Next to Control Center" : "Left where macOS puts it"
         }
     }
 }

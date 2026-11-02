@@ -403,7 +403,7 @@ struct LayoutView: View {
         switch tile.capability {
         case .fixed(.pinned): "macOS keeps \(tile.name) in place."
         case .fixed(.unknownOwner): "YeeHaw can’t tell which app this icon belongs to, so it can’t move it."
-        case .reorderOnly(.notTrackedYet): "\(tile.name): not hideable yet. macOS hasn’t listed it in its menu bar settings."
+        case .reorderOnly(.notTrackedYet): Self.notHideableYet(tile.name)
         case .reorderOnly(.apple): "\(tile.name) belongs to macOS. It can be moved but not hidden."
         case .reorderOnly(.own), .hideable: tile.name
         }
@@ -736,7 +736,12 @@ struct LayoutView: View {
         switch refusal {
         case .apple: "\(name) belongs to macOS and stays in the menu bar."
         case .own: "YeeHaw’s own icon stays in the menu bar."
-        case .notTrackedYet: "\(name) isn’t hideable yet. macOS hasn’t listed it in its menu bar settings."
+        case .notTrackedYet: notHideableYet(name)
         }
+    }
+
+    /// The one sentence for an app macOS hasn't listed yet, wherever the Layout window says it.
+    static func notHideableYet(_ name: String) -> String {
+        "\(name) can’t be hidden yet. macOS hasn’t listed it in its menu bar settings."
     }
 }

@@ -369,6 +369,7 @@ struct MessageBanner: View {
         .padding(.vertical, 9)
         .frame(width: width)
         .wellBox(shape)
-        .accessibilityElement(children: .combine)
+        // The message reads as one element; Fix… and Dismiss stay buttons of their own.
+        .accessibilityElement(children: .contain)
     }
 }

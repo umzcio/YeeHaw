@@ -178,8 +178,9 @@ written out below.
   it the strip uses the window background colour. Ink is black or white by contrast. Hidden icons
   show in a single row at menu bar size. (Revised 2026-11-01 after the owner rejected two Liquid
   Glass versions as "disconnected".)
-- **Open and close:** opens with a subtle, fast spring and closes on outside click, Esc, or after an
-  icon is used.
+- **Open and close:** fades in and out like the native status menus it sits among (revised
+  2026-11-01: the strip reads as a sibling of those menus, which don't spring), and closes on outside
+  click, Esc, or after an icon is used. Left and Right light its icons, Return or Space opens one.
   - Respects Reduce Motion and Reduce Transparency, and looks right in light and dark mode.
 - **Order:** icons follow the Hidden row of the layout window.
 - **Clicking an icon (the owner chose option "B"):** the app's menu can only open from its real
@@ -289,7 +290,8 @@ Screen Recording is offered later and is optional. Permission-flow lessons from 
   - Then hide what's in Hidden.
 - **Logout and shutdown (my call):** leave the apps hidden and keep the journal, so the next login
   doesn't flash every icon before YeeHaw starts. This still honours "nothing is lost": the next
-  launch reconciles.
+  launch reconciles. Only when YeeHaw opens at login (revised 2026-11-01): otherwise nothing would
+  start it again, so the apps are switched back on as for an ordinary quit.
 - **The user changes Apple's switch while YeeHaw runs.** Watch the Allow list for changes.
   - The user switches **on** an app YeeHaw hid: Apple's switch wins. Remove the app from Hidden and
     from the journal.

@@ -152,7 +152,7 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
 
         case .launchController:
             // Started before the launch: the controller's gate runs calls in order, so a change
-            // seen while launching is applied right after it (ruling M9).
+            // seen while launching is applied right after it.
             watcher = AllowListWatcher(grants: grants) {
                 Task {
                     do {

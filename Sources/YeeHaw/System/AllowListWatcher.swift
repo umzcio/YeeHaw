@@ -2,7 +2,7 @@ import Foundation
 import os
 import YeeHawCore
 
-/// Calls `onChange` (debounced) when the Allow list may have changed on disk (ruling R40).
+/// Calls `onChange` (debounced) when the Allow list may have changed on disk.
 ///
 /// The group container folder is protected (opening it fails with EPERM), so the granted file
 /// itself is watched, under its security scope. cfprefsd replaces the file atomically, so the

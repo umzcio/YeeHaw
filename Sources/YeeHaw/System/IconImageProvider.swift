@@ -3,7 +3,7 @@ import os
 import ScreenCaptureKit
 import YeeHawCore
 
-/// Tile images for the strip (ruling R38). A hidden item can't be photographed, so the real glyph
+/// Tile images for the strip. A hidden item can't be photographed, so the real glyph
 /// is captured whenever an item is already drawn and cached in memory and on disk. Without a
 /// capture the app's icon stands in.
 @MainActor

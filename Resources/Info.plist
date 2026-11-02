@@ -6,6 +6,10 @@
     <string>com.zapps.yeehaw</string>
     <key>CFBundleName</key>
     <string>YeeHaw</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>CFBundleExecutable</key>
     <string>YeeHaw</string>
     <key>CFBundlePackageType</key>

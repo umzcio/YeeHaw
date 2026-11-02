@@ -220,7 +220,7 @@ public enum ControllerError: Error, Equatable {
     // MARK: Ordering
 
     /// Places every key of `item` between its new neighbours. An Apple item moves by its `module:`
-    /// key (ruling R51) and throws `.unresolvedNeighbor` when it has none. A no-op for pinned items
+    /// key (verified to move Apple icons on macOS 27.2) and throws `.unresolvedNeighbor` when it has none. A no-op for pinned items
     /// (macOS ignores their moves) and items with no known owner.
     public func move(_ item: MenuBarItem, leftNeighbor: MenuBarItem?, rightNeighbor: MenuBarItem?) throws {
         guard !item.isPinned, item.bundleID != nil || item.appleIdentifier != nil else { return }
@@ -244,7 +244,7 @@ public enum ControllerError: Error, Equatable {
         }.map(\.id))
     }
 
-    /// Places YeeHaw's own icon immediately left of Control Center (first run, ruling R6): every
+    /// Places YeeHaw's own icon immediately left of Control Center (first run): every
     /// existing key of `id` under any of its prefixes gets `slotValue(leftOf: controlCenter)`,
     /// measured without those keys; with none, `status:<prefix>::<name>` is created under every
     /// prefix, and macOS uses the one it files the icon under when it's first drawn. Throws `.unresolvedNeighbor` when the table has no
