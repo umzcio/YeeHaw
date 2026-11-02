@@ -326,7 +326,9 @@ struct SwitchedOffReviewSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 4)
                 .padding(.bottom, 12)
-            SwitchedOffList(model: model)
+            SwitchedOffList(model: model,
+                            unreadableAdvice: "Try again, or check Menu Bar Allow List under Permissions.",
+                            retry: { model.reload() })
             if let error = model.error, model.loaded {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .symbolRenderingMode(.multicolor)

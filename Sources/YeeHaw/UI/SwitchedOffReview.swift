@@ -37,6 +37,9 @@ final class SwitchedOffReviewModel {
 
     @ObservationIgnored private let source: SwitchedOffSource
 
+    /// What the list well says when the Allow list can't be read; each place adds what to do.
+    static let unreadableMessage = "YeeHaw couldn’t read the menu bar’s Allow list."
+
     init(source: SwitchedOffSource) {
         self.source = source
     }
@@ -56,7 +59,7 @@ final class SwitchedOffReviewModel {
         } catch {
             apps = []
             loaded = false
-            self.error = "YeeHaw can’t read the menu bar’s Allow list yet."
+            self.error = Self.unreadableMessage
         }
     }
 
@@ -122,6 +125,10 @@ struct SwitchedOffList: View {
     static let iconInset: CGFloat = horizontalPadding + 22
 
     let model: SwitchedOffReviewModel
+    /// The line under an unreadable list's message: what the user can do from here.
+    let unreadableAdvice: String
+    /// Try Again on an unreadable list.
+    let retry: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -152,8 +159,10 @@ struct SwitchedOffList: View {
     private var list: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         return Group {
-            if model.apps.isEmpty {
-                Text(model.loaded ? "No apps are switched off." : (model.error ?? ""))
+            if !model.loaded {
+                unreadable
+            } else if model.apps.isEmpty {
+                Text("No apps are switched off.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: Self.rowHeight + 8)
@@ -171,6 +180,27 @@ struct SwitchedOffList: View {
         .clipShape(shape)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Switched-off apps")
+    }
+
+    /// The Allow list couldn't be read: what happened, what to do, and a way to read it again.
+    private var unreadable: some View {
+        VStack(spacing: 10) {
+            VStack(spacing: 3) {
+                Text(model.error ?? SwitchedOffReviewModel.unreadableMessage)
+                    .font(.callout.weight(.medium))
+                Text(unreadableAdvice)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+            Button("Try Again", action: retry)
+                .accessibilityHint("Reads the menu bar’s Allow list again")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity)
     }
 
     private var rows: some View {

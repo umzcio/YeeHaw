@@ -368,14 +368,16 @@ private struct OnboardingStepDetail: View {
 
     private var review: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SwitchedOffList(model: model.review)
+            SwitchedOffList(model: model.review,
+                            unreadableAdvice: "Try again, or continue and review these apps later in Settings.",
+                            retry: { model.retryReview() })
             // A read failure shows in the list itself; only a failed move shows here.
             actionRow(note: model.review.loaded ? model.review.error : nil, warning: true) {
                 if model.review.isCommitting {
                     ProgressView().controlSize(.small)
                 }
                 primary(model.review.commitTitle ?? "Continue") { Task { await model.finishReview() } }
-                    .disabled(model.review.isCommitting || !model.review.loaded)
+                    .disabled(!model.canFinishReview)
             }
         }
     }

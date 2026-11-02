@@ -130,7 +130,22 @@ struct Boom: Error {}
         review.reload()
         #expect(!review.loaded)
         #expect(review.apps.isEmpty)
-        #expect(review.error != nil)
+        // Says what happened, without promising it resolves on its own.
+        #expect(review.error == "YeeHaw couldn’t read the menu bar’s Allow list.")
+    }
+
+    @Test func tryingAgainReadsTheListOnceItsReadable() {
+        let system = FakeOnboardingSystem()
+        system.switchedOffError = ControllerError.malformed(.allowList)
+        system.switchedOffApps = [Self.app("Alpha")]
+        let review = SwitchedOffReviewModel(source: system)
+        review.reload()
+        #expect(!review.loaded)
+        system.switchedOffError = nil
+        review.reload()
+        #expect(review.loaded)
+        #expect(review.error == nil)
+        #expect(review.apps.map(\.name) == ["Alpha"])
     }
 
     @Test func selectAllTicksEveryAppAndSelectNoneClearsThem() {
@@ -248,6 +263,37 @@ struct Boom: Error {}
         #expect(model.current == .review)
         await model.finishReview()
         #expect(system.adopted.isEmpty)
+        #expect(model.isDone(.review))
+        #expect(model.current == .placeIcon)
+    }
+
+    @Test func anUnreadableListCanBeContinuedPastWithoutAdoptingAnything() async {
+        // Step 2 can be done (the file reads) while the list can't be parsed: the user must not be
+        // stuck. Continuing adopts nothing, and the apps can be reviewed later in Settings.
+        let (system, model) = await Self.model {
+            $0.trusted = true
+            $0.grants = [.allowList, .positions]
+            $0.switchedOffError = ControllerError.malformed(.allowList)
+        }
+        #expect(model.current == .review)
+        #expect(!model.review.loaded)
+        #expect(model.canFinishReview)
+        await model.finishReview()
+        #expect(system.adopted.isEmpty)
+        #expect(model.isDone(.review))
+        #expect(model.current == .placeIcon)
+    }
+
+    @Test func tryingAgainWithNothingSwitchedOffFinishesTheReview() async {
+        let (system, model) = await Self.model {
+            $0.trusted = true
+            $0.grants = [.allowList, .positions]
+            $0.switchedOffError = ControllerError.malformed(.allowList)
+        }
+        #expect(model.current == .review)
+        system.switchedOffError = nil
+        model.retryReview()
+        #expect(model.review.loaded)
         #expect(model.isDone(.review))
         #expect(model.current == .placeIcon)
     }

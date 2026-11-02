@@ -134,6 +134,16 @@ final class OnboardingModel {
         }
     }
 
+    /// Whether Continue can be clicked. Also while the list couldn't be read: continuing adopts
+    /// nothing, which leaves every app as it is, and the review is open again in Settings.
+    var canFinishReview: Bool { !review.isCommitting }
+
+    /// Try Again on an unreadable list. A list that reads and is empty finishes the step.
+    func retryReview() {
+        review.reload()
+        Self.log.notice("Review list read again: \(self.review.loaded ? "readable" : "still unreadable", privacy: .public)")
+    }
+
     /// Adopts the ticked apps (none is fine) and moves on.
     func finishReview() async {
         guard await review.commit() else { return }
