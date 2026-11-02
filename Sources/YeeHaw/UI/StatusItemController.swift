@@ -181,6 +181,9 @@ final class StatusItemController: NSObject {
 
     private func openStrip() {
         guard let button = statusItem.button, let window = button.window else { return }
+        // Hidden with Hide YeeHaw (while a window was open), no window of YeeHaw's shows,
+        // the strip included, until it's unhidden.
+        if NSApp.isHidden { NSApp.unhideWithoutActivation() }
         let anchor = window.convertToScreen(button.convert(button.bounds, to: nil))
         strip.show(below: anchor, items: entries(), notice: notice(), screen: window.screen)
 

@@ -342,6 +342,26 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(rig.system.positionWrites == 0)
     }
 
+    @Test func verifyingAccessClearsAStaleFlag() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true)]), state: HidingState(needsGrant: [.positions, .allowList]))
+        let c = rig.controller()
+        #expect(await c.verifyAccess(.positions))
+        #expect(c.state.needsGrant == [.allowList])
+        #expect(await c.verifyAccess(.allowList))
+        #expect(rig.store.load().needsGrant.isEmpty)
+        #expect(rig.system.allowWrites == 0)
+        #expect(rig.system.positionWrites == 0)
+    }
+
+    @Test func verifyingAccessRecordsAFailure() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true)]))
+        rig.system.fail(.allowList)
+        let c = rig.controller()
+        #expect(await !c.verifyAccess(.allowList))
+        #expect(c.state.needsGrant == [.allowList])
+        #expect(await c.verifyAccess(.positions))
+    }
+
     @Test func successfulReadClearsNeedsGrant() async throws {
         let rig = Self.rig(try FakeSystem(allow: [(Self.a, false)]), state: HidingState(needsGrant: [.allowList]))
         let c = rig.controller()
@@ -952,11 +972,14 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(system.positions["status:YeeHaw::YeeHaw"] == 135)
     }
 
-    @Test func placeOwnIconCreatesItsKeyUnderTheBundlePrefix() async throws {
+    @Test func placeOwnIconCreatesItsKeyUnderEveryPrefix() async throws {
+        // A notarized build is filed under its bundle ID, a development build under its
+        // executable name; with no key yet, both get the slot (a key macOS doesn't use is inert).
         let system = try Self.placementSystem([PositionKey.clock: 0, PositionKey.controlCenter: 122, "module:Battery": 148])
         try await Self.rig(system).controller().placeOwnIcon(Self.yeehaw, name: "YeeHaw")
         #expect(system.positions["status:\(Self.yeehaw)::YeeHaw"] == 135)
-        #expect(system.positions["status:YeeHaw::YeeHaw"] == nil)
+        #expect(system.positions["status:YeeHaw::YeeHaw"] == 135)
+        #expect(system.positionWrites == 1)
     }
 
     @Test func placeOwnIconAtTheLeftEndOfAnEmptyTable() async throws {

@@ -12,9 +12,8 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
     private var icons: IconImageProvider?
     private var statusItem: StatusItemController?
     private var watcher: AllowListWatcher?
-    /// Set at logout, restart and shutdown, so quitting leaves hidden apps hidden.
-    private var poweringOff = false
-    private var powerOffObserver: NSObjectProtocol?
+    /// Why this quit is happening, read from the quit Apple event in `applicationShouldTerminate`.
+    private var quitReason = LaunchRules.QuitReason.ordinary
 
     static func main() {
         let app = NSApplication.shared
@@ -41,13 +40,6 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
             return
         }
         Self.log.notice("YeeHaw started")
-        powerOffObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.poweringOff = true
-                Self.log.notice("Logging out or shutting down: hidden apps stay hidden")
-            }
-        }
 
         let grants = FileGrantStore()
         let controller = MenuBarController(
@@ -59,7 +51,8 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         icons = IconImageProvider()
         AppWindows.openSettings = { [weak self] in self?.openSettings() }
 
-        let steps = LaunchRules.steps(onboardingComplete: OnboardingRecord.isComplete)
+        let steps = LaunchRules.steps(onboardingComplete: OnboardingRecord.isComplete,
+                                      pendingReveal: controller.state.pendingReveal != nil)
         Task {
             for step in steps { await perform(step) }
         }
@@ -70,6 +63,14 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
     private func perform(_ step: LaunchRules.Step) async {
         guard let controller, let grants, let icons else { return }
         switch step {
+        case .endPendingReveal:
+            do {
+                try await controller.endReveal()
+                Self.log.notice("Undid a reveal left by a crash before onboarding")
+            } catch {
+                Self.log.error("Could not undo the reveal left by a crash: \(error, privacy: .public)")
+            }
+
         case .onboarding:
             let model = OnboardingModel(system: LiveOnboardingSystem(controller: controller, grants: grants))
             let finished = await OnboardingWindowController.run(model: model)
@@ -118,7 +119,7 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         let source = LiveOnboardingSystem(controller: controller, grants: grants)
         SettingsWindowController.show(model: {
             let model = SettingsModel(loginItem: LoginItemModel(service: MainAppLoginItem()),
-                                      permissions: LivePermissions(grants: grants),
+                                      permissions: LivePermissions(files: .live(grants: grants, controller: controller)),
                                       review: SwitchedOffReviewModel(source: source))
             model.onGrantFixed = { [weak self] _ in
                 guard self?.statusItem != nil else { return }
@@ -148,14 +149,25 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
-    /// Every ordinary quit (the menu's Quit YeeHaw, a quit Apple event) goes through the
-    /// controller, which switches back on everything YeeHaw switched off. A second call, after
-    /// the menu's own, finds nothing to do. At logout, restart and shutdown hidden apps stay
-    /// hidden (`LaunchRules.switchesBackOnAtTermination`). Debug runs exit before this.
+    /// Reads why YeeHaw is quitting while the quit Apple event is still the current one. Logout,
+    /// restart and shutdown carry a `kAEQuitReason`; the app menu's Quit, the status menu's Quit
+    /// YeeHaw and an ordinary quit event don't. Decided per quit, so a logout another app
+    /// cancelled leaves nothing behind.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        let code = event?.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue
+        quitReason = LaunchRules.QuitReason(code: code)
+        return .terminateNow
+    }
+
+    /// Every ordinary quit goes through the controller, which switches back on everything YeeHaw
+    /// switched off. A second call, after the status menu's own, finds nothing to do. At logout,
+    /// restart and shutdown hidden apps stay hidden (`LaunchRules.switchesBackOnAtTermination`).
+    /// Debug runs exit before this.
     func applicationWillTerminate(_ notification: Notification) {
         guard let controller else { return }
-        guard LaunchRules.switchesBackOnAtTermination(poweringOff: poweringOff) else {
-            Self.log.notice("Quitting for logout or shutdown; hidden apps stay hidden until next launch")
+        guard LaunchRules.switchesBackOnAtTermination(quitReason) else {
+            Self.log.notice("Quitting for \(String(describing: self.quitReason), privacy: .public); hidden apps stay hidden until next launch")
             return
         }
         do {

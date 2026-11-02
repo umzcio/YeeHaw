@@ -168,7 +168,23 @@ final class FakePermissions: PermissionSystem {
         #expect(model.review.apps.allSatisfy { !$0.ticked })
     }
 
-    @Test func screenRecordingsFixNeverAsksForCapture() {
+    @Test func thePollPicksUpSystemPermissionsAndLeavesFileGrantsAlone() {
+        let (permissions, _, model) = Self.model(granted: [.allowList])
+        permissions.granted = [.accessibility, .screenRecording, .layoutFile]
+        model.refreshSystemPermissions()
+        #expect(model.state(of: .accessibility) == .granted)
+        #expect(model.state(of: .screenRecording) == .granted)
+        // File grants are re-read only when the window opens or comes to the front.
+        #expect(model.state(of: .allowList) == .granted)
+        #expect(model.state(of: .layoutFile) == .missing)
+        permissions.granted = []
+        model.refreshSystemPermissions()
+        #expect(model.state(of: .accessibility) == .missing)
+        #expect(model.state(of: .screenRecording) == .optionalOff)
+        #expect(model.state(of: .allowList) == .granted)
+    }
+
+    @Test func systemPermissionsAreFixedByOpeningTheirPane() {
         // Fix opens System Settings at the right pane; it never calls CGRequestScreenCaptureAccess.
         #expect(AppPermission.screenRecording.settingsURL?.absoluteString
                 == "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
@@ -176,5 +192,61 @@ final class FakePermissions: PermissionSystem {
                 == "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         #expect(AppPermission.allowList.settingsURL == nil)
         #expect(AppPermission.layoutFile.settingsURL == nil)
+    }
+}
+
+@MainActor
+@Suite struct FileAccessTests {
+    final class Calls {
+        var bookmarks: Set<GrantedFile> = []
+        var flagged: Set<GrantedFile> = []
+        var panelAnswer = true
+        var readable: Set<GrantedFile> = []
+        var log: [String] = []
+    }
+
+    static func access(_ calls: Calls) -> FileAccess {
+        FileAccess(hasBookmark: { calls.bookmarks.contains($0) },
+                   flagged: { calls.flagged },
+                   requestGrant: { calls.log.append("panel \($0.rawValue)"); return calls.panelAnswer },
+                   verify: { calls.log.append("read \($0.rawValue)"); return calls.readable.contains($0) })
+    }
+
+    @Test func aBookmarkAloneIsNotEnoughWhileTheControllerSaysAccessFails() {
+        let calls = Calls()
+        calls.bookmarks = [.allowList, .positions]
+        calls.flagged = [.positions]
+        let access = Self.access(calls)
+        #expect(access.isUsable(.allowList))
+        #expect(!access.isUsable(.positions))
+        calls.bookmarks = []
+        #expect(!access.isUsable(.allowList))
+    }
+
+    @Test func checkingReadsThroughTheGrant() async {
+        let calls = Calls()
+        calls.bookmarks = [.allowList, .positions]
+        calls.readable = [.positions]
+        let access = Self.access(calls)
+        #expect(await !access.check(.allowList))
+        #expect(await access.check(.positions))
+        calls.bookmarks = []
+        calls.log = []
+        #expect(await !access.check(.positions))
+        #expect(calls.log.isEmpty)
+    }
+
+    @Test func aGrantCountsOnlyOnceTheFileReads() async {
+        let calls = Calls()
+        let access = Self.access(calls)
+        calls.readable = []
+        #expect(await !access.grant(.allowList))
+        #expect(calls.log == ["panel allowList", "read allowList"])
+        calls.readable = [.allowList]
+        #expect(await access.grant(.allowList))
+        calls.panelAnswer = false
+        calls.log = []
+        #expect(await !access.grant(.positions))
+        #expect(calls.log == ["panel positions"])
     }
 }

@@ -53,16 +53,37 @@ import Testing
 
     @Test func laterRunsSkipOnboarding() {
         #expect(LaunchRules.steps(onboardingComplete: true) == [.launchController, .showStatusItem])
+        // launch() restores a reveal left by a crash itself.
+        #expect(LaunchRules.steps(onboardingComplete: true, pendingReveal: true) == [.launchController, .showStatusItem])
+    }
+
+    @Test func aRevealLeftByACrashIsUndoneBeforeOnboarding() {
+        #expect(LaunchRules.steps(onboardingComplete: false, pendingReveal: true)
+                == [.endPendingReveal, .onboarding, .launchController, .showStatusItem])
     }
 
     // MARK: Termination
 
-    @Test func anOrdinaryQuitSwitchesHiddenAppsBackOn() {
-        #expect(LaunchRules.switchesBackOnAtTermination(poweringOff: false))
+    @Test func quitReasonsAreReadFromTheAppleEventCode() {
+        func code(_ text: String) -> UInt32 { text.utf8.reduce(0) { $0 << 8 | UInt32($1) } }
+        #expect(LaunchRules.QuitReason(code: nil) == .ordinary)
+        #expect(LaunchRules.QuitReason(code: code("logo")) == .logout)
+        #expect(LaunchRules.QuitReason(code: code("rlgo")) == .logout)
+        #expect(LaunchRules.QuitReason(code: code("rrst")) == .restart)
+        #expect(LaunchRules.QuitReason(code: code("rest")) == .restart)
+        #expect(LaunchRules.QuitReason(code: code("rsdn")) == .shutdown)
+        #expect(LaunchRules.QuitReason(code: code("shut")) == .shutdown)
+        #expect(LaunchRules.QuitReason(code: code("abcd")) == .ordinary)
     }
 
-    @Test func logoutAndShutdownKeepAppsHidden() {
-        #expect(!LaunchRules.switchesBackOnAtTermination(poweringOff: true))
+    @Test func anOrdinaryQuitSwitchesHiddenAppsBackOn() {
+        #expect(LaunchRules.switchesBackOnAtTermination(.ordinary))
+    }
+
+    @Test func logoutRestartAndShutdownKeepAppsHidden() {
+        for reason in [LaunchRules.QuitReason.logout, .restart, .shutdown] {
+            #expect(!LaunchRules.switchesBackOnAtTermination(reason))
+        }
     }
 }
 

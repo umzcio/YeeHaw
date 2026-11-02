@@ -86,6 +86,25 @@ public enum ControllerError: Error, Equatable {
         }
     }
 
+    /// Reads `file` once through its grant: true when that works, which clears a `needsGrant`
+    /// left by an earlier failure; false records it. Writes nothing to the file.
+    public func verifyAccess(_ file: GrantedFile) async -> Bool {
+        do {
+            try await gated {
+                switch file {
+                case .allowList: _ = try readAllow()
+                case .positions: _ = try readPositions()
+                }
+            }
+            return true
+        } catch ControllerError.needsGrant {
+            return false
+        } catch {
+            // Read but malformed: access works, and the controller refuses to write it anyway.
+            return true
+        }
+    }
+
     public func refresh() async {
         await enterGate()
         defer { leaveGate() }
@@ -186,8 +205,8 @@ public enum ControllerError: Error, Equatable {
 
     /// Places YeeHaw's own icon immediately left of Control Center (first run, ruling R6): every
     /// existing key of `id` under any of its prefixes gets `slotValue(leftOf: controlCenter)`,
-    /// measured without those keys; with none, `status:<first prefix>::<name>` is created, which
-    /// macOS uses when the icon is first drawn. Throws `.unresolvedNeighbor` when the table has no
+    /// measured without those keys; with none, `status:<prefix>::<name>` is created under every
+    /// prefix, and macOS uses the one it files the icon under when it's first drawn. Throws `.unresolvedNeighbor` when the table has no
     /// Control Center key, rather than guessing a place.
     public func placeOwnIcon(_ id: BundleID, name: String) async throws {
         try await gated {
@@ -196,7 +215,9 @@ public enum ControllerError: Error, Equatable {
             guard values[PositionKey.controlCenter] != nil else { throw ControllerError.unresolvedNeighbor }
             let starts = prefixes.map { "status:\($0)::" }
             var keys = values.keys.filter { key in starts.contains { key.hasPrefix($0) } }.sorted()
-            if keys.isEmpty, let first = prefixes.first { keys = ["status:\(first)::\(name)"] }
+            // No key yet: one under every prefix, since which one macOS files YeeHaw under
+            // depends on how the build is signed (an unused key is inert, as in revealKeys).
+            if keys.isEmpty { keys = prefixes.map { "status:\($0)::\(name)" } }
             let others = PositionTable(values.filter { !keys.contains($0.key) })
             let slot = others.slotValue(leftOf: PositionKey.controlCenter)
             try writePositions(Dictionary(uniqueKeysWithValues: keys.map { ($0, slot) }))

@@ -36,6 +36,9 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
 
         window.titleVisibility = .hidden
         window.keepsTopEdge = true
+        // Onboarding is finished, not put away: no minimize, and nothing to zoom.
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        window.standardWindowButton(.zoomButton)?.isHidden = true
         let hosting = NSHostingController(rootView: OnboardingView(model: model))
         hosting.sizingOptions = [.preferredContentSize]
         window.contentViewController = hosting
@@ -147,14 +150,19 @@ struct OnboardingView: View {
     }
 }
 
-/// YeeHaw's hat on an accent-coloured tile, standing in for the app icon at the top.
+extension Color {
+    /// YeeHaw's own colour, the same on every Mac (the system accent varies), for its hat tile.
+    static let yeehawBrand = Color(red: 0.84, green: 0.35, blue: 0.17)
+}
+
+/// YeeHaw's hat on a tile in its brand colour, standing in for the app icon at the top.
 private struct HatBadge: View {
     @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
         shape
-            .fill(Color.accentColor.gradient)
+            .fill(Color.yeehawBrand.gradient)
             .overlay {
                 Image(nsImage: StatusGlyph.image())
                     .renderingMode(.template)
@@ -196,7 +204,7 @@ private struct OnboardingStepRow: View {
         VStack(alignment: .leading, spacing: 0) {
             if isSelectable {
                 Button { model.select(step) } label: { headerLine }
-                    .buttonStyle(.plain)
+                    .buttonStyle(StepHeaderButtonStyle())
                     .accessibilityHint(isExpanded ? "Hides this step"
                                        : (step == model.current ? "Goes back to this step" : "Shows this step again"))
             } else {
@@ -229,7 +237,7 @@ private struct OnboardingStepRow: View {
             if isDone, step != model.current {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
                     .accessibilityHidden(true)
             }
@@ -240,6 +248,32 @@ private struct OnboardingStepRow: View {
         .accessibilityLabel("Step \(step.number) of \(OnboardingStep.allCases.count): \(step.title)")
         .accessibilityValue(isDone ? (model.summary(of: step) ?? "Done") : (isUpcoming ? "Not yet" : "In progress"))
         .accessibilityAddTraits(isExpanded ? [.isHeader, .isSelected] : .isHeader)
+    }
+}
+
+/// A step header that can be clicked: a faint rounded highlight while the pointer is over it,
+/// a little stronger while pressed, like a sidebar row.
+private struct StepHeaderButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Highlighted(configuration: configuration)
+    }
+
+    private struct Highlighted: View {
+        let configuration: Configuration
+        @State private var hovering = false
+        @Environment(\.colorSchemeContrast) private var contrast
+
+        var body: some View {
+            let strength = configuration.isPressed ? 0.09 : (hovering ? 0.05 : 0)
+            configuration.label
+                .background {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(contrast == .increased ? strength * 1.8 : strength))
+                        .padding(.horizontal, -8)
+                        .padding(.vertical, 5)
+                }
+                .onHover { hovering = $0 }
+        }
     }
 }
 
@@ -289,10 +323,16 @@ private struct OnboardingStepDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(step.explanation)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(step.explanation)
+                if step == .accessibility, !isDone {
+                    Text("Turn on YeeHaw in the list. If it isn’t listed, click + and choose it from Applications. "
+                         + "This step completes on its own.")
+                }
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
             switch step {
             case .accessibility: accessibility
             case .allowList: grant(.allowList)
@@ -305,9 +345,9 @@ private struct OnboardingStepDetail: View {
     }
 
     private var accessibility: some View {
-        actionRow(note: isDone ? nil : "Turn on YeeHaw in the list. This step ticks itself off.") {
+        actionRow(note: nil) {
             if isDone {
-                doneLabel("YeeHaw is turned on")
+                doneLabel(AppPermission.grantedStatus)
             } else {
                 primary("Open System Settings") { model.openAccessibility() }
             }
@@ -318,9 +358,9 @@ private struct OnboardingStepDetail: View {
         actionRow(note: model.grantRefused == file ? "YeeHaw didn’t get access. Keep the selected file and click Allow." : nil,
                   warning: true) {
             if isDone {
-                doneLabel("Access granted")
+                doneLabel(AppPermission.grantedStatus)
             } else {
-                primary("Choose File…") { Task { await model.requestGrant(file) } }
+                primary(AppPermission.grantActionTitle) { Task { await model.requestGrant(file) } }
                     .disabled(step != model.current)
             }
         }
@@ -329,7 +369,8 @@ private struct OnboardingStepDetail: View {
     private var review: some View {
         VStack(alignment: .leading, spacing: 12) {
             SwitchedOffList(model: model.review)
-            actionRow(note: model.review.error, warning: true) {
+            // A read failure shows in the list itself; only a failed move shows here.
+            actionRow(note: model.review.loaded ? model.review.error : nil, warning: true) {
                 if model.review.isCommitting {
                     ProgressView().controlSize(.small)
                 }
@@ -409,9 +450,9 @@ private struct OnboardingStepDetail: View {
 extension OnboardingStep {
     var title: String {
         switch self {
-        case .accessibility: "Turn on Device Control and Data Access"
-        case .allowList: "Grant the menu bar’s Allow list"
-        case .layoutFile: "Grant the menu bar’s layout file"
+        case .accessibility: "Allow \(AppPermission.accessibility.title)"
+        case .allowList: "Give access to the \(AppPermission.allowList.title)"
+        case .layoutFile: "Give access to the \(AppPermission.layoutFile.title)"
         case .review: "Review switched-off apps"
         case .placeIcon: "Place YeeHaw’s icon"
         }
@@ -432,7 +473,7 @@ extension OnboardingStep {
                 + "when you rearrange icons, and briefly to open a hidden icon next to its own. The file is "
                 + "already selected: just click Allow."
         case .review:
-            "These apps are switched off in System Settings → Menu Bar. Tick any you’d like YeeHaw to look "
+            "These apps are switched off in System Settings → Menu Bar. Select any you’d like YeeHaw to look "
                 + "after: they move to Hidden and open from YeeHaw’s strip. The rest stay off, and YeeHaw leaves "
                 + "them alone."
         case .placeIcon:
@@ -447,8 +488,7 @@ extension OnboardingModel {
     func summary(of step: OnboardingStep) -> String? {
         guard isDone(step) else { return nil }
         switch step {
-        case .accessibility: return "On"
-        case .allowList, .layoutFile: return "Granted"
+        case .accessibility, .allowList, .layoutFile: return AppPermission.grantedStatus
         case .review:
             if review.adoptedCount > 0 {
                 return review.adoptedCount == 1 ? "1 app moved to Hidden" : "\(review.adoptedCount) apps moved to Hidden"

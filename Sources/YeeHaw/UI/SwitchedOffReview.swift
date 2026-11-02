@@ -65,7 +65,22 @@ final class SwitchedOffReviewModel {
         apps[index].ticked = ticked
     }
 
+    /// Select All / Select None.
+    func setAllTicked(_ ticked: Bool) {
+        for index in apps.indices { apps[index].ticked = ticked }
+    }
+
     var tickedIDs: [BundleID] { apps.filter(\.ticked).map(\.id) }
+    var allTicked: Bool { !apps.isEmpty && apps.allSatisfy(\.ticked) }
+
+    /// The line above the list, while there's one.
+    var countTitle: String? {
+        switch apps.count {
+        case 0: nil
+        case 1: "1 app is switched off"
+        case let n: "\(n) apps are switched off"
+        }
+    }
 
     /// The commit button's title while something is ticked, else nil.
     var commitTitle: String? {
@@ -97,10 +112,11 @@ final class SwitchedOffReviewModel {
     }
 }
 
-/// The switched-off apps as a checklist in a rounded well, scrolling past `visibleRows`.
+/// The switched-off apps as a checklist in a rounded well, scrolling past `visibleRows`, under a
+/// line that counts them and selects all or none.
 struct SwitchedOffList: View {
     static let rowHeight: CGFloat = 30
-    static let visibleRows = 6
+    static let visibleRows = 9
     static let horizontalPadding: CGFloat = 12
     /// Where the app icons start: past the padding and the checkbox with its gap.
     static let iconInset: CGFloat = horizontalPadding + 22
@@ -108,8 +124,34 @@ struct SwitchedOffList: View {
     let model: SwitchedOffReviewModel
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let count = model.countTitle {
+                header(count)
+            }
+            list
+        }
+    }
+
+    private func header(_ count: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(count)
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button(model.allTicked ? "Select None" : "Select All") {
+                model.setAllTicked(!model.allTicked)
+            }
+            .buttonStyle(.link)
+            .font(.callout)
+            .disabled(model.isCommitting)
+            .accessibilityHint(model.allTicked ? "Unticks every app" : "Ticks every app")
+        }
+        .padding(.horizontal, 2)
+    }
+
+    private var list: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
-        Group {
+        return Group {
             if model.apps.isEmpty {
                 Text(model.loaded ? "No apps are switched off." : (model.error ?? ""))
                     .font(.callout)
@@ -117,7 +159,10 @@ struct SwitchedOffList: View {
                     .frame(maxWidth: .infinity, minHeight: Self.rowHeight + 8)
             } else if model.apps.count > Self.visibleRows {
                 ScrollView(.vertical) { rows }
-                    .frame(height: Self.rowHeight * (CGFloat(Self.visibleRows) + 0.5))
+                    .scrollIndicators(.visible)
+                    // Cut through the middle of the next row, so the list plainly goes on
+                    // (overlay scrollers stay hidden until the list is scrolled).
+                    .frame(height: (Self.rowHeight + 1) * CGFloat(Self.visibleRows) + Self.rowHeight / 2)
             } else {
                 rows
             }

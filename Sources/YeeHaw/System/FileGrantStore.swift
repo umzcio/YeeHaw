@@ -58,6 +58,13 @@ final class FileGrantStore: Sendable {
         return url
     }
 
+    /// Whether the file has a grant that resolves (without keeping access open).
+    func hasGrant(_ file: GrantedFile) -> Bool {
+        guard let url = url(for: file) else { return false }
+        url.stopAccessingSecurityScopedResource()
+        return true
+    }
+
     /// Asks the user to pick the file in an open panel pointed at it. Returns true only if they
     /// picked exactly that file and its bookmark was saved.
     @MainActor

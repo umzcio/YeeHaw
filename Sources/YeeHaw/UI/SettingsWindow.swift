@@ -26,8 +26,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     private init(model: SettingsModel) {
         self.model = model
-        window = AuxiliaryPanel(width: SettingsView.width, title: "Settings")
+        window = AuxiliaryPanel(width: SettingsView.width, title: "YeeHaw Settings")
         super.init()
+        window.styleMask.insert(.miniaturizable)
         window.keepsTopEdge = true
         let hosting = NSHostingController(rootView: SettingsView(model: model))
         hosting.sizingOptions = [.preferredContentSize]
@@ -68,32 +69,33 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 // MARK: - Content
 
 struct SettingsView: View {
-    static let width: CGFloat = 520
+    static let width: CGFloat = 560
     static let boxRadius: CGFloat = 10
 
     @Bindable var model: SettingsModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            box { loginRow }
-            sectionTitle("Permissions")
-                .padding(.top, 22)
-            box {
-                ForEach(AppPermission.allCases) { permission in
-                    if permission != .accessibility { insetDivider }
-                    PermissionRow(permission: permission, state: model.state(of: permission),
-                                  isBusy: model.fixing != nil) {
-                        Task { await model.fix(permission) }
+            section("General") {
+                box { loginRow }
+            }
+            section("Permissions") {
+                box {
+                    ForEach(AppPermission.allCases) { permission in
+                        if permission != .accessibility { insetDivider }
+                        PermissionRow(permission: permission, state: model.state(of: permission),
+                                      isBusy: model.fixing != nil) {
+                            Task { await model.fix(permission) }
+                        }
                     }
                 }
+                footnote("YeeHaw changes only the menu bar’s own settings and never reads your windows or what you type.")
             }
-            Text("YeeHaw changes only the menu bar’s own settings. Screen Recording, if you turn it on, is used only to picture menu bar icons in the strip.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 8)
-            box { reviewRow }
-                .padding(.top, 22)
+            .padding(.top, Self.sectionGap)
+            section("Switched-Off Apps") {
+                box { reviewRow }
+            }
+            .padding(.top, Self.sectionGap)
         }
         .padding(.horizontal, 20)
         .padding(.top, 6)
@@ -104,56 +106,51 @@ struct SettingsView: View {
         }
     }
 
+    private static let sectionGap: CGFloat = 20
+
     // MARK: Rows
 
     private var loginRow: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
+                // Read once, as the switch's label and hint.
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Open at Login")
-                    Text("YeeHaw starts when you log in, and keeps your hidden icons hidden.")
+                    Text(Self.loginDetail)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .accessibilityElement(children: .combine)
+                .accessibilityHidden(true)
                 Spacer(minLength: 12)
                 Toggle("Open at Login", isOn: Binding(get: { model.loginItem.isOn }, set: { model.loginItem.setOn($0) }))
                     .toggleStyle(.switch)
                     .labelsHidden()
+                    .accessibilityHint(Self.loginDetail)
             }
             if model.loginItem.needsApproval {
                 HStack(spacing: 8) {
-                    Label("Waiting for your approval in System Settings → General → Login Items.",
-                          systemImage: "exclamationmark.triangle.fill")
-                        .symbolRenderingMode(.multicolor)
-                        .font(.callout)
-                        .fixedSize(horizontal: false, vertical: true)
+                    warning("Waiting for your approval in System Settings → General → Login Items.")
                     Spacer(minLength: 8)
                     Button("Open Login Items…") { model.loginItem.openLoginItems() }
-                        .controlSize(.small)
                 }
             }
             if let error = model.loginItem.error {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .symbolRenderingMode(.multicolor)
-                    .font(.callout)
+                warning(error)
             }
         }
         .padding(.horizontal, PermissionRow.horizontalPadding)
         .padding(.vertical, 11)
     }
 
+    private static let loginDetail = "YeeHaw starts when you log in, and keeps your hidden icons hidden."
+
     private var reviewRow: some View {
         HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Switched-Off Apps")
-                Text("Apps you switched off in System Settings → Menu Bar stay off, and YeeHaw leaves them alone unless you move them to Hidden.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .accessibilityElement(children: .combine)
+            Text("Apps you switched off in System Settings → Menu Bar stay off, and YeeHaw leaves them alone unless you move them to Hidden.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 12)
             Button("Review…") { model.openReview() }
                 .accessibilityLabel("Review switched-off apps")
@@ -164,11 +161,32 @@ struct SettingsView: View {
 
     // MARK: Pieces
 
-    private func sectionTitle(_ title: String) -> some View {
-        Text(title)
-            .font(.headline)
-            .accessibilityAddTraits(.isHeader)
-            .padding(.bottom, 8)
+    /// A titled group: a header above its card, the same rhythm for every group.
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title)
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
+                .padding(.leading, 2)
+                .padding(.bottom, 8)
+            content()
+        }
+    }
+
+    private func footnote(_ text: String) -> some View {
+        Text(text)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, 8)
+            .padding(.leading, 2)
+    }
+
+    private func warning(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.triangle.fill")
+            .symbolRenderingMode(.multicolor)
+            .font(.callout)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func box<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -187,12 +205,16 @@ struct SettingsView: View {
     }
 }
 
-/// One permission: an icon tile, its name and what it's for, its status, and a fix when it's off.
+/// One permission: an icon tile, its name and what it's for, and at the trailing edge either
+/// "Allowed" or the button that fixes it. The trailing column has one width, so every row's
+/// status and button end on the same line.
 private struct PermissionRow: View {
     static let horizontalPadding: CGFloat = 12
     static let tileSize: CGFloat = 26
     static let tileGap: CGFloat = 10
     static let textInset: CGFloat = horizontalPadding + tileSize + tileGap
+    /// Fits the widest button, "Grant Access…".
+    static let trailingWidth: CGFloat = 118
 
     let permission: AppPermission
     let state: SettingsModel.PermissionState
@@ -201,7 +223,7 @@ private struct PermissionRow: View {
 
     var body: some View {
         HStack(spacing: Self.tileGap) {
-            PermissionTile(symbol: permission.symbol, color: permission.tint)
+            PermissionTile(symbol: permission.symbol, color: permission.tint, isMissing: state == .missing)
             VStack(alignment: .leading, spacing: 2) {
                 Text(permission.title)
                 Text(permission.detail)
@@ -211,13 +233,8 @@ private struct PermissionRow: View {
             }
             .accessibilityElement(children: .combine)
             Spacer(minLength: 12)
-            status
-            if state != .granted {
-                Button(state == .optionalOff ? "Turn On…" : "Fix…", action: onFix)
-                    .disabled(isBusy)
-                    .help(permission.file != nil ? "Choose the file again" : "Opens Privacy & Security in System Settings")
-                    .accessibilityLabel(state == .optionalOff ? "Turn on \(permission.title)" : "Fix \(permission.title)")
-            }
+            trailing
+                .frame(width: Self.trailingWidth, alignment: .trailing)
         }
         .padding(.horizontal, Self.horizontalPadding)
         .padding(.vertical, 9)
@@ -225,11 +242,11 @@ private struct PermissionRow: View {
     }
 
     @ViewBuilder
-    private var status: some View {
+    private var trailing: some View {
         switch state {
         case .granted:
             Label {
-                Text("Allowed")
+                Text(AppPermission.grantedStatus)
             } icon: {
                 Image(systemName: "checkmark.circle.fill")
                     .symbolRenderingMode(.palette)
@@ -237,23 +254,27 @@ private struct PermissionRow: View {
             }
             .font(.callout)
             .foregroundStyle(.secondary)
-        case .missing:
-            Label("Not Allowed", systemImage: "exclamationmark.triangle.fill")
-                .symbolRenderingMode(.multicolor)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        case .optionalOff:
-            Text("Off")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            .accessibilityLabel("\(permission.title): \(AppPermission.grantedStatus)")
+        case .missing, .optionalOff:
+            fixButton
         }
+    }
+
+    private var fixButton: some View {
+        Button(permission.fixTitle, action: onFix)
+            .disabled(isBusy)
+            .help(permission.fixHelp)
+            .accessibilityLabel("\(permission.fixTitle.replacingOccurrences(of: "…", with: "")): \(permission.title)")
+            .accessibilityValue(state == .missing ? "Not allowed" : "Off")
     }
 }
 
-/// A System Settings-style icon: a white symbol on a coloured rounded square.
+/// A System Settings-style icon: a white symbol on a coloured rounded square, badged with a
+/// warning while a required permission is missing.
 private struct PermissionTile: View {
     let symbol: String
     let color: Color
+    var isMissing = false
 
     var body: some View {
         RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -264,6 +285,16 @@ private struct PermissionTile: View {
                     .foregroundStyle(.white)
             }
             .frame(width: PermissionRow.tileSize, height: PermissionRow.tileSize)
+            .overlay(alignment: .bottomTrailing) {
+                if isMissing {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, .orange)
+                        .background(Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(-1.5))
+                        .offset(x: 5, y: 5)
+                }
+            }
             .accessibilityHidden(true)
     }
 }

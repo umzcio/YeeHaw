@@ -17,8 +17,13 @@ enum OnboardingStep: Int, CaseIterable, Identifiable, Comparable {
 @MainActor
 protocol OnboardingSystem: SwitchedOffSource {
     func isTrusted() -> Bool
-    func hasGrant(_ file: GrantedFile) -> Bool
+    /// Whether the file reads through its grant now.
+    func hasGrant(_ file: GrantedFile) async -> Bool
+    /// The open panel, then a read; true only when the file reads through the new grant.
     func requestGrant(_ file: GrantedFile) async -> Bool
+    /// Asks macOS about Accessibility in the way that adds YeeHaw to Privacy & Security →
+    /// Accessibility, so the pane has a row to turn on (it's absent until an app asks).
+    func registerWithAccessibility()
     func openAccessibilitySettings()
     /// Writes YeeHaw's own position key just left of Control Center.
     func placeOwnIcon() async throws
@@ -64,7 +69,9 @@ final class OnboardingModel {
     /// Reads where the Mac stands. Call once when the window opens.
     func start() async {
         trusted = system.isTrusted()
-        granted = Set([GrantedFile.allowList, .positions].filter(system.hasGrant))
+        var granted: Set<GrantedFile> = []
+        for file in [GrantedFile.allowList, .positions] where await system.hasGrant(file) { granted.insert(file) }
+        self.granted = granted
         if granted.contains(.allowList) { review.reload() }
         if granted.contains(.positions), await system.ownIconIsPlaced() { placement = .placed }
         Self.log.notice("Onboarding opened at step \(self.current.map { String($0.number) } ?? "done", privacy: .public)")
@@ -110,7 +117,9 @@ final class OnboardingModel {
 
     // MARK: Actions
 
+    /// Registers YeeHaw with Accessibility first, so it's listed when the pane opens.
     func openAccessibility() {
+        system.registerWithAccessibility()
         system.openAccessibilitySettings()
     }
 
@@ -168,22 +177,26 @@ final class OnboardingModel {
 @MainActor
 final class LiveOnboardingSystem: OnboardingSystem {
     private let controller: MenuBarController
-    private let grants: FileGrantStore
+    private let files: FileAccess
 
     init(controller: MenuBarController, grants: FileGrantStore) {
         self.controller = controller
-        self.grants = grants
+        files = .live(grants: grants, controller: controller)
     }
 
     func isTrusted() -> Bool { AXIsProcessTrusted() }
 
-    func hasGrant(_ file: GrantedFile) -> Bool {
-        guard let url = grants.url(for: file) else { return false }
-        url.stopAccessingSecurityScopedResource()
-        return true
-    }
+    func hasGrant(_ file: GrantedFile) async -> Bool { await files.check(file) }
 
-    func requestGrant(_ file: GrantedFile) async -> Bool { await grants.requestGrant(for: file) }
+    func requestGrant(_ file: GrantedFile) async -> Bool { await files.grant(file) }
+
+    /// `AXIsProcessTrustedWithOptions` with the prompt option is what adds an app to the
+    /// Accessibility list (a plain `AXIsProcessTrusted` doesn't). macOS shows its own prompt the
+    /// first time, whose button opens the same pane; once trusted it's a plain check. The key is
+    /// `kAXTrustedCheckOptionPrompt`'s value, which Swift 6 can't read from the global.
+    func registerWithAccessibility() {
+        _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+    }
 
     func openAccessibilitySettings() {
         if let url = AppPermission.accessibility.settingsURL { NSWorkspace.shared.open(url) }

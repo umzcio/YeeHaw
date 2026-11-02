@@ -21,15 +21,21 @@ final class FakeOnboardingSystem: OnboardingSystem {
     private(set) var placements = 0
     private(set) var settingsOpened = 0
     private(set) var placementChecks = 0
+    /// Accessibility registrations and pane openings, in order.
+    private(set) var accessibilityCalls: [String] = []
 
     func isTrusted() -> Bool { trusted }
-    func hasGrant(_ file: GrantedFile) -> Bool { grants.contains(file) }
+    func hasGrant(_ file: GrantedFile) async -> Bool { grants.contains(file) }
     func requestGrant(_ file: GrantedFile) async -> Bool {
         grantRequests.append(file)
         if grantAnswer { grants.insert(file) }
         return grantAnswer
     }
-    func openAccessibilitySettings() { settingsOpened += 1 }
+    func registerWithAccessibility() { accessibilityCalls.append("register") }
+    func openAccessibilitySettings() {
+        settingsOpened += 1
+        accessibilityCalls.append("open")
+    }
     func switchedOff() throws -> [SwitchedOffApp] {
         if let switchedOffError { throw switchedOffError }
         return switchedOffApps
@@ -127,6 +133,24 @@ struct Boom: Error {}
         #expect(review.error != nil)
     }
 
+    @Test func selectAllTicksEveryAppAndSelectNoneClearsThem() {
+        let (_, review) = Self.loaded(["Alpha", "Beta", "Gamma"])
+        #expect(!review.allTicked)
+        review.setAllTicked(true)
+        #expect(review.allTicked)
+        #expect(review.tickedIDs.count == 3)
+        review.setTicked(false, for: "com.example.beta")
+        #expect(!review.allTicked)
+        review.setAllTicked(false)
+        #expect(review.tickedIDs.isEmpty)
+    }
+
+    @Test func theListSaysHowManyAppsAreOff() {
+        #expect(Self.loaded(["Alpha"]).1.countTitle == "1 app is switched off")
+        #expect(Self.loaded(["Alpha", "Beta"]).1.countTitle == "2 apps are switched off")
+        #expect(Self.loaded([]).1.countTitle == nil)
+    }
+
     @Test func commitTitleCountsTicks() {
         let (_, review) = Self.loaded(["Alpha", "Beta"])
         #expect(review.commitTitle == nil)
@@ -166,6 +190,13 @@ struct Boom: Error {}
         #expect(model.isDone(.layoutFile))
         #expect(model.current == .review)
         #expect(model.review.apps.map(\.name) == ["OneDrive"])
+    }
+
+    @Test func openingAccessibilityRegistersYeeHawBeforeOpeningThePane() async {
+        // Registering puts YeeHaw in the Accessibility list, so the pane has a row to turn on.
+        let (system, model) = await Self.model()
+        model.openAccessibility()
+        #expect(system.accessibilityCalls == ["register", "open"])
     }
 
     @Test func accessibilityAdvancesWhenTrustArrives() async {

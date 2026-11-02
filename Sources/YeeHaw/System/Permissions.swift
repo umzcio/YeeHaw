@@ -29,6 +29,27 @@ enum AppPermission: CaseIterable, Identifiable, Hashable {
 
     var isOptional: Bool { self == .screenRecording }
 
+    /// The one word for a permission YeeHaw has, in Settings and onboarding alike.
+    static let grantedStatus = "Allowed"
+    /// The button that opens a file's grant panel (with the file already selected), in both windows.
+    static let grantActionTitle = "Grant Access…"
+
+    /// Settings' button for a permission YeeHaw doesn't have.
+    var fixTitle: String {
+        switch self {
+        case .accessibility: "Fix…"
+        case .allowList, .layoutFile: Self.grantActionTitle
+        case .screenRecording: "Turn On…"
+        }
+    }
+
+    var fixHelp: String {
+        switch self {
+        case .allowList, .layoutFile: "Opens the file panel with the file already selected"
+        case .accessibility, .screenRecording: "Opens Privacy & Security in System Settings"
+        }
+    }
+
     /// An SF Symbol for the row's icon tile.
     var symbol: String {
         switch self {
@@ -68,30 +89,67 @@ protocol PermissionSystem: AnyObject {
     func fix(_ permission: AppPermission) async -> Bool
 }
 
+/// Whether YeeHaw can really use a protected file, not just whether its bookmark resolves: the
+/// controller records `needsGrant` when a read or write fails with a resolvable bookmark (a nil
+/// read, a refused synchronize), and a fresh grant only counts once the file reads through it.
+/// Shared by Settings' rows and onboarding's grant steps.
+@MainActor
+struct FileAccess {
+    var hasBookmark: (GrantedFile) -> Bool
+    /// The controller's `state.needsGrant`.
+    var flagged: () -> Set<GrantedFile>
+    /// The open panel; true when the user picked the file.
+    var requestGrant: (GrantedFile) async -> Bool
+    /// One read through the grant (`MenuBarController.verifyAccess`), which also clears or
+    /// records `needsGrant`.
+    var verify: (GrantedFile) async -> Bool
+
+    /// Quick, for a status shown at once: a bookmark, and no failure recorded since.
+    func isUsable(_ file: GrantedFile) -> Bool {
+        hasBookmark(file) && !flagged().contains(file)
+    }
+
+    /// Thorough: a bookmark, and the file reads through it now.
+    func check(_ file: GrantedFile) async -> Bool {
+        guard hasBookmark(file) else { return false }
+        return await verify(file)
+    }
+
+    /// Asks for the file, then reads it, so a pick that doesn't give access isn't reported as one.
+    func grant(_ file: GrantedFile) async -> Bool {
+        guard await requestGrant(file) else { return false }
+        return await verify(file)
+    }
+
+    static func live(grants: FileGrantStore, controller: MenuBarController) -> FileAccess {
+        FileAccess(hasBookmark: { grants.hasGrant($0) },
+                   flagged: { controller.state.needsGrant },
+                   requestGrant: { await grants.requestGrant(for: $0) },
+                   verify: { await controller.verifyAccess($0) })
+    }
+}
+
 /// The real checks. None of them prompts: Screen Recording is read with
 /// `CGPreflightScreenCaptureAccess` and fixed only in System Settings, never with
 /// `CGRequestScreenCaptureAccess`.
 @MainActor
 final class LivePermissions: PermissionSystem {
-    private let grants: FileGrantStore
+    private let files: FileAccess
 
-    init(grants: FileGrantStore) {
-        self.grants = grants
+    init(files: FileAccess) {
+        self.files = files
     }
 
     func isGranted(_ permission: AppPermission) -> Bool {
         switch permission {
         case .accessibility: return AXIsProcessTrusted()
         case .screenRecording: return CGPreflightScreenCaptureAccess()
-        case .allowList, .layoutFile:
-            guard let file = permission.file, let url = grants.url(for: file) else { return false }
-            url.stopAccessingSecurityScopedResource()
-            return true
+        case .allowList, .layoutFile: return permission.file.map(files.isUsable) ?? false
         }
     }
 
     func fix(_ permission: AppPermission) async -> Bool {
-        if let file = permission.file { return await grants.requestGrant(for: file) }
+        if let file = permission.file { return await files.grant(file) }
         if let url = permission.settingsURL { NSWorkspace.shared.open(url) }
         return false
     }

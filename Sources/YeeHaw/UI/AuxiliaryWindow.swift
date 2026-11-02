@@ -44,7 +44,8 @@ enum AppWindows {
 
     /// Call from `windowWillClose`. Once no YeeHaw window is left open, hands activation to
     /// whatever was in front before and leaves Command-Tab and the Dock. Not `hide`, which would
-    /// keep the strip from opening until YeeHaw is activated again.
+    /// keep the strip from opening until YeeHaw is activated again. (The About panel can't become
+    /// main, so it doesn't hold YeeHaw in the Dock.)
     static func windowClosing() {
         DispatchQueue.main.async {
             if !NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) {
@@ -54,13 +55,23 @@ enum AppWindows {
         }
     }
 
-    /// The menus YeeHaw shows while it's a regular app: Settings… and Quit, and the window's Close.
+    /// The menus YeeHaw shows while it's a regular app: the standard app menu (About, Settings…,
+    /// Hide, Quit) and the window's Close.
     private static func mainMenu() -> NSMenu {
         let main = NSMenu()
         let app = NSMenu(title: "YeeHaw")
+        app.addItem(withTitle: "About YeeHaw", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+                    keyEquivalent: "")
+        app.addItem(.separator())
         let settings = NSMenuItem(title: "Settings…", action: #selector(MenuActions.openSettings), keyEquivalent: ",")
         settings.target = MenuActions.shared
         app.addItem(settings)
+        app.addItem(.separator())
+        app.addItem(withTitle: "Hide YeeHaw", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = app.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)),
+                                     keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        app.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         app.addItem(.separator())
         app.addItem(withTitle: "Quit YeeHaw", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let window = NSMenu(title: "Window")
