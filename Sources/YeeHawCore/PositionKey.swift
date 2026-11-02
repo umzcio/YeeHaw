@@ -2,12 +2,14 @@ public enum PositionKey {
     public static let controlCenter = "module:BentoBox-0"
     public static let clock = "module:Clock"
 
-    /// The key prefixes MenuBarAgent may file an app's items under: the bundle ID, and for apps
-    /// that aren't notarized (Allow-list location `adhocBinary`) the executable name. Bundle ID
-    /// first, empty and duplicate names dropped.
-    public static func prefixes(bundleID: BundleID, executableName: String?) -> [String] {
+    /// The key prefixes MenuBarAgent may file an app's items under: the bundle ID, and for copies
+    /// that aren't notarized (Allow-list location `adhocBinary`) the executable name. Both are
+    /// kept, since an earlier copy may have left keys under the other; the running copy's own
+    /// prefix comes first, so a new key goes there (`notarized` is that copy's, the same check
+    /// as `RunningCopy.location`). Empty and duplicate names are dropped.
+    public static func prefixes(bundleID: BundleID, executableName: String?, notarized: Bool = true) -> [String] {
         guard let executableName, !executableName.isEmpty, executableName != bundleID else { return [bundleID] }
-        return [bundleID, executableName]
+        return notarized ? [bundleID, executableName] : [executableName, bundleID]
     }
 
     /// Every key in `table` under any of `prefixes` (`status:<prefix>::…`), sorted: all of an

@@ -118,6 +118,11 @@ written out below.
   domain, and `kCFPreferencesCurrentUser` / `kCFPreferencesAnyHost`.
   - Synchronize before reading and after writing.
   - Change only `isAllowed` on entries that already exist; `MenuBarAgent` adds entries itself.
+  - `MenuBarAgent` applies `isAllowed` only to a copy of the app listed in the entry's
+    `menuItemLocations`: a notarized copy as `{bundle: {_0: id}}`, any other (team signing isn't
+    enough) as `{adhocBinary: {_0: {relative: <executable file URL>}}}`. So every switch YeeHaw
+    writes appends the running copy's location if it's missing (append only), and a hidden app
+    opened from an unlisted copy gets the same, at launch and when YeeHaw starts.
   - This is the technique from floweredao/hidden PR #21, and it was verified on the owner's Mac on
     27.2.
 - **Access:** the file is protected. The user grants access once by picking it in an `NSOpenPanel`

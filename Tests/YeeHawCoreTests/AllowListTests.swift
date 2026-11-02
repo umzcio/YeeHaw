@@ -71,6 +71,75 @@ import Testing
         #expect(try Self.decode(list.encoded()) == Self.decode(data))
     }
 
+    // MARK: Locations
+
+    static let fiddle = "edu.umontana.fiddle"
+    static let debugFiddle = URL(fileURLWithPath: "/Users/me/fiddle/Debug/Fiddle.app/Contents/MacOS/Fiddle")
+
+    /// The owner's Fiddle entry: listed only under a debug build's executable.
+    static func fiddleBlob(locations: [[String: Any]]?) throws -> Data {
+        var value: [String: Any] = ["location": ["bundle": ["_0": fiddle]], "isAllowed": false, "extra": 7]
+        if let locations { value["menuItemLocations"] = locations }
+        return try PropertyListSerialization.data(fromPropertyList: [bundleKey(fiddle), value], format: .binary, options: 0)
+    }
+
+    static func value(_ list: AllowList) throws -> [String: Any] {
+        let items = try #require(PropertyListSerialization.propertyList(from: list.encoded(), options: [], format: nil) as? [Any])
+        return try #require(items[1] as? [String: Any])
+    }
+
+    @Test func aNotarizedCopyIsListedByBundleAndAnyOtherByItsExecutable() {
+        #expect(RunningCopy(bundleID: Self.fiddle, executableURL: Self.debugFiddle, notarized: true).location
+            == .bundle(Self.fiddle))
+        #expect(RunningCopy(bundleID: Self.fiddle, executableURL: Self.debugFiddle, notarized: false).location
+            == .adhocBinary("file:///Users/me/fiddle/Debug/Fiddle.app/Contents/MacOS/Fiddle"))
+    }
+
+    @Test func locationsUseMenuBarAgentsForms() throws {
+        let bundle = AllowLocation.bundle(Self.fiddle).plist as NSDictionary
+        #expect(bundle == ["bundle": ["_0": Self.fiddle]] as NSDictionary)
+        let adhoc = AllowLocation.adhocBinary("file:///x/Fiddle").plist as NSDictionary
+        #expect(adhoc == ["adhocBinary": ["_0": ["relative": "file:///x/Fiddle"]]] as NSDictionary)
+        #expect(AllowLocation(plist: bundle) == .bundle(Self.fiddle))
+        #expect(AllowLocation(plist: adhoc) == .adhocBinary("file:///x/Fiddle"))
+        #expect(AllowLocation(plist: ["somethingElse": 1]) == nil)
+    }
+
+    @Test func addLocationAppendsTheRunningCopyAndKeepsTheRest() throws {
+        let debug = AllowLocation.adhocBinary(Self.debugFiddle.absoluteString)
+        var list = try AllowList(data: Self.fiddleBlob(locations: [debug.plist]))
+        let added = list.addLocation(.bundle(Self.fiddle), for: Self.fiddle)
+        #expect(added)
+        #expect(list.locations(for: Self.fiddle) == [debug, .bundle(Self.fiddle)])
+        let value = try Self.value(list)
+        #expect(value["isAllowed"] as? Bool == false)
+        #expect(value["extra"] as? Int == 7)
+        #expect((value["location"] as? NSDictionary) == ["bundle": ["_0": Self.fiddle]] as NSDictionary)
+    }
+
+    @Test func addLocationNeverDuplicates() throws {
+        var list = try AllowList(data: Self.fiddleBlob(locations: [AllowLocation.bundle(Self.fiddle).plist]))
+        let before = try list.encoded()
+        let added = list.addLocation(.bundle(Self.fiddle), for: Self.fiddle)
+        #expect(!added)
+        #expect(try Self.decode(list.encoded()) == Self.decode(before))
+    }
+
+    @Test func addLocationStartsTheListWhenTheEntryHasNone() throws {
+        var list = try AllowList(data: Self.fiddleBlob(locations: nil))
+        let added = list.addLocation(.bundle(Self.fiddle), for: Self.fiddle)
+        #expect(added)
+        #expect(list.locations(for: Self.fiddle) == [.bundle(Self.fiddle)])
+    }
+
+    @Test func addLocationOnUntrackedChangesNothing() throws {
+        let data = try Self.blob()
+        var list = try AllowList(data: data)
+        let added = list.addLocation(.bundle("com.nope"), for: "com.nope")
+        #expect(!added)
+        #expect(try Self.decode(list.encoded()) == Self.decode(data))
+    }
+
     @Test func malformedThrows() {
         #expect(throws: AllowListError.malformed) {
             try AllowList(data: Data("x".utf8))

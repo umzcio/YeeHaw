@@ -18,10 +18,12 @@ public struct AppExtra: Equatable, Sendable {
     public var identifier, title, description: String
     /// The owning app's executable name, a second key prefix for apps that aren't notarized.
     public var executableName: String
+    /// Whether the owning copy is notarized: if not, its executable name is its first prefix.
+    public var notarized: Bool
 
     public init(bundleID: BundleID, indexInApp: Int, x: Double, width: Double,
                 identifier: String = "", title: String = "", description: String = "",
-                executableName: String = "") {
+                executableName: String = "", notarized: Bool = true) {
         self.bundleID = bundleID
         self.indexInApp = indexInApp
         self.x = x
@@ -30,6 +32,7 @@ public struct AppExtra: Equatable, Sendable {
         self.title = title
         self.description = description
         self.executableName = executableName
+        self.notarized = notarized
     }
 }
 
@@ -100,7 +103,8 @@ public enum ItemMatcher {
                     id: "\(e.bundleID)#\(e.indexInApp)", bundleID: e.bundleID, appleIdentifier: nil,
                     indexInApp: e.indexInApp, label: d.label,
                     keyNames: [e.identifier, e.title, e.description].filter { !$0.isEmpty },
-                    keyPrefixes: PositionKey.prefixes(bundleID: e.bundleID, executableName: e.executableName),
+                    keyPrefixes: PositionKey.prefixes(bundleID: e.bundleID, executableName: e.executableName,
+                                                      notarized: e.notarized),
                     x: d.x, width: d.width, isPinned: false))
             } else {
                 items.append(MenuBarItem(

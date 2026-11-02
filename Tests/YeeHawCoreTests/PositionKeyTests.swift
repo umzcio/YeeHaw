@@ -67,6 +67,15 @@ import Testing
         #expect(PositionKey.prefixes(bundleID: "com.example.a", executableName: "") == ["com.example.a"])
     }
 
+    @Test func aCopyThatIsntNotarizedPutsItsExecutableNameFirst() {
+        // MenuBarAgent files such a copy's items under the executable name, so a new key goes there.
+        #expect(PositionKey.prefixes(bundleID: "edu.umontana.fiddle", executableName: "Fiddle", notarized: false)
+            == ["Fiddle", "edu.umontana.fiddle"])
+        #expect(PositionKey.prefixes(bundleID: "edu.umontana.fiddle", executableName: "Fiddle", notarized: true)
+            == ["edu.umontana.fiddle", "Fiddle"])
+        #expect(PositionKey.prefixes(bundleID: "Nora", executableName: "Nora", notarized: false) == ["Nora"])
+    }
+
     @Test func constants() {
         #expect(PositionKey.clock == "module:Clock")
         #expect(PositionKey.controlCenter == "module:BentoBox-0")

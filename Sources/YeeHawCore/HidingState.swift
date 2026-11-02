@@ -44,13 +44,20 @@ public struct HidingState: Codable, Equatable, Sendable {
     }
 }
 
-public enum AllowAction: Equatable, Sendable { case switchOn(BundleID), switchOff(BundleID) }
+public enum AllowAction: Equatable, Sendable {
+    case switchOn(BundleID), switchOff(BundleID)
+    /// Lists a running copy in the app's `menuItemLocations`, so its switch reaches that copy.
+    case addLocation(BundleID, AllowLocation)
+}
 
 /// Pure rules deciding which Allow switches to flip and how the persisted state changes.
-/// Actions are ordered: every `.switchOff` (in `hidden` order), then every `.switchOn` (sorted).
+/// Actions are ordered: every `.addLocation` (in `hidden` order), every `.switchOff` (in `hidden`
+/// order), then every `.switchOn` (sorted). `locations` are the Allow-list locations of the app's
+/// running copies (`RunningCopy.location`): an app's switch is written with them listed.
 public enum Reconciler {
+    /// The running copies of every app that stays hidden are listed, even if it's off already.
     public static func onLaunch(
-        _ s: HidingState, allow: AllowSnapshot
+        _ s: HidingState, allow: AllowSnapshot, locations: [BundleID: [AllowLocation]] = [:]
     ) -> (actions: [AllowAction], restorePositions: [String: Double?], state: HidingState) {
         var state = s
         // An app that's off but not in the journal was switched off by the user, even if it's in
@@ -62,7 +69,8 @@ public enum Reconciler {
         state.journal = s.journal.filter { hiddenSet.contains($0) }.union(offs)
         let restore = s.pendingReveal?.originalPositions ?? [:]
         state.pendingReveal = nil
-        return (offs.map(AllowAction.switchOff) + ons.map(AllowAction.switchOn), restore, state)
+        let listed = state.hidden.flatMap { id in listing(id, locations[id] ?? []) }
+        return (listed + offs.map(AllowAction.switchOff) + ons.map(AllowAction.switchOn), restore, state)
     }
 
     /// Switches the journal back on and puts a revealed app's positions back, so nothing is left
@@ -77,22 +85,39 @@ public enum Reconciler {
     }
 
     public static func hide(
-        _ id: BundleID, _ s: HidingState, allow: AllowSnapshot
+        _ id: BundleID, _ s: HidingState, allow: AllowSnapshot, locations: [AllowLocation] = []
     ) -> (actions: [AllowAction], state: HidingState) {
         guard allow[id] == true, !s.hidden.contains(id) else { return ([], s) }
         var state = s
         state.hidden.append(id)
         state.journal.insert(id)
-        return ([.switchOff(id)], state)
+        return (listing(id, locations) + [.switchOff(id)], state)
     }
 
     public static func show(
-        _ id: BundleID, _ s: HidingState
+        _ id: BundleID, _ s: HidingState, locations: [AllowLocation] = []
     ) -> (actions: [AllowAction], state: HidingState) {
         var state = s
         state.hidden.removeAll { $0 == id }
         guard state.journal.remove(id) != nil else { return ([], state) }
-        return ([.switchOn(id)], state)
+        return (listing(id, locations) + [.switchOn(id)], state)
+    }
+
+    /// An app opened while it's hidden may run from a copy its entry doesn't list, which would
+    /// draw its icon: the copy is listed and the app switched off again. Only apps YeeHaw has
+    /// switched off (journaled) count, so nothing is hidden again once quitting has switched
+    /// everything back on. An app being revealed is left to the reveal, whose end switches it off
+    /// with its copies listed.
+    public static func launched(
+        _ id: BundleID, _ s: HidingState, allow: AllowSnapshot, locations: [AllowLocation]
+    ) -> [AllowAction] {
+        guard s.hidden.contains(id), s.journal.contains(id), allow[id] != nil, !locations.isEmpty,
+              s.pendingReveal?.bundleID != id else { return [] }
+        return listing(id, locations) + [.switchOff(id)]
+    }
+
+    private static func listing(_ id: BundleID, _ locations: [AllowLocation]) -> [AllowAction] {
+        locations.map { .addLocation(id, $0) }
     }
 
     public static func externalChange(

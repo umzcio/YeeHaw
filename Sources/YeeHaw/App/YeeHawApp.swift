@@ -19,6 +19,8 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
     private var terminationSignal: DispatchSourceSignal?
     /// Watches for Thaw starting while YeeHaw runs.
     private var thawObserver: NSObjectProtocol?
+    /// Watches for hidden apps opening from a copy their Allow-list entry doesn't list.
+    private var launchObserver: NSObjectProtocol?
 
     static func main() {
         let app = NSApplication.shared
@@ -121,6 +123,8 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
     private func thawStarted() {
         Self.log.notice("Thaw started; switching hidden apps back on and quitting")
         watcher = nil
+        launchObserver.map(NSWorkspace.shared.notificationCenter.removeObserver)
+        launchObserver = nil
         if let controller {
             do {
                 try controller.quit()
@@ -170,6 +174,7 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
                 // A missing grant is recorded in state.needsGrant, which the strip's notice shows.
                 Self.log.error("Launch failed: \(error, privacy: .public)")
             }
+            watchForHiddenAppLaunches(controller)
 
         case .showStatusItem:
             let status = StatusItemController(
@@ -182,6 +187,27 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
                 openSettings: { [weak self] in self?.openSettings() })
             statusItem = status
             await status.start(grants: grants)
+        }
+    }
+
+    /// A hidden app opened from a copy its Allow-list entry doesn't list (another build, another
+    /// folder) would draw its icon again; the controller lists that copy and switches the app off.
+    /// The launch did the same for the hidden apps already running.
+    private func watchForHiddenAppLaunches(_ controller: MenuBarController) {
+        launchObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard let id = app?.bundleIdentifier else { return }
+            MainActor.assumeIsolated {
+                guard controller.state.hidden.contains(id) else { return }
+                Task {
+                    do {
+                        try await controller.appLaunched(id)
+                    } catch {
+                        Self.log.error("Could not keep \(id, privacy: .public) hidden after it opened: \(error, privacy: .public)")
+                    }
+                }
+            }
         }
     }
 

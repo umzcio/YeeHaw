@@ -52,6 +52,7 @@ private final class StubBar: MenuBarReading, PreferencesFile, StateStoring, Slee
     // MenuBarReading: nothing is running, so the controller never waits for a flip.
     func items() async -> [MenuBarItem] { drawn }
     func runningBundleIDs() async -> Set<BundleID> { [] }
+    func runningCopies(of id: BundleID) async -> [RunningCopy] { [] }
     func keyPrefixes(of id: BundleID) async -> [String] { [id] }
 
     // StateStoring and Sleeper.

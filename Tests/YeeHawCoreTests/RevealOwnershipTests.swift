@@ -89,6 +89,9 @@ final class MatchedBar: MenuBarReading, @unchecked Sendable {
         lock.withLock { Set(appOrder).subtracting(quit) }
     }
 
+    /// No copies to list: these tests are about which icon is whose.
+    func runningCopies(of id: BundleID) async -> [RunningCopy] { [] }
+
     func keyPrefixes(of id: BundleID) async -> [String] { [id] }
 }
 

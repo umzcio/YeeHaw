@@ -23,9 +23,19 @@ struct AXMenuBarReader: MenuBarReading {
         Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
     }
 
+    func runningCopies(of id: BundleID) async -> [RunningCopy] {
+        await Self.copies(of: id)
+    }
+
     func keyPrefixes(of id: BundleID) async -> [String] {
-        let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first
-        return PositionKey.prefixes(bundleID: id, executableName: app?.executableURL?.lastPathComponent)
+        let copy = await Self.copies(of: id).first
+        return PositionKey.prefixes(bundleID: id, executableName: copy?.executableURL.lastPathComponent,
+                                    notarized: copy?.notarized ?? true)
+    }
+
+    @concurrent
+    private static func copies(of id: BundleID) async -> [RunningCopy] {
+        Notarization.runningCopies(of: id)
     }
 
     func drawnBar(owning id: BundleID) async -> [MenuBarItem] {
@@ -41,7 +51,8 @@ struct AXMenuBarReader: MenuBarReading {
               let owner = apps.first(where: { $0.bundleIdentifier == id }) else { return [] }
         let drawn = drawnItems(agentPID: agent.processIdentifier)
         let extras = appExtras(pid: owner.processIdentifier, bundleID: id,
-                               executableName: owner.executableURL?.lastPathComponent ?? "")
+                               executableName: owner.executableURL?.lastPathComponent ?? "",
+                               notarized: Notarization.isNotarized(owner))
         return ItemMatcher.match(drawn: drawn, extras: extras)
     }
 
@@ -49,12 +60,13 @@ struct AXMenuBarReader: MenuBarReading {
     private static func readItems(offApps: Set<BundleID>, revealed: BundleID?) async -> [MenuBarItem] {
         let apps = NSWorkspace.shared.runningApplications
         guard let agent = apps.first(where: { $0.bundleIdentifier == agentBundleID }) else { return [] }
-        let owners = apps.compactMap { app -> (pid_t, BundleID, String)? in
-            guard let id = app.bundleIdentifier, id != agentBundleID else { return nil }
-            return (app.processIdentifier, id, app.executableURL?.lastPathComponent ?? "")
-        }
+        let owners = apps.filter { $0.bundleIdentifier != nil && $0.bundleIdentifier != agentBundleID }
         let drawn = drawnItems(agentPID: agent.processIdentifier)
-        let extras = owners.flatMap { appExtras(pid: $0.0, bundleID: $0.1, executableName: $0.2) }
+        let extras = owners.flatMap { app in
+            appExtras(pid: app.processIdentifier, bundleID: app.bundleIdentifier ?? "",
+                      executableName: app.executableURL?.lastPathComponent ?? "",
+                      notarized: Notarization.isNotarized(app))
+        }
         return ItemMatcher.match(drawn: drawn, extras: extras, offApps: offApps, revealed: revealed)
     }
 
@@ -97,20 +109,25 @@ struct AXMenuBarReader: MenuBarReading {
 
     // MARK: Owners
 
-    /// The app's own view of its status items, in the app's order.
-    private static func appExtras(pid: pid_t, bundleID: BundleID, executableName: String) -> [AppExtra] {
+    /// The app's own view of its status items, in the app's order. An app with none isn't
+    /// asked about its notarization (`notarized` is evaluated only for apps with items).
+    private static func appExtras(pid: pid_t, bundleID: BundleID, executableName: String,
+                                  notarized: @autoclosure () -> Bool) -> [AppExtra] {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, appTimeout)
         guard let bar = element(app, kAXExtrasMenuBarAttribute) else { return [] }
         AXUIElementSetMessagingTimeout(bar, appTimeout)
-        return children(of: bar).enumerated().map { index, item in
+        let items = children(of: bar)
+        guard !items.isEmpty else { return [] }
+        let notarized = notarized()
+        return items.enumerated().map { index, item in
             let frame = frame(of: item)
             return AppExtra(
                 bundleID: bundleID, indexInApp: index, x: frame.minX, width: frame.width,
                 identifier: string(item, kAXIdentifierAttribute),
                 title: string(item, kAXTitleAttribute),
                 description: string(item, kAXDescriptionAttribute),
-                executableName: executableName)
+                executableName: executableName, notarized: notarized)
         }
     }
 

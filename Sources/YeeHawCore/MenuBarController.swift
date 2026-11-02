@@ -18,6 +18,9 @@ public enum ControllerError: Error, Equatable {
 /// still be off. So a switch-off is journaled and saved *before* the write, and a switch-on is
 /// removed from the journal only *after* the write succeeds.
 ///
+/// Every switch YeeHaw writes for a running app lists the app's running copies in its entry first
+/// (`AllowAction.addLocation`): MenuBarAgent ignores the switch for a copy that isn't listed.
+///
 /// Public async methods run one at a time, in call order, through an internal FIFO gate.
 @MainActor public final class MenuBarController {
     public static let allowKey = "trackedApplications"
@@ -71,9 +74,11 @@ public enum ControllerError: Error, Equatable {
     /// stay saved until their own writes land.
     public func launch() async throws {
         try await gated {
+            var locations: [BundleID: [AllowLocation]] = [:]
+            for id in state.hidden { locations[id] = await runningLocations(of: id) }
             let allow = try readAllow().snapshot
             lastSnapshot = allow
-            let r = Reconciler.onLaunch(state, allow: allow)
+            let r = Reconciler.onLaunch(state, allow: allow, locations: locations)
             var interim = r.state
             interim.journal.formUnion(Self.switchedOn(r.actions))
             interim.pendingReveal = state.pendingReveal
@@ -144,40 +149,73 @@ public enum ControllerError: Error, Equatable {
 
     // MARK: Hiding
 
+    /// A hide that fails (the write, or macOS not honouring it in time) is undone: the app is
+    /// switched back on and the state is what it was before (`rollBack`).
     public func hide(_ id: BundleID) async throws {
         try await gated {
+            let locations = await runningLocations(of: id)
             let allow = try readAllow().snapshot
             guard allow[id] != nil else { throw ControllerError.notTracked(id) }
-            let r = Reconciler.hide(id, state, allow: allow)
+            let r = Reconciler.hide(id, state, allow: allow, locations: locations)
             guard !r.actions.isEmpty else { return }
+            let before = state
             save(r.state)
-            try writeAllow(r.actions)
-            try await waitIfRunning(id, drawn: false)
+            do {
+                try writeAllow(r.actions)
+                try await waitIfRunning(id, drawn: false)
+            } catch {
+                rollBack(id, allowed: true, to: before)
+                throw error
+            }
         }
     }
 
     /// Switches the app back on for good. Showing the app that's being revealed also ends the
     /// reveal here and now (its positions go back), so a Layout placement made right after isn't
-    /// undone when the reveal would have ended.
+    /// undone when the reveal would have ended. A show that fails is undone like a hide: the
+    /// switch goes back to what it was and the app back into Hidden.
     public func show(_ id: BundleID) async throws {
         try await gated {
-            let r = Reconciler.show(id, state)
+            let locations = await runningLocations(of: id)
+            let wasAllowed = try readAllow().snapshot[id]
+            let before = state
+            let r = Reconciler.show(id, state, locations: locations)
             var interim = r.state
             interim.journal = state.journal
             save(interim)
-            if !r.actions.isEmpty {
-                try writeAllow(r.actions)
-                var next = state
-                next.journal = r.state.journal
-                save(next)
+            do {
+                if !r.actions.isEmpty {
+                    try writeAllow(r.actions)
+                    var next = state
+                    next.journal = r.state.journal
+                    save(next)
+                }
+                if let pending = state.pendingReveal, pending.bundleID == id {
+                    try writePositions(pending.originalPositions)
+                    var next = state
+                    next.pendingReveal = nil
+                    save(next)
+                }
+                if !r.actions.isEmpty { try await waitIfRunning(id, drawn: true) }
+            } catch {
+                rollBack(id, allowed: wasAllowed, to: before)
+                throw error
             }
-            if let pending = state.pendingReveal, pending.bundleID == id {
-                try writePositions(pending.originalPositions)
-                var next = state
-                next.pendingReveal = nil
-                save(next)
-            }
-            if !r.actions.isEmpty { try await waitIfRunning(id, drawn: true) }
+        }
+    }
+
+    /// Call when an app has launched. A hidden app opened from a copy its entry doesn't list
+    /// would draw its icon, so the copy is listed and the app switched off again, in one write
+    /// with no wait (it may not have drawn anything yet). Nothing is written for other apps, or
+    /// when every copy is listed already.
+    public func appLaunched(_ id: BundleID) async throws {
+        try await gated {
+            guard state.hidden.contains(id) else { return }
+            let locations = await runningLocations(of: id)
+            let allow = try readAllow().snapshot
+            let actions = Reconciler.launched(id, state, allow: allow, locations: locations)
+            guard !actions.isEmpty else { return }
+            try writeAllow(actions)
         }
     }
 
@@ -281,6 +319,7 @@ public enum ControllerError: Error, Equatable {
             if state.pendingReveal != nil { try await finishReveal() }
             // Asked before the read, so nothing suspends between reading the table and writing it.
             let prefixes = await reader.keyPrefixes(of: id)
+            let locations = await runningLocations(of: id)
             // Everything drawn now is someone else's (the app is off), so the bar must grow by
             // the app's own items before a per-app read's matches can be them.
             let othersDrawn = await reader.drawnBar(owning: id).count
@@ -295,7 +334,7 @@ public enum ControllerError: Error, Equatable {
 
             let slot = table.slotValue(leftOf: yeehawKey)
             try writePositions(Dictionary(uniqueKeysWithValues: keys.map { ($0, slot) }))
-            try writeAllow([.switchOn(id)])
+            try writeAllow(locations.map { .addLocation(id, $0) } + [.switchOn(id)])
             revealTrace?("positions and Allow written")
             do {
                 let polls = try await waitForReveal(id, drawn: true, othersDrawn: othersDrawn)
@@ -335,7 +374,9 @@ public enum ControllerError: Error, Equatable {
                 let running = await reader.runningBundleIDs().contains(id)
                 let othersDrawn = running
                     ? await reader.drawnBar(owning: id).count - items.filter { $0.bundleID == id }.count : 0
-                try writeAllow([.switchOff(id)])
+                // A copy opened during the reveal is listed too (`Reconciler.launched` leaves it here).
+                let locations = await runningLocations(of: id)
+                try writeAllow(locations.map { .addLocation(id, $0) } + [.switchOff(id)])
                 do {
                     if running {
                         try await waitForReveal(id, drawn: false, othersDrawn: othersDrawn)
@@ -363,6 +404,30 @@ public enum ControllerError: Error, Equatable {
     private static func revealKeys(prefixes: [String], _ table: PositionTable) -> [String] {
         let existing = PositionKey.existingKeys(prefixes: prefixes, table: table)
         return existing.isEmpty ? prefixes.prefix(1).map { "status:\($0)::Item-0" } : existing
+    }
+
+    /// The Allow-list locations of the app's running copies; empty when it isn't running.
+    private func runningLocations(of id: BundleID) async -> [AllowLocation] {
+        await reader.runningCopies(of: id).map(\.location)
+    }
+
+    /// Undoes a hide or show that failed: the switch goes back to `allowed` (written only if it
+    /// differs from what the file holds now), and the state to `before`. The journal invariant
+    /// holds throughout: switching back on, the state goes back only once that's written;
+    /// switching back off, the app is journaled first. If the switch can't be put back, the state
+    /// stays as it is, which matches the switch. Nil `allowed` (untracked): nothing was written.
+    private func rollBack(_ id: BundleID, allowed: Bool?, to before: HidingState) {
+        switch allowed {
+        case true?:
+            guard (try? writeAllow([.switchOn(id)])) != nil else { return }
+            save(before)
+        case false?:
+            let after = state
+            save(before)
+            if (try? writeAllow([.switchOff(id)])) == nil { save(after) }
+        case nil:
+            save(before)
+        }
     }
 
     private static func switchedOn(_ actions: [AllowAction]) -> [BundleID] {
@@ -480,23 +545,28 @@ public enum ControllerError: Error, Equatable {
     }
 
     /// Reads fresh, applies every action to entries that exist, and writes the list back once,
-    /// only if something changed (so a missing `trackedApplications` key is never created).
-    /// `lastSnapshot` is updated only for the apps written.
+    /// only if something changed (so a missing `trackedApplications` key is never created). A
+    /// location added to an entry is a change even when no switch flips, and the write carries
+    /// the entry's switch as it is. `lastSnapshot` is updated only for the apps written.
     private func writeAllow(_ actions: [AllowAction]) throws {
         var list = try readAllow()
         let before = list.snapshot
         var written: AllowSnapshot = [:]
+        var listed = false
         for action in actions {
             let (id, allowed): (BundleID, Bool)
             switch action {
             case .switchOn(let target): (id, allowed) = (target, true)
             case .switchOff(let target): (id, allowed) = (target, false)
+            case .addLocation(let target, let location):
+                if list.addLocation(location, for: target) { listed = true }
+                continue
             }
             guard let current = before[id] else { continue }
             written[id] = allowed
             if current != allowed { list.setAllowed(allowed, for: id) }
         }
-        if written.contains(where: { before[$0.key] != $0.value }) {
+        if listed || written.contains(where: { before[$0.key] != $0.value }) {
             try allowFile.write(Self.allowKey, try list.encoded())
             writeCount += 1
         }

@@ -23,11 +23,13 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     private var _itemReads = 0
     private var _offAppsSeen: [Set<BundleID>] = []
     private var _revealedSeen: [BundleID?] = []
+    private var _copies: [BundleID: [RunningCopy]]
 
     init(allow: [(BundleID, Bool)], positions: [String: Double] = [:], running: Set<BundleID>? = nil,
          drawn: [BundleID: [MenuBarItem]] = [:], appleItems: [MenuBarItem] = [],
-         prefixes: [BundleID: [String]] = [:]) throws {
+         prefixes: [BundleID: [String]] = [:], copies: [BundleID: [RunningCopy]] = [:]) throws {
         _allowBlob = try Self.blob(allow)
+        _copies = copies
         self.prefixes = prefixes
         _positions = positions
         _running = running ?? Set(allow.map(\.0))
@@ -55,11 +57,13 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
                     label: identifier, keyNames: [], keyPrefixes: [], x: x, width: 20, isPinned: false)
     }
 
+    /// Each entry lists the app's notarized copy, the one running unless a test says otherwise.
     static func blob(_ entries: [(BundleID, Bool)]) throws -> Data {
         var items: [Any] = []
         for (id, allowed) in entries {
             items.append(["bundle": ["_0": id]])
-            items.append(["location": ["bundle": ["_0": id]], "isAllowed": allowed] as [String: Any])
+            items.append(["location": ["bundle": ["_0": id]], "menuItemLocations": [["bundle": ["_0": id]]],
+                          "isAllowed": allowed] as [String: Any])
         }
         return try PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0)
     }
@@ -72,6 +76,18 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     /// How many times the bar was read (`items()`).
     var itemReads: Int { locked { $0._itemReads } }
     var log: [String] { locked { $0._log } }
+    /// The app's `menuItemLocations`, as MenuBarAgent would read them.
+    func locations(of id: BundleID) -> [AllowLocation] {
+        locked { (try? AllowList(data: $0._allowBlob))?.locations(for: id) ?? [] }
+    }
+
+    /// A copy that isn't notarized, run from a development folder.
+    static func debugCopy(_ id: BundleID) -> RunningCopy {
+        RunningCopy(bundleID: id, executableURL: URL(fileURLWithPath: "/dev/\(id).app/Contents/MacOS/App"), notarized: false)
+    }
+
+    /// Which copies of `id` run (it must be running); by default its notarized one.
+    func setCopies(_ copies: [RunningCopy], of id: BundleID) { locked { $0._copies[id] = copies } }
 
     /// `honorsWrites = false`: the bar keeps drawing what it drew before.
     var honorsWrites: Bool {
@@ -157,6 +173,14 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
 
     func runningBundleIDs() async -> Set<BundleID> { locked { $0._running } }
 
+    func runningCopies(of id: BundleID) async -> [RunningCopy] {
+        locked { s in
+            guard s._running.contains(id) else { return [] }
+            return s._copies[id] ?? [RunningCopy(bundleID: id, executableURL: URL(fileURLWithPath: "/Applications/\(id).app/Contents/MacOS/App"),
+                                                 notarized: true)]
+        }
+    }
+
     func keyPrefixes(of id: BundleID) async -> [String] { prefixes[id] ?? [id] }
 }
 
@@ -222,6 +246,19 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         Rig(system: system, store: FakeStore(state, system: system))
     }
 
+    /// An Allow list holding one entry, listing `locations`.
+    static func blob(_ id: BundleID, allowed: Bool, locations: [AllowLocation]) throws -> Data {
+        let value: [String: Any] = ["location": ["bundle": ["_0": id]], "menuItemLocations": locations.map(\.plist),
+                                    "isAllowed": allowed]
+        var items: [Any] = [["bundle": ["_0": id]], value]
+        for other in [b, yeehaw] where other != id {
+            items += [["bundle": ["_0": other]],
+                      ["location": ["bundle": ["_0": other]], "menuItemLocations": [AllowLocation.bundle(other).plist],
+                       "isAllowed": true] as [String: Any]]
+        }
+        return try PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0)
+    }
+
     static func revealSystem() throws -> FakeSystem {
         try FakeSystem(
             allow: [(a, false), (b, true), (yeehaw, true)],
@@ -253,7 +290,8 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         rig.system.honorsWrites = false
         let c = rig.controller()
         await #expect(throws: ControllerError.notHonored(Self.a)) { try await c.hide(Self.a) }
-        #expect(rig.system.allowWrites == 1)
+        // The hide, and the switch back on that undoes it; no second try.
+        #expect(rig.system.allowWrites == 2)
         #expect(rig.sleeper.count == 100)
         #expect(abs(rig.sleeper.total - MenuBarController.honorTimeout) < 1e-9)
     }
@@ -306,6 +344,109 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(c.state.journal.isEmpty)
         #expect(rig.system.allowSnapshot[Self.a] == true)
         #expect(rig.system.allowWrites == 2)
+    }
+
+    // MARK: the running copy's location
+
+    @Test func hideListsTheCopyThatsRunning() async throws {
+        // The owner's Fiddle: listed under a debug build, while the notarized one runs.
+        let system = try FakeSystem(allow: [(Self.a, true)])
+        system.setAllowBlob(try Self.blob(Self.a, allowed: true, locations: [FakeSystem.debugCopy(Self.a).location]))
+        let rig = Self.rig(system)
+        let c = rig.controller()
+        try await c.hide(Self.a)
+        #expect(system.locations(of: Self.a) == [FakeSystem.debugCopy(Self.a).location, .bundle(Self.a)])
+        #expect(system.allowSnapshot[Self.a] == false)
+        #expect(system.allowWrites == 1)
+    }
+
+    @Test func showAndRevealListTheCopyThatsRunning() async throws {
+        let debug = FakeSystem.debugCopy(Self.a)
+        let system = try Self.revealSystem()
+        system.setCopies([debug], of: Self.a)
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        #expect(system.locations(of: Self.a) == [.bundle(Self.a), debug.location])
+        try await c.endReveal()
+        system.setAllowBlob(try Self.blob(Self.a, allowed: false, locations: [.bundle(Self.a)]))
+        try await c.show(Self.a)
+        #expect(system.locations(of: Self.a) == [.bundle(Self.a), debug.location])
+        #expect(system.allowSnapshot[Self.a] == true)
+    }
+
+    @Test func launchListsTheRunningCopiesOfHiddenApps() async throws {
+        let debug = FakeSystem.debugCopy(Self.a)
+        let system = try FakeSystem(allow: [(Self.a, false), (Self.b, false)])
+        system.setCopies([debug], of: Self.a)
+        system.setCopies([FakeSystem.debugCopy(Self.b)], of: Self.b)
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        try await rig.controller().launch()
+        #expect(system.locations(of: Self.a) == [.bundle(Self.a), debug.location])
+        // B is off, but it's the user's: YeeHaw leaves its entry alone.
+        #expect(system.locations(of: Self.b) == [.bundle(Self.b)])
+        #expect(system.allowSnapshot == [Self.a: false, Self.b: false])
+        #expect(system.allowWrites == 1)
+    }
+
+    @Test func aHiddenAppOpenedFromAnotherCopyStaysHidden() async throws {
+        let system = try FakeSystem(allow: [(Self.a, true)])
+        let rig = Self.rig(system)
+        let c = rig.controller()
+        try await c.hide(Self.a)
+        let debug = FakeSystem.debugCopy(Self.a)
+        system.setCopies([debug], of: Self.a)
+        try await c.appLaunched(Self.a)
+        #expect(system.locations(of: Self.a) == [.bundle(Self.a), debug.location])
+        #expect(system.allowSnapshot[Self.a] == false)
+        #expect(system.allowWrites == 2)
+        // A copy already listed needs no write.
+        try await c.appLaunched(Self.a)
+        #expect(system.allowWrites == 2)
+    }
+
+    @Test func anAppOpenedThatIsntHiddenIsntWritten() async throws {
+        let system = try FakeSystem(allow: [(Self.a, true)])
+        system.setCopies([FakeSystem.debugCopy(Self.a)], of: Self.a)
+        let c = Self.rig(system).controller()
+        try await c.appLaunched(Self.a)
+        #expect(system.allowWrites == 0)
+    }
+
+    // MARK: failed edits roll back
+
+    @Test func aHideMacOSDoesntHonorIsUndone() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true), (Self.b, true)]))
+        rig.system.honorsWrites = false
+        let c = rig.controller()
+        await #expect(throws: ControllerError.notHonored(Self.a)) { try await c.hide(Self.a) }
+        #expect(rig.system.allowSnapshot[Self.a] == true)
+        #expect(c.state == .empty)
+        #expect(rig.store.load() == .empty)
+    }
+
+    @Test func aHideWhoseWriteFailsIsUndone() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true)]))
+        rig.system.failWrites(.allowList)
+        let c = rig.controller()
+        await #expect(throws: WriteFailed.self) { try await c.hide(Self.a) }
+        #expect(rig.system.allowSnapshot[Self.a] == true)
+        #expect(c.state == .empty)
+        #expect(rig.store.load() == .empty)
+    }
+
+    @Test func aShowMacOSDoesntHonorIsUndone() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true), (Self.b, true)]))
+        let c = rig.controller()
+        try await c.hide(Self.b)
+        try await c.hide(Self.a)
+        let before = c.state
+        rig.system.honorsWrites = false
+        await #expect(throws: ControllerError.notHonored(Self.a)) { try await c.show(Self.a) }
+        #expect(rig.system.allowSnapshot[Self.a] == false)
+        #expect(c.state == before)
+        #expect(c.state.hidden == [Self.b, Self.a])
+        #expect(rig.store.load() == before)
     }
 
     // MARK: journal invariant (switch-on writes land before the journal forgets)

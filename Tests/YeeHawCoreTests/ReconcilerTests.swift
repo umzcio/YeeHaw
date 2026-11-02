@@ -83,6 +83,52 @@ import Testing
         #expect(r.state.journal == ["B"])
     }
 
+    // MARK: Running copies' locations
+
+    static let debugA = AllowLocation.adhocBinary("file:///dev/A.app/Contents/MacOS/A")
+
+    @Test func hideListsTheRunningCopiesBeforeSwitchingOff() {
+        let r = Reconciler.hide("A", Self.state(), allow: ["A": true], locations: [.bundle("A"), Self.debugA])
+        #expect(r.actions == [.addLocation("A", .bundle("A")), .addLocation("A", Self.debugA), .switchOff("A")])
+    }
+
+    @Test func showListsTheRunningCopyBeforeSwitchingOn() {
+        let r = Reconciler.show("A", Self.state(hidden: ["A"], journal: ["A"]), locations: [.bundle("A")])
+        #expect(r.actions == [.addLocation("A", .bundle("A")), .switchOn("A")])
+        // Nothing to switch, nothing to list.
+        #expect(Reconciler.show("B", Self.state(hidden: ["B"]), locations: [.bundle("B")]).actions.isEmpty)
+    }
+
+    @Test func launchListsTheRunningCopiesOfHiddenApps() {
+        let s = Self.state(hidden: ["A", "B"], journal: ["A", "C"])
+        let r = Reconciler.onLaunch(s, allow: ["A": false, "B": true, "C": false],
+                                    locations: ["A": [.bundle("A")], "B": [Self.debugA], "C": [.bundle("C")]])
+        // C is switched back on, not hidden: its copy needn't be listed.
+        #expect(r.actions == [.addLocation("A", .bundle("A")), .addLocation("B", Self.debugA),
+                              .switchOff("B"), .switchOn("C")])
+    }
+
+    @Test func aHiddenAppOpenedFromAnotherCopyIsListedAndSwitchedOffAgain() {
+        let s = Self.state(hidden: ["A"], journal: ["A"])
+        #expect(Reconciler.launched("A", s, allow: ["A": false], locations: [Self.debugA])
+            == [.addLocation("A", Self.debugA), .switchOff("A")])
+    }
+
+    @Test func anAppOpenedThatIsntHiddenIsLeftAlone() {
+        let s = Self.state(hidden: ["A"], journal: ["A"])
+        #expect(Reconciler.launched("B", s, allow: ["B": true], locations: [.bundle("B")]).isEmpty)
+        // Untracked, or no copy to list: nothing to write.
+        #expect(Reconciler.launched("A", s, allow: [:], locations: [.bundle("A")]).isEmpty)
+        #expect(Reconciler.launched("A", s, allow: ["A": false], locations: []).isEmpty)
+        // Quitting switched it back on and cleared the journal: it stays on.
+        #expect(Reconciler.launched("A", Self.state(hidden: ["A"]), allow: ["A": true], locations: [Self.debugA]).isEmpty)
+    }
+
+    @Test func aHiddenAppBeingRevealedIsLeftToTheReveal() {
+        let s = Self.state(hidden: ["A"], journal: ["A"], pending: PendingReveal(bundleID: "A", originalPositions: [:]))
+        #expect(Reconciler.launched("A", s, allow: ["A": true], locations: [Self.debugA]).isEmpty)
+    }
+
     @Test func userSwitchingOnWins() {
         let s = Self.state(hidden: ["A"], journal: ["A"])
         let n = Reconciler.externalChange(s, before: ["A": false], after: ["A": true])

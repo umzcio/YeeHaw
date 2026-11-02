@@ -68,6 +68,13 @@ import Testing
         #expect(items.map(\.keyPrefixes) == [["edu.umontana.zmeet", "zMeet"], ["com.example.a"], []])
     }
 
+    @Test func aCopyThatIsntNotarizedIsKeyedByExecutableNameFirst() {
+        let drawn = [DrawnItem(x: 10, width: 20, label: "Fiddle")]
+        let extras = [AppExtra(bundleID: "edu.umontana.fiddle", indexInApp: 0, x: 10, width: 20,
+                               executableName: "Fiddle", notarized: false)]
+        #expect(ItemMatcher.match(drawn: drawn, extras: extras).map(\.keyPrefixes) == [["Fiddle", "edu.umontana.fiddle"]])
+    }
+
     @Test func keyNamesCollectsNonEmptyIdentifierTitleDescription() {
         let drawn = [DrawnItem(x: 10, width: 20, label: "Flame")]
         let extras = [AppExtra(bundleID: "com.example.fiddle", indexInApp: 0, x: 10, width: 20,
