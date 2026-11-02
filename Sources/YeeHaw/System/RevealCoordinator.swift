@@ -34,6 +34,10 @@ final class RevealCoordinator {
     /// task, so the press and `endReveal` never wait on it.
     var onDrawn: (@MainActor (MenuBarItem) async -> Void)?
 
+    /// Awaited just before the press (the strip's fade-out has to finish first; see
+    /// `StripPanel.waitUntilOffScreen`).
+    var beforePress: (@MainActor () async -> Void)?
+
     /// `trace` receives each step with its timing; debug runs write it to probe.txt.
     init(controller: MenuBarController, trace: @escaping @MainActor (String) -> Void = { _ in }) {
         self.controller = controller
@@ -112,6 +116,10 @@ final class RevealCoordinator {
         session.onFirstSurface = { what in step("\(what) (first menu or window on screen)") }
         if !session.isObserving { step("AX observer unavailable; only clicks and the timeout can end it") }
 
+        if let beforePress {
+            await beforePress()
+            step("strip off screen")
+        }
         if await press(item, pid: pid, session: session, step: step) {
             session.startWatching()
             step("close: \(await session.waitForClose())")

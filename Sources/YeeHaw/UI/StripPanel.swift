@@ -50,6 +50,8 @@ final class StripPanel: NSPanel {
     private var appearanceObservation: NSKeyValueObservation?
     /// Bumped on every show and dismiss, so a finished fade-out never hides a strip shown since.
     private var generation = 0
+    /// Callers of `waitUntilOffScreen`, resumed when the panel is ordered out or shown again.
+    private var offScreenWaiters: [CheckedContinuation<Void, Never>] = []
     private(set) var isShown = false
     /// The display and bar height the strip was last shown on.
     private var displayID: CGDirectDisplayID?
@@ -124,6 +126,7 @@ final class StripPanel: NSPanel {
     func show(below anchor: NSRect, items: [StripEntry], notice: StripNotice? = nil, screen: NSScreen? = nil,
               highlightFirst: Bool = false) {
         generation += 1
+        resumeOffScreenWaiters()
         iconRect = Self.iconHitRect(anchor)
         let target = screen ?? NSScreen.screens.first { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) }
             ?? NSScreen.main
@@ -177,8 +180,24 @@ final class StripPanel: NSPanel {
             MainActor.assumeIsolated {
                 guard let self, self.generation == closing else { return }
                 self.orderOut(nil)
+                self.resumeOffScreenWaiters()
             }
         }
+    }
+
+    /// Returns once the panel is off screen (at once if it already is), or when it's shown again.
+    /// The panel is key while shown, and ordering it out hands key focus back to YeeHaw, so a
+    /// revealed app's popover that became key during the fade-out would close at once (a
+    /// `.transient` popover closes when it resigns key). The reveal waits for this before pressing.
+    func waitUntilOffScreen() async {
+        guard isVisible else { return }
+        await withCheckedContinuation { offScreenWaiters.append($0) }
+    }
+
+    private func resumeOffScreenWaiters() {
+        let waiters = offScreenWaiters
+        offScreenWaiters = []
+        waiters.forEach { $0.resume() }
     }
 
     // MARK: Fill

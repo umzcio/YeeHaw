@@ -78,6 +78,7 @@ final class StatusItemController: NSObject {
         }
         // Photograph a revealed item while it's drawn; a hidden one can't be photographed later.
         reveal.onDrawn = { [icons] item in await icons.captureIfPermitted([item]) }
+        reveal.beforePress = { [strip] in await strip.waitUntilOffScreen() }
     }
 
     /// Call before `controller.launch()`: photographs the saved hidden apps that are drawn right
