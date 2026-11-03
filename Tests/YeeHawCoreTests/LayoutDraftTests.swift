@@ -165,6 +165,54 @@ import Testing
         #expect(changes.moves == [.init(item: Self.a, left: e, right: nil)])
     }
 
+    @Test func reconcilingPutsUntouchedIconsInTheBarsNewOrder() {
+        var draft = Self.draft()
+        draft.move(from: 0, to: 4)   // B C D A
+        // B and C were swapped outside YeeHaw.
+        draft.reconcile(bar: [Self.a, Self.c, Self.b, Self.d], hidden: [])
+        #expect(draft.bar == [Self.c, Self.b, Self.d, Self.a])
+        #expect(draft.changes().moves == [.init(item: Self.a, left: Self.d, right: nil)])
+    }
+
+    @Test func aDraftWhoseOnlyChangeHappenedForRealIsClean() {
+        var draft = Self.draft()
+        draft.hide("B", at: 0)       // A C D; hidden B
+        // B is hidden for real, and C and D were swapped.
+        draft.reconcile(bar: [Self.a, Self.d, Self.c], hidden: ["B"])
+        #expect(draft.bar == [Self.a, Self.d, Self.c])
+        #expect(draft.changes().isEmpty)
+        #expect(!draft.isDirty)
+    }
+
+    @Test func aMovedIconKeepsItsPlaceWhileOthersFollowTheBar() {
+        var draft = Self.draft()
+        draft.move(from: 3, to: 1)   // A D B C
+        // C moved to the far left outside YeeHaw.
+        draft.reconcile(bar: [Self.c, Self.a, Self.b, Self.d], hidden: [])
+        #expect(draft.bar == [Self.c, Self.d, Self.a, Self.b])
+    }
+
+    @Test func isDirtyIsExactlyWhetherThereAreChanges() {
+        var drafts: [LayoutDraft] = [Self.draft()]
+        var moved = Self.draft()
+        moved.move(from: 0, to: 3)
+        drafts.append(moved)
+        moved.move(from: 2, to: 0)
+        drafts.append(moved)
+        var shown = Self.draft(hidden: ["H"])
+        shown.show("H", placeholders: [Self.placeholder("H")], at: 1)
+        drafts.append(shown)
+        var one = Self.draft()
+        one.move(from: 0, to: 4)
+        one.reconcile(bar: [Self.a, Self.c, Self.b, Self.d], hidden: [])
+        drafts.append(one)
+        var two = Self.draft()
+        two.hide("B", at: 0)
+        two.reconcile(bar: [Self.a, Self.d, Self.c], hidden: ["B"])
+        drafts.append(two)
+        for draft in drafts { #expect(draft.isDirty == !draft.changes().isEmpty) }
+    }
+
     @Test func reconcilingFollowsTheBarsLatestFrames() {
         var draft = Self.draft()
         draft.move(from: 0, to: 2)

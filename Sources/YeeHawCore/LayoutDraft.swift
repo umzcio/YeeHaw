@@ -72,9 +72,10 @@ public struct LayoutDraft: Equatable, Sendable {
         self.hidden = hidden
     }
 
-    /// Whether the draft differs from the real rows. Moving an icon and moving it back, or hiding
-    /// an app and showing it in its old place, leaves it clean.
-    public var isDirty: Bool { bar.map(\.id) != realBar.map(\.id) || hidden != realHidden }
+    /// Whether Apply has anything to write. Moving an icon and moving it back, or hiding an app
+    /// and showing it in its old place, leaves it clean; so does an edit the bar has since made
+    /// for real. Defined by `changes()`, so a dirty draft always has a summary to show.
+    public var isDirty: Bool { !changes().isEmpty }
 
     public func isPlaceholder(_ item: MenuBarItem) -> Bool {
         item.bundleID.map(realHidden.contains) ?? false
@@ -119,7 +120,8 @@ public struct LayoutDraft: Equatable, Sendable {
     /// Takes a new reading of the real rows without losing the user's edits: items that are no
     /// longer drawn leave the draft (a show of an app that's no longer hidden goes with them),
     /// items still drawn take their latest reading, and newly drawn items join at their real
-    /// place (after the nearest item before them that's in the draft). Apps hidden in the draft
+    /// place (after the nearest item before them that's in the draft). Untouched items also take
+    /// the bar's latest order, while the user's moved items keep their places. Apps hidden in the draft
     /// stay hidden there; apps newly hidden for real join the end of Hidden.
     public mutating func reconcile(bar newBar: [MenuBarItem], hidden newHidden: [BundleID]) {
         let fresh = Dictionary(newBar.map { ($0.id, $0) }) { first, _ in first }
@@ -140,6 +142,13 @@ public struct LayoutDraft: Equatable, Sendable {
             let slot = before.flatMap { earlier in draftBar.firstIndex { $0.id == earlier.id } }.map { $0 + 1 } ?? 0
             draftBar.insert(item, at: slot)
         }
+        // Untouched items follow the bar's latest order: the user never placed them, so the draft
+        // shows them where they really are, and `changes()` can leave them alone. Touched items and
+        // placeholders keep their slots, which is where the user put them.
+        let newIndex = Dictionary(newBar.enumerated().map { ($1.id, $0) }) { first, _ in first }
+        let slots = draftBar.indices.filter { !touched.contains(draftBar[$0].id) && newIndex[draftBar[$0].id] != nil }
+        let inRealOrder = slots.map { draftBar[$0] }.sorted { (newIndex[$0.id] ?? 0) < (newIndex[$1.id] ?? 0) }
+        for (slot, item) in zip(slots, inRealOrder) { draftBar[slot] = item }
         realBar = newBar
         realHidden = newHidden
         bar = draftBar
@@ -156,9 +165,10 @@ public struct LayoutDraft: Equatable, Sendable {
         var changes = LayoutChanges()
         changes.hides = hidden.filter { !realHidden.contains($0) }
 
-        // Items moved relative to the rest. Moving an item never reorders the others, so the
-        // untouched ones keep their real order; a touched one that still fits that order (moved
-        // back, or passed by another) needs no move of its own.
+        // Items moved relative to the rest. Moving an item never reorders the others, and
+        // `reconcile` re-sorts them, so after an edit and after `reconcile` the untouched ones are
+        // in real order; a touched one that still fits that order (moved back, or passed by another)
+        // needs no move of its own.
         let realIndex = Dictionary(realBar.enumerated().map { ($1.id, $0) }) { first, _ in first }
         var staying = Set(bar.filter { !touched.contains($0.id) && realIndex[$0.id] != nil }.map(\.id))
         for item in bar where touched.contains(item.id) && realIndex[item.id] != nil {
