@@ -11,6 +11,10 @@ struct StripNotice: Equatable {
         case retry(BundleID)
         /// The app isn't running: open it.
         case openApp(BundleID)
+        /// A menu-bar-only app is hidden, so its icon may open nothing: unhide it.
+        case unhide(BundleID)
+        /// The app's icon opened nothing twice in a row: quit and reopen it.
+        case restart(BundleID)
     }
 
     var message: String
@@ -21,6 +25,8 @@ struct StripNotice: Equatable {
         case .openSettings: "Fix…"
         case .retry: "Try Again"
         case .openApp: "Open"
+        case .unhide: "Unhide"
+        case .restart: "Restart"
         case nil: nil
         }
     }

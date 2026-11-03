@@ -311,9 +311,9 @@ final class StatusItemController: NSObject {
     }
 
     /// The strip's notice, most pressing first: a missing grant (Settings fixes it), then why the
-    /// last click failed, each with the button that helps, if one can.
+    /// last click failed, then a hidden or stuck app, each with the button that helps, if one can.
     static func notice(needsGrant: Set<GrantedFile>, problem: RevealProblem?, ownIconMissing: Bool,
-                       name: (BundleID) -> String) -> StripNotice? {
+                       health: HealthIssue? = nil, name: (BundleID) -> String) -> StripNotice? {
         if !needsGrant.isEmpty {
             let files = [GrantedFile.allowList, .positions].filter(needsGrant.contains)
                 .compactMap(AppPermission.init(file:)).map(\.title)
@@ -335,6 +335,14 @@ final class StatusItemController: NSObject {
         case nil:
             break
         }
+        switch health {
+        case .hidden(let id)?:
+            return StripNotice(message: "\(name(id)) is hidden, so its icon may open nothing.", action: .unhide(id))
+        case .stuck(let id)?:
+            return StripNotice(message: "\(name(id)) opened nothing the last two times.", action: .restart(id))
+        case nil:
+            break
+        }
         if ownIconMissing { return StripNotice(message: "YeeHaw can’t find its own menu bar icon.") }
         return nil
     }
@@ -351,6 +359,8 @@ final class StatusItemController: NSObject {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { _, error in
                 if let error { Self.log.error("Could not open \(id, privacy: .public): \(error, privacy: .public)") }
             }
+        case .unhide, .restart:
+            break
         }
     }
 
