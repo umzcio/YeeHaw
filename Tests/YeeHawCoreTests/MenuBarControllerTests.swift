@@ -720,6 +720,27 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
 
     // MARK: reveal
 
+    @Test func revealReturnsTheDrawnCopysProcess() async throws {
+        var copy = FakeSystem.item(Self.a)
+        copy.pid = 4242
+        let system = try FakeSystem(
+            allow: [(Self.a, false), (Self.b, true), (Self.yeehaw, true)],
+            positions: [
+                "status:\(Self.a)::Item-0": 300,
+                "status:\(Self.b)::Item-0": 100,
+                "status:\(Self.yeehaw)::Item-0": 10,
+                PositionKey.controlCenter: 5,
+                PositionKey.clock: 0,
+            ],
+            drawn: [Self.a: [copy]])
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+
+        let drawn = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        #expect(drawn.pid == 4242)
+        try await c.endReveal()
+    }
+
     @Test func revealUsesSlotLeftOfYeeHawAndRestores() async throws {
         let system = try Self.revealSystem()
         let original = system.positions
