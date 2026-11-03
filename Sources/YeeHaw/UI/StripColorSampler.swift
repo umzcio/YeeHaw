@@ -36,6 +36,11 @@ final class StripColorSampler {
 
     private let permitted: @MainActor () -> Bool
     private let capture: Capture
+    private let now: @MainActor () -> ContinuousClock.Instant
+    /// How long a sample stays good while nothing that changes the bar's colour has happened.
+    static let freshFor: Duration = .seconds(300)
+    /// When each display's kept sample was taken; cleared by `invalidate()`.
+    private var sampledAt: [CGDirectDisplayID: ContinuousClock.Instant] = [:]
     private var cache: [CGDirectDisplayID: StripRGB] = [:]
     /// The number of the last sample started, and the newest one whose result was kept, per display.
     private var started: [CGDirectDisplayID: Int] = [:]
@@ -45,9 +50,18 @@ final class StripColorSampler {
     static let shared = StripColorSampler()
 
     init(permitted: @escaping @MainActor () -> Bool = { CGPreflightScreenCaptureAccess() },
-         capture: @escaping Capture = { display, height in await StripColorSampler.screenCapture(display: display, barHeight: height) }) {
+         capture: @escaping Capture = { display, height in await StripColorSampler.screenCapture(display: display, barHeight: height) },
+         now: @escaping @MainActor () -> ContinuousClock.Instant = { .now }) {
         self.permitted = permitted
         self.capture = capture
+        self.now = now
+    }
+
+    /// Marks every display's sample out of date (the Space, the appearance or the displays changed),
+    /// so the next `sample` captures again. The colours stay cached, so the strip still opens in the
+    /// last known colour rather than the neutral.
+    func invalidate() {
+        sampledAt = [:]
     }
 
     /// The last good sample of `display`'s bar.
@@ -59,12 +73,17 @@ final class StripColorSampler {
     ///
     /// A success is cached unless a sample started later has already been kept. Without Screen
     /// Recording the cache is cleared, so a stale colour isn't shown once permission is withdrawn;
-    /// a failed capture keeps the last good colour.
+    /// a failed capture keeps the last good colour. A fresh sample (see `freshFor`, `invalidate()`)
+    /// is returned from the cache without capturing.
     func sample(display: CGDirectDisplayID, barHeight: CGFloat) async -> Outcome {
         guard permitted() else {
             cache[display] = nil
+            sampledAt[display] = nil
             applied[display] = started[display] // A capture still in flight is stale now.
             return .noPermission
+        }
+        if let color = cache[display], let at = sampledAt[display], now() - at < Self.freshFor {
+            return .sampled(color)
         }
         let number = (started[display] ?? 0) + 1
         started[display] = number
@@ -72,6 +91,7 @@ final class StripColorSampler {
         if case .sampled(let color) = outcome, number > applied[display] ?? 0 {
             applied[display] = number
             cache[display] = color
+            sampledAt[display] = now()
         }
         return outcome
     }

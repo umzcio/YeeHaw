@@ -34,8 +34,6 @@ final class StripPanel: NSPanel {
     static let fadeOut: Double = 0.12
     /// Crossfade when a fresh sample changes the fill.
     static let colorCrossfade: Double = 0.2
-    /// How long after a Space switch to resample, so the new Space's wallpaper is on screen.
-    static let spaceSettle: Duration = .milliseconds(600)
 
     private static let log = Logger(subsystem: Log.subsystem, category: "strip")
     private let model: StripModel
@@ -279,27 +277,29 @@ final class StripPanel: NSPanel {
         }
     }
 
-    /// Samples every screen now, so the first show after launch opens in the bar's colour, and
-    /// again when a display comes or goes, the active Space changes or the appearance changes: the
-    /// wallpaper, the bar's tint and the neutral can all change with them.
+    /// Samples every screen once now, so the first show after launch opens in the bar's colour.
+    /// After that a display, Space or appearance change only marks the samples out of date: each
+    /// sample is a screen capture, and a burst of Space switches shouldn't cost one apiece. The
+    /// next show captures again. A shown strip is already dismissed by a Space or display change,
+    /// but it stays open across an appearance change, so that one resamples at once.
     private func watchForResampling() {
         resampleAllScreens()
         resampleTriggers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.resampleAllScreens() }
+            Task { @MainActor [weak self] in self?.sampler.invalidate() }
         })
         resampleTriggers.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: Self.spaceSettle)
-                self?.resampleAllScreens()
-            }
+            Task { @MainActor [weak self] in self?.sampler.invalidate() }
         })
         appearanceObservation = NSApp?.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if isShown { paint(currentFill(), animated: true) }
-                resampleAllScreens()
+                sampler.invalidate()
+                if isShown {
+                    paint(currentFill(), animated: true)
+                    resampleForShow()
+                }
             }
         }
     }
