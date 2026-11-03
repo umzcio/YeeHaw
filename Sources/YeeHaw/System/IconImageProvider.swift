@@ -25,6 +25,14 @@ final class IconImageProvider {
 
     /// Whether `captureIfPermitted` photographs at all; off in tests, which have no menu bar.
     private let capturesScreen: Bool
+    /// Whether Screen Recording is granted. Checked without prompting; tests pass their own.
+    private let permitted: @MainActor () -> Bool
+    /// Takes one shot of every `MenuBarAgent` bar. Tests pass scripted shots.
+    private let captureBars: @MainActor () async throws -> [BarShot]
+    /// The time, for the rate limit. Tests move it forward by hand.
+    private let now: @MainActor () -> ContinuousClock.Instant
+    /// Waits between `captureSettled`'s shots. It throws when the task is cancelled.
+    private let sleep: @MainActor (Duration) async throws -> Void
     /// Counts YeeHaw's own writes to the bar (`MenuBarController.writeCount`). A shot taken while
     /// it changed may show items somewhere other than the frames being cropped (a reveal began or
     /// ended meanwhile), so it's thrown away rather than saved under the wrong app.
@@ -35,9 +43,17 @@ final class IconImageProvider {
     /// Layout window.
     var proveOwnership: @MainActor ([MenuBarItem]) async -> Set<String> = { _ in [] }
 
-    init(directory: URL = IconImageProvider.defaultDirectory, capturesScreen: Bool = true) {
+    init(directory: URL = IconImageProvider.defaultDirectory, capturesScreen: Bool = true,
+         permitted: @escaping @MainActor () -> Bool = { CGPreflightScreenCaptureAccess() },
+         captureBars: @escaping @MainActor () async throws -> [BarShot] = { try await IconImageProvider.liveCaptureBars() },
+         now: @escaping @MainActor () -> ContinuousClock.Instant = { .now },
+         sleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         self.directory = directory
         self.capturesScreen = capturesScreen
+        self.permitted = permitted
+        self.captureBars = captureBars
+        self.now = now
+        self.sleep = sleep
     }
 
     /// `<bundleID>-<indexInApp>`, with anything outside `[A-Za-z0-9.-]` replaced by `_`, so a key
@@ -110,7 +126,7 @@ final class IconImageProvider {
     /// `proveOwnership` vouches for. Does nothing unless Screen Recording is already granted; it
     /// never prompts.
     func captureIfPermitted(_ items: [MenuBarItem]) async {
-        guard capturesScreen, CGPreflightScreenCaptureAccess() else { return }
+        guard capturesScreen, permitted() else { return }
         let targets = items.filter {
             ($0.bundleID != nil && $0.bundleID != OwnIconLocator.bundleID) || $0.appleIdentifier != nil
         }
@@ -118,7 +134,7 @@ final class IconImageProvider {
         let writesBefore = barWrites()
         let bars: [BarShot]
         do {
-            bars = try await Self.captureBars()
+            bars = try await captureBars()
         } catch {
             Self.log.error("Menu bar capture failed: \(error, privacy: .public)")
             return
@@ -162,13 +178,13 @@ final class IconImageProvider {
     /// closes and kept only when settled, it shows the icon as the app now draws it (Fiddle's
     /// filled flame while it runs), which a hidden app can't otherwise show.
     func captureSettled(_ item: MenuBarItem) async {
-        guard capturesScreen, CGPreflightScreenCaptureAccess(), let id = item.bundleID,
+        guard capturesScreen, permitted(), let id = item.bundleID,
               id != OwnIconLocator.bundleID else { return }
         let writesBefore = barWrites()
         var last: (crop: CGImage, scale: CGFloat, pixels: Data)?
         for shot in 0..<Self.settleShots {
-            if shot > 0 { try? await Task.sleep(for: Self.settleInterval) }
-            guard let bars = try? await Self.captureBars(), let bar = Self.bar(containing: item, in: bars),
+            if shot > 0 { try? await sleep(Self.settleInterval) }
+            guard let bars = try? await captureBars(), let bar = Self.bar(containing: item, in: bars),
                   let crop = bar.crop(x: item.x, width: item.width), let pixels = Self.pixels(crop) else { return }
             if let last, last.pixels == pixels {
                 guard barWrites() == writesBefore, await proveOwnership([item]).contains(item.id),
@@ -317,7 +333,7 @@ final class IconImageProvider {
     /// `MenuBarAgent`'s bar windows aren't reported as on screen (the WindowServer composites them
     /// into the menu bar), so off-screen windows are included and filtered by shape.
     @concurrent
-    private static func captureBars() async throws -> [BarShot] {
+    static func liveCaptureBars() async throws -> [BarShot] {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         let windows = content.windows.filter {
             $0.owningApplication?.bundleIdentifier == AXMenuBarReader.agentBundleID
