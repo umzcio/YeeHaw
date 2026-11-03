@@ -156,7 +156,8 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
     static let closeQuestion = "Apply your changes to the menu bar?"
 
     /// Asks whether to apply the draft before closing (a sheet, so only this window waits):
-    /// Apply closes once everything applied (it stays open to show what didn't), Don't Apply
+    /// Apply closes once everything applied and the spacing change reported no problem (it stays
+    /// open to show what didn't), Don't Apply
     /// drops the draft and closes, Cancel keeps the window open.
     private func askToApplyBeforeClosing() {
         guard window.attachedSheet == nil else { return }
@@ -173,9 +174,13 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
                 guard let self else { return }
                 switch response {
                 case .alertFirstButtonReturn:
+                    let appliesSpacing = self.spacing.isPending
                     guard let applying = self.model.apply() else { return }
                     Task {
-                        if await applying.value.isEmpty { self.window.close() }
+                        let failures = await applying.value
+                        // A spacing warning (an app quit but didn't reopen) stays on screen to be read.
+                        let spacingWarned = appliesSpacing && self.spacing.report?.isWarning == true
+                        if failures.isEmpty, !spacingWarned { self.window.close() }
                     }
                 case .alertSecondButtonReturn:
                     self.model.revert()
