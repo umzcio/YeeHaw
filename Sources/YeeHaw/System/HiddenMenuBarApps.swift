@@ -35,6 +35,34 @@ enum HiddenMenuBarApps {
         return names
     }
 
+    /// Unhides every running copy of `id` without activating it (the strip's Unhide). True when
+    /// none is left hidden.
+    @discardableResult
+    static func unhide(_ id: BundleID) -> Bool {
+        var allShown = true
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: id)
+        where app.isHidden && !app.isTerminated {
+            if !app.unhide() {
+                allShown = false
+                log.error("Couldn't unhide \(id, privacy: .public)")
+            }
+        }
+        return allShown
+    }
+
+    /// The running copies of `ids` (apps that own a menu bar item), as the health check reads
+    /// them, in `ids` order. Copies that aren't app bundles are left out.
+    static func runningFacts(of ids: [BundleID]) -> [RunningAppFacts] {
+        var seen: Set<BundleID> = []
+        return ids.filter { seen.insert($0).inserted }.flatMap { id in
+            NSRunningApplication.runningApplications(withBundleIdentifier: id).compactMap { app in
+                guard !app.isTerminated, let url = app.bundleURL, url.pathExtension == "app" else { return nil }
+                return RunningAppFacts(bundleID: id, bundlePath: url.path, isHidden: app.isHidden,
+                                       isRegular: app.activationPolicy == .regular)
+            }
+        }
+    }
+
     /// The launch pass, run once per Mac user: apps an earlier Spacing Apply left hidden are shown,
     /// so nobody has to find and restart them by hand.
     static func unhideOnce(defaults: UserDefaults = .standard) async {
