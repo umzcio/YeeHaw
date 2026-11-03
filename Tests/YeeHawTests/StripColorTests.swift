@@ -177,8 +177,45 @@ final class ScriptedCapture: Sendable {
         let sampler = StripColorSampler(permitted: { true },
                                         capture: ScriptedCapture([.sampled(Self.navy), .failed("capture failed: timeout")]).capture)
         _ = await sampler.sample(display: 1, barHeight: 39)
+        sampler.invalidate() // A fresh sample would be reused without capturing.
         #expect(await sampler.sample(display: 1, barHeight: 39) == .failed("capture failed: timeout"))
         #expect(sampler.cached(for: 1) == Self.navy)
+    }
+
+    @Test func aFreshSampleIsReusedWithoutCapturing() async {
+        let clock = TestClock()
+        let script = ScriptedCapture([.sampled(Self.navy), .sampled(Self.grey)])
+        let sampler = StripColorSampler(permitted: { true }, capture: script.capture, now: { clock.now })
+        _ = await sampler.sample(display: 1, barHeight: 39)
+        #expect(await sampler.sample(display: 1, barHeight: 39) == .sampled(Self.navy))
+        #expect(script.calls.withLock { $0 } == 1)
+    }
+
+    @Test func invalidatingMakesTheNextSampleCapture() async {
+        let script = ScriptedCapture([.sampled(Self.navy), .sampled(Self.grey)])
+        let sampler = StripColorSampler(permitted: { true }, capture: script.capture)
+        _ = await sampler.sample(display: 1, barHeight: 39)
+        sampler.invalidate()
+        #expect(await sampler.sample(display: 1, barHeight: 39) == .sampled(Self.grey))
+        #expect(script.calls.withLock { $0 } == 2)
+    }
+
+    @Test func aSampleExpiresAfterFiveMinutes() async {
+        let clock = TestClock()
+        let script = ScriptedCapture([.sampled(Self.navy), .sampled(Self.grey)])
+        let sampler = StripColorSampler(permitted: { true }, capture: script.capture, now: { clock.now })
+        _ = await sampler.sample(display: 1, barHeight: 39)
+        clock.now += StripColorSampler.freshFor
+        #expect(await sampler.sample(display: 1, barHeight: 39) == .sampled(Self.grey))
+        #expect(script.calls.withLock { $0 } == 2)
+    }
+
+    @Test func aFailedSampleIsNotFresh() async {
+        let script = ScriptedCapture([.failed("x"), .sampled(Self.navy)])
+        let sampler = StripColorSampler(permitted: { true }, capture: script.capture)
+        _ = await sampler.sample(display: 1, barHeight: 39)
+        #expect(await sampler.sample(display: 1, barHeight: 39) == .sampled(Self.navy))
+        #expect(script.calls.withLock { $0 } == 2)
     }
 
     @Test func anOlderSampleFinishingLastIsDropped() async throws {

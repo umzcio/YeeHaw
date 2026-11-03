@@ -106,7 +106,7 @@ struct AXMenuBarReader: MenuBarReading {
         return DrawnItem(
             x: frame.minX, width: frame.width,
             label: string(element, kAXDescriptionAttribute) + string(element, kAXTitleAttribute),
-            appleIdentifier: appleIdentifier)
+            appleIdentifier: appleIdentifier, y: frame.minY)
     }
 
     // MARK: Owners

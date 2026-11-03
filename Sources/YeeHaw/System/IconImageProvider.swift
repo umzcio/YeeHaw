@@ -25,19 +25,35 @@ final class IconImageProvider {
 
     /// Whether `captureIfPermitted` photographs at all; off in tests, which have no menu bar.
     private let capturesScreen: Bool
+    /// Whether Screen Recording is granted. Checked without prompting; tests pass their own.
+    private let permitted: @MainActor () -> Bool
+    /// Takes one shot of every `MenuBarAgent` bar. Tests pass scripted shots.
+    private let captureBars: @MainActor () async throws -> [BarShot]
+    /// The time, for the rate limit. Tests move it forward by hand.
+    private let now: @MainActor () -> ContinuousClock.Instant
+    /// Waits between `captureSettled`'s shots. It throws when the task is cancelled.
+    private let sleep: @MainActor (Duration) async throws -> Void
     /// Counts YeeHaw's own writes to the bar (`MenuBarController.writeCount`). A shot taken while
     /// it changed may show items somewhere other than the frames being cropped (a reveal began or
     /// ended meanwhile), so it's thrown away rather than saved under the wrong app.
     var barWrites: @MainActor () -> Int = { 0 }
-    /// Re-reads the bar once a shot is taken and says which of the items it was taken for can be
-    /// stored as their own (`ItemMatcher.photographable`). By default none: a photograph that can't
+    /// Re-reads the bar once a shot is taken and says which copies (slots) of the items it was taken
+    /// for can be stored as their own (`ItemMatcher.photographable`). By default none: a photograph that can't
     /// be proven to be the app's own isn't kept, and its app icon stands in, in the strip as in the
     /// Layout window.
-    var proveOwnership: @MainActor ([MenuBarItem]) async -> Set<String> = { _ in [] }
+    var proveOwnership: @MainActor ([MenuBarItem]) async -> Set<ItemSlot> = { _ in [] }
 
-    init(directory: URL = IconImageProvider.defaultDirectory, capturesScreen: Bool = true) {
+    init(directory: URL = IconImageProvider.defaultDirectory, capturesScreen: Bool = true,
+         permitted: @escaping @MainActor () -> Bool = { CGPreflightScreenCaptureAccess() },
+         captureBars: @escaping @MainActor () async throws -> [BarShot] = { try await IconImageProvider.liveCaptureBars() },
+         now: @escaping @MainActor () -> ContinuousClock.Instant = { .now },
+         sleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         self.directory = directory
         self.capturesScreen = capturesScreen
+        self.permitted = permitted
+        self.captureBars = captureBars
+        self.now = now
+        self.sleep = sleep
     }
 
     /// `<bundleID>-<indexInApp>`, with anything outside `[A-Za-z0-9.-]` replaced by `_`, so a key
@@ -105,38 +121,86 @@ final class IconImageProvider {
         captured(Self.cacheKey(bundleID: id, indexInApp: indexInApp)) ?? appIcon(id)
     }
 
+    /// How old a photo may get before a routine capture (a strip open, launch) takes it again.
+    static let photoMaxAge: Duration = .seconds(600)
+    /// How old the Layout window lets a photo get: it shows drawn items' photos, so they stay current there.
+    static let layoutPhotoMaxAge: Duration = .seconds(60)
+    /// How soon an item that has no photo yet is tried again after a pass that couldn't keep one.
+    static let missingRetry: Duration = .seconds(60)
+    /// When each item was last part of a capture pass, by `attemptKey`.
+    private var lastAttempt: [String: ContinuousClock.Instant] = [:]
+    /// Set while `captureIfPermitted` runs, so a second pass never overlaps it.
+    private var capturing = false
+
+    /// What `lastAttempt` is keyed by: the cache key for an app's item, the item id for an Apple one.
+    static func attemptKey(_ item: MenuBarItem) -> String {
+        guard let id = item.bundleID else { return "apple:" + item.id }
+        return cacheKey(bundleID: id, indexInApp: item.indexInApp)
+    }
+
+    private func hasPhoto(_ item: MenuBarItem) -> Bool {
+        guard let id = item.bundleID else { return appleCaptures[item.id] != nil }
+        return captured(Self.cacheKey(bundleID: id, indexInApp: item.indexInApp)) != nil
+    }
+
+    /// Whether a routine pass should photograph the item: it was never tried this session, or its
+    /// photo is `maxAge` old, or it has none and the last try was `missingRetry` ago.
+    private func isDue(_ item: MenuBarItem, maxAge: Duration, at time: ContinuousClock.Instant) -> Bool {
+        guard let last = lastAttempt[Self.attemptKey(item)] else { return true }
+        return time - last >= (hasPhoto(item) ? maxAge : Self.missingRetry)
+    }
+
     /// Photographs the third-party items in `items`, which must be drawn right now, with one
     /// ScreenCaptureKit shot of each `MenuBarAgent` bar, keeping only the photos
     /// `proveOwnership` vouches for. Does nothing unless Screen Recording is already granted; it
-    /// never prompts.
-    func captureIfPermitted(_ items: [MenuBarItem]) async {
-        guard capturesScreen, CGPreflightScreenCaptureAccess() else { return }
+    /// never prompts. Every shot makes macOS flash its recording indicator and re-lay out the bar,
+    /// so a pass only happens when an item is due (it has no photo yet, or its photo is `maxAge`
+    /// old), and never while another pass is still running.
+    func captureIfPermitted(_ items: [MenuBarItem], maxAge: Duration = IconImageProvider.photoMaxAge) async {
+        guard capturesScreen, !capturing, permitted() else { return }
         let targets = items.filter {
             ($0.bundleID != nil && $0.bundleID != OwnIconLocator.bundleID) || $0.appleIdentifier != nil
         }
         guard !targets.isEmpty else { return }
+        let time = now()
+        guard targets.contains(where: { isDue($0, maxAge: maxAge, at: time) }), !Task.isCancelled else { return }
+        // Nothing awaits between the `capturing` guard and this line, so two calls can't both pass.
+        capturing = true
+        defer { capturing = false }
+        // Recorded even if the proof fails, so an item that can never be proven doesn't cost a
+        // shot on every strip open.
+        for item in targets { lastAttempt[Self.attemptKey(item)] = time }
         let writesBefore = barWrites()
         let bars: [BarShot]
         do {
-            bars = try await Self.captureBars()
+            bars = try await captureBars()
         } catch {
             Self.log.error("Menu bar capture failed: \(error, privacy: .public)")
             return
         }
+        guard !Task.isCancelled else { return }
         // The bar is read again after the shot: an item whose frame or owner is in any doubt is
         // left out. On 27.2 a switched-off app stays listed at its slot for a moment while the
         // icon sliding in is what's drawn there (a Fiddle photo of YeeHaw's own hat).
         let proven = await proveOwnership(items)
+        // `StatusItemController.openStrip` cancels the previous strip refresh; a replaced refresh
+        // must not store photos.
+        guard !Task.isCancelled else {
+            Self.log.info("Menu bar capture dropped: cancelled")
+            return
+        }
         guard barWrites() == writesBefore else {
             Self.log.info("Menu bar capture dropped: the bar changed while it was taken")
             return
         }
         let drawn = items.sorted { $0.x < $1.x }
-        for item in targets {
-            guard proven.contains(item.id) else {
+        var kept: Set<String> = []
+        for item in Self.photoOrder(targets, bars: bars) {
+            guard proven.contains(item.slot) else {
                 Self.log.info("Not keeping a photo of \(item.id, privacy: .public): it can't be proven to be its own")
                 continue
             }
+            guard !kept.contains(Self.attemptKey(item)) else { continue }
             let column = item.bundleID == nil ? Self.widened(item, among: drawn) : (x: item.x, width: item.width)
             guard let bar = Self.bar(containing: item, in: bars),
                   let crop = bar.crop(x: column.x, width: column.width),
@@ -144,11 +208,13 @@ final class IconImageProvider {
                   let glyph = GlyphImage.make(from: crop, scale: bar.scale) else { continue }
             guard let id = item.bundleID else {
                 appleCaptures[item.id] = glyph
+                kept.insert(Self.attemptKey(item))
                 continue
             }
             let key = Self.cacheKey(bundleID: id, indexInApp: item.indexInApp)
             captures[key] = glyph
             store(crop, scale: bar.scale, key: key)
+            kept.insert(Self.attemptKey(item))
         }
     }
 
@@ -162,16 +228,19 @@ final class IconImageProvider {
     /// closes and kept only when settled, it shows the icon as the app now draws it (Fiddle's
     /// filled flame while it runs), which a hidden app can't otherwise show.
     func captureSettled(_ item: MenuBarItem) async {
-        guard capturesScreen, CGPreflightScreenCaptureAccess(), let id = item.bundleID,
+        guard capturesScreen, permitted(), let id = item.bundleID,
               id != OwnIconLocator.bundleID else { return }
         let writesBefore = barWrites()
         var last: (crop: CGImage, scale: CGFloat, pixels: Data)?
         for shot in 0..<Self.settleShots {
-            if shot > 0 { try? await Task.sleep(for: Self.settleInterval) }
-            guard let bars = try? await Self.captureBars(), let bar = Self.bar(containing: item, in: bars),
+            if shot > 0 {
+                do { try await sleep(Self.settleInterval) } catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            guard let bars = try? await captureBars(), let bar = Self.bar(containing: item, in: bars),
                   let crop = bar.crop(x: item.x, width: item.width), let pixels = Self.pixels(crop) else { return }
             if let last, last.pixels == pixels {
-                guard barWrites() == writesBefore, await proveOwnership([item]).contains(item.id),
+                guard barWrites() == writesBefore, await proveOwnership([item]).contains(item.slot),
                       let glyph = GlyphImage.make(from: crop, scale: bar.scale) else {
                     Self.log.info("Not keeping a settled photo of \(item.id, privacy: .public): it can't be proven to be its own")
                     return
@@ -179,6 +248,7 @@ final class IconImageProvider {
                 let key = Self.cacheKey(bundleID: id, indexInApp: item.indexInApp)
                 captures[key] = glyph
                 store(crop, scale: bar.scale, key: key)
+                lastAttempt[Self.attemptKey(item)] = now()
                 return
             }
             last = (crop, bar.scale, pixels)
@@ -207,8 +277,10 @@ final class IconImageProvider {
     /// An Apple item's column, widened by up to `appleCropSlack` on each side where no other
     /// drawn item is (so a neighbour's ink is never included).
     nonisolated static func widened(_ item: MenuBarItem, among drawn: [MenuBarItem]) -> (x: Double, width: Double) {
-        let left = drawn.filter { $0.id != item.id && $0.x < item.x }.map { $0.x + $0.width }.max()
-        let right = drawn.filter { $0.id != item.id && $0.x > item.x }.map(\.x).min()
+        let left = drawn.filter { abs($0.y - item.y) <= ItemMatcher.tolerance && $0.id != item.id && $0.x < item.x }
+            .map { $0.x + $0.width }.max()
+        let right = drawn.filter { abs($0.y - item.y) <= ItemMatcher.tolerance && $0.id != item.id && $0.x > item.x }
+            .map(\.x).min()
         let before = min(appleCropSlack, max(0, item.x - (left ?? -.infinity)))
         let after = min(appleCropSlack, max(0, (right ?? .infinity) - (item.x + item.width)))
         return (item.x - before, item.width + before + after)
@@ -308,22 +380,52 @@ final class IconImageProvider {
         }
     }
 
-    /// The bar whose x range holds the item, preferring the topmost (stacked displays share x).
-    private static func bar(containing item: MenuBarItem, in bars: [BarShot]) -> BarShot? {
-        bars.filter { $0.frame.minX - 0.5 <= item.x && item.x + item.width <= $0.frame.maxX + 0.5 }
+    /// The bar holding the item's copy: its x range and its height both, since stacked displays share x.
+    static func bar(containing item: MenuBarItem, in bars: [BarShot]) -> BarShot? {
+        bars.filter { $0.frame.minX - 0.5 <= item.x && item.x + item.width <= $0.frame.maxX + 0.5
+                      && $0.frame.minY - 0.5 <= item.y && item.y <= $0.frame.maxY + 0.5 }
             .min { $0.frame.minY < $1.frame.minY }
+    }
+
+    /// Whether `bar` is the primary display's (its frame holds the global origin).
+    nonisolated static func isPrimary(_ bar: BarShot) -> Bool {
+        bar.frame.minX <= 0 && 0 < bar.frame.maxX && bar.frame.minY <= 0 && 0 < bar.frame.maxY
+    }
+
+    /// The order copies are tried in when several displays draw one item: the primary display's copy
+    /// first, then left to right. The first that makes a usable glyph is kept, so one copy per photo
+    /// is stored, and the choice doesn't depend on which display happens to be rightmost.
+    static func photoOrder(_ items: [MenuBarItem], bars: [BarShot]) -> [MenuBarItem] {
+        func rank(_ item: MenuBarItem) -> Int { bar(containing: item, in: bars).map(isPrimary) == true ? 0 : 1 }
+        return items.sorted { (rank($0), $0.x) < (rank($1), $1.x) }
+    }
+
+    /// The shots that worked. One bar window that can't be captured (a display going to sleep, a
+    /// bar being torn down) no longer costs every display its photos; only when every window
+    /// failed is the first error thrown, so the caller logs it as before.
+    nonisolated static func keptShots(_ results: [Result<BarShot, Error>]) throws -> [BarShot] {
+        var shots: [BarShot] = []
+        var firstError: Error?
+        for result in results {
+            switch result {
+            case .success(let shot): shots.append(shot)
+            case .failure(let error): firstError = firstError ?? error
+            }
+        }
+        if shots.isEmpty, let firstError { throw firstError }
+        return shots
     }
 
     /// `MenuBarAgent`'s bar windows aren't reported as on screen (the WindowServer composites them
     /// into the menu bar), so off-screen windows are included and filtered by shape.
     @concurrent
-    private static func captureBars() async throws -> [BarShot] {
+    static func liveCaptureBars() async throws -> [BarShot] {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         let windows = content.windows.filter {
             $0.owningApplication?.bundleIdentifier == AXMenuBarReader.agentBundleID
                 && $0.frame.height >= 16 && $0.frame.height <= 60 && $0.frame.width >= 200
         }
-        var shots: [BarShot] = []
+        var results: [Result<BarShot, Error>] = []
         for window in windows {
             let filter = SCContentFilter(desktopIndependentWindow: window)
             let scale = CGFloat(filter.pointPixelScale)
@@ -332,10 +434,14 @@ final class IconImageProvider {
             configuration.height = Int((window.frame.height * scale).rounded())
             configuration.showsCursor = false
             configuration.ignoreShadowsSingleWindow = true
-            let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-            shots.append(BarShot(frame: window.frame, image: image, scale: scale))
+            do {
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+                results.append(.success(BarShot(frame: window.frame, image: image, scale: scale)))
+            } catch {
+                results.append(.failure(error))
+            }
         }
-        return shots
+        return try keptShots(results)
     }
 }
 

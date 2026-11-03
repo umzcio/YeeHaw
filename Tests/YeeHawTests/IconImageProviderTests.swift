@@ -125,6 +125,314 @@ func crop(width: Int = 60, height: Int = 78, ink: CGRect, color: CGColor = .whit
     }
 }
 
+/// Scripted bar shots: hands out `shots` in turn (the last repeats), or throws `error`, and counts calls.
+@MainActor final class FakeBars {
+    var calls = 0
+    var shots: [[IconImageProvider.BarShot]]
+    var error: Error?
+    /// Runs inside each call, e.g. to count a write to the bar while the shot is taken.
+    var during: (() -> Void)?
+    /// How long each call takes, so a test can act while a shot is in flight.
+    var delay: Duration?
+    init(_ shots: [[IconImageProvider.BarShot]]) { self.shots = shots }
+    func capture() async throws -> [IconImageProvider.BarShot] {
+        calls += 1
+        during?()
+        if let delay { try? await Task.sleep(for: delay) }
+        if let error { throw error }
+        return shots[min(calls - 1, shots.count - 1)]
+    }
+}
+
+struct ShotFailed: Error {}
+
+@MainActor final class TestClock {
+    var now = ContinuousClock.now
+}
+
+@Suite @MainActor struct IconImageProviderCaptureTests {
+    /// A 200x24 pt bar at scale 2 whose ink sits in the column of the item at x 60 (pixels 120-160).
+    static func bar(inkX: CGFloat = 128) -> IconImageProvider.BarShot {
+        IconImageProvider.BarShot(frame: CGRect(x: 0, y: 0, width: 200, height: 24),
+                                  image: crop(width: 400, height: 48, ink: CGRect(x: inkX, y: 10, width: 24, height: 28)), scale: 2)
+    }
+
+    static let item = IconImageProviderTests.drawn("com.example.app", index: 2)
+    static let proveAll: @MainActor ([MenuBarItem]) async -> Set<ItemSlot> = { items in Set(items.map(\.slot)) }
+
+    @MainActor struct Fixture {
+        let directory: URL
+        let bars: FakeBars
+        let permission = Permission()
+        let clock = TestClock()
+        let provider: IconImageProvider
+
+        init(shots: [[IconImageProvider.BarShot]] = [[IconImageProviderCaptureTests.bar()]], capturesScreen: Bool = true,
+             sleep: @escaping @MainActor (Duration) async throws -> Void = { _ in }) throws {
+            directory = try IconImageProviderTests.temporaryDirectory()
+            let bars = FakeBars(shots)
+            let permission = permission, clock = clock
+            self.bars = bars
+            provider = IconImageProvider(directory: directory, capturesScreen: capturesScreen,
+                                         permitted: { permission.granted }, captureBars: { try await bars.capture() },
+                                         now: { clock.now }, sleep: sleep)
+        }
+
+        func stored(index: Int = 2) -> Bool {
+            FileManager.default.fileExists(atPath: provider.fileURL(IconImageProvider.cacheKey(bundleID: "com.example.app", indexInApp: index))!.path)
+        }
+    }
+
+    @Test func withoutScreenRecordingNothingIsShot() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        f.permission.granted = false
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 0)
+    }
+
+    @Test func capturesScreenOffShootsNothing() async throws {
+        let f = try Fixture(capturesScreen: false)
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 0)
+    }
+
+    @Test func onlyYeeHawsOwnItemShootsNothing() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([IconImageProviderTests.drawn(OwnIconLocator.bundleID, index: 0)])
+        #expect(f.bars.calls == 0)
+    }
+
+    @Test func aProvenItemIsStored() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 1)
+        #expect(f.stored())
+        #expect(f.provider.image(for: "com.example.app", indexInApp: 2).isTemplate)
+    }
+
+    static func shot(frame: CGRect, ink: CGRect) -> IconImageProvider.BarShot {
+        IconImageProvider.BarShot(frame: frame, image: crop(width: 400, height: 48, ink: ink), scale: 2)
+    }
+
+    @Test func thePrimaryDisplaysCopyIsStored() async throws {
+        let primary = Self.shot(frame: CGRect(x: 0, y: 0, width: 200, height: 24),
+                                ink: CGRect(x: 128, y: 10, width: 24, height: 28))
+        let right = Self.shot(frame: CGRect(x: 200, y: 0, width: 200, height: 24),
+                              ink: CGRect(x: 128, y: 10, width: 12, height: 28))
+        let f = try Fixture(shots: [[primary, right]])
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        var copy = Self.item
+        copy.x = 260
+        await f.provider.captureIfPermitted([Self.item, copy])
+        #expect(f.provider.image(for: "com.example.app", indexInApp: 2).size.width == 13)
+    }
+
+    @Test func anUnprovenCopyDoesntRideOnAProvenOne() async throws {
+        let primary = Self.shot(frame: CGRect(x: 0, y: 0, width: 200, height: 24), ink: .zero)
+        let right = Self.shot(frame: CGRect(x: 200, y: 0, width: 200, height: 24),
+                              ink: CGRect(x: 128, y: 10, width: 12, height: 28))
+        let f = try Fixture(shots: [[primary, right]])
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        var copy = Self.item
+        copy.x = 260
+        let provenSlot = Self.item.slot
+        f.provider.proveOwnership = { _ in [provenSlot] }
+        await f.provider.captureIfPermitted([Self.item, copy])
+        #expect(!f.stored())
+    }
+
+    @Test func aCopyIsCroppedFromItsOwnStackedBar() async throws {
+        let upper = Self.shot(frame: CGRect(x: 0, y: -900, width: 200, height: 24), ink: .zero)
+        let primary = Self.shot(frame: CGRect(x: 0, y: 0, width: 200, height: 24),
+                                ink: CGRect(x: 128, y: 10, width: 24, height: 28))
+        let f = try Fixture(shots: [[upper, primary]])
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.stored())
+    }
+
+    @Test func aFailedBarKeepsTheOthers() throws {
+        let primary = Self.bar()
+        #expect(try IconImageProvider.keptShots([.success(primary), .failure(ShotFailed())]).count == 1)
+        #expect(throws: ShotFailed.self) { try IconImageProvider.keptShots([.failure(ShotFailed())]) }
+        #expect(try IconImageProvider.keptShots([]).isEmpty)
+    }
+
+    @Test func anUnprovenItemIsNotStored() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = { _ in [] }
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 1)
+        #expect(!f.stored())
+    }
+
+    @Test func aShotTakenWhileTheBarChangedIsDropped() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        var writes = 0
+        f.provider.barWrites = { writes }
+        f.bars.during = { writes += 1 }
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 1)
+        #expect(!f.stored())
+    }
+
+    @Test func aFailedShotStoresNothing() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        f.bars.error = ShotFailed()
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 1)
+        #expect(!f.stored())
+    }
+
+    @Test func settledStoresOnceTwoShotsMatch() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureSettled(Self.item)
+        #expect(f.bars.calls == 2)
+        #expect(f.stored())
+    }
+
+    @Test func settledGivesUpWhenTheIconNeverHoldsStill() async throws {
+        let a = Self.bar(), b = Self.bar(inkX: 136)
+        let f = try Fixture(shots: [[a], [b], [a], [b]])
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureSettled(Self.item)
+        #expect(f.bars.calls == IconImageProvider.settleShots)
+        #expect(!f.stored())
+    }
+
+    // MARK: Rate limit
+
+    @Test func aFreshPhotoIsNotRetaken() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 1)
+    }
+
+    @Test func aPhotoIsRetakenOnceItsOld() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        await f.provider.captureIfPermitted([Self.item])
+        f.clock.now += IconImageProvider.photoMaxAge
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 2)
+    }
+
+    @Test func theLayoutsShorterAgeApplies() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        f.clock.now += .seconds(61)
+        await f.provider.captureIfPermitted([Self.item], maxAge: IconImageProvider.layoutPhotoMaxAge)
+        #expect(f.bars.calls == 2)
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 2)
+    }
+
+    @Test func anItemWithNoPhotoIsRetriedAfterAMinuteNotBefore() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = { _ in [] }
+        await f.provider.captureIfPermitted([Self.item])
+        f.clock.now += .seconds(30)
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 1)
+        f.clock.now += .seconds(31)
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 2)
+    }
+
+    @Test func aNewItemTriggersAPass() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        let other = IconImageProviderTests.drawn("com.example.app", index: 3)
+        await f.provider.captureIfPermitted([Self.item, other])
+        #expect(f.bars.calls == 2)
+    }
+
+    @Test func aSecondPassDoesNotOverlapOneInFlight() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        f.bars.delay = .milliseconds(50)
+        let other = IconImageProviderTests.drawn("com.example.app", index: 3)
+        let first = Task { await f.provider.captureIfPermitted([Self.item]) }
+        while f.bars.calls == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        await f.provider.captureIfPermitted([other])
+        await first.value
+        #expect(f.bars.calls == 1)
+    }
+
+    // MARK: Cancellation
+
+    @Test func aCancelledPassShootsNothing() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        let task = Task { await f.provider.captureIfPermitted([Self.item]) }
+        task.cancel()
+        await task.value
+        #expect(f.bars.calls == 0)
+    }
+
+    @Test func aPassCancelledDuringTheProofStoresNothing() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = { items in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return Set(items.map(\.slot))
+        }
+        await Task { await f.provider.captureIfPermitted([Self.item]) }.value
+        #expect(f.bars.calls == 1)
+        #expect(!f.stored())
+    }
+
+    @Test func aSettleCancelledMidwayStopsShooting() async throws {
+        let a = Self.bar(), b = Self.bar(inkX: 136)
+        let f = try Fixture(shots: [[a], [b], [a], [b]], sleep: { _ in throw CancellationError() })
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureSettled(Self.item)
+        #expect(f.bars.calls == 1)
+        #expect(!f.stored())
+    }
+
+    @Test func aCancelledSettleShootsNothing() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        let task = Task { await f.provider.captureSettled(Self.item) }
+        task.cancel()
+        await task.value
+        #expect(f.bars.calls == 0)
+    }
+}
+
 @Suite struct AppleCropTests {
     static func item(_ id: String, x: Double, width: Double, apple: Bool = true) -> MenuBarItem {
         MenuBarItem(id: id, bundleID: apple ? nil : id, appleIdentifier: apple ? id : nil, indexInApp: 0,
@@ -135,6 +443,15 @@ func crop(width: Int = 60, height: Int = 78, ink: CGRect, color: CGColor = .whit
         let controlCenter = Self.item("cc", x: 1866, width: 26)
         let clock = Self.item("clock", x: 1908, width: 127.5)
         let column = IconImageProvider.widened(clock, among: [controlCenter, clock])
+        #expect(column.x == 1904)
+        #expect(column.width == 127.5 + 8)
+    }
+
+    @Test func widenedIgnoresAnotherDisplaysItems() {
+        let clock = Self.item("clock", x: 1908, width: 127.5)
+        var neighbour = Self.item("cc", x: 1866, width: 26)
+        neighbour.y = -900
+        let column = IconImageProvider.widened(clock, among: [neighbour, clock])
         #expect(column.x == 1904)
         #expect(column.width == 127.5 + 8)
     }

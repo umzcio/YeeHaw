@@ -86,7 +86,7 @@ final class StatusItemController: NSObject {
         // Read again first: the app may draw a different icon by now (Fiddle's is wider running).
         reveal.onClosed = { [icons, controller] item in
             await controller.refresh()
-            await icons.captureSettled(controller.items.first { $0.id == item.id } ?? item)
+            await icons.captureSettled(ItemMatcher.sameCopy(of: item, in: controller.items) ?? item)
         }
         reveal.beforePress = { [strip] in await strip.waitUntilOffScreen() }
     }
@@ -270,8 +270,9 @@ final class StatusItemController: NSObject {
         strip.show(below: anchor, items: entries(), notice: currentNotice(), screen: window.screen,
                    highlightFirst: highlightFirst)
 
-        // Re-read the bar in the background: YeeHaw's icon may have moved, and drawn items get
-        // fresh photographs. The strip itself opens at once from the saved state.
+        // Re-read the bar in the background: YeeHaw's icon may have moved, and drawn items whose
+        // photo is missing or old get a new one (`captureIfPermitted`'s rate limit). The strip
+        // itself opens at once from the saved state.
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
             guard let self else { return }

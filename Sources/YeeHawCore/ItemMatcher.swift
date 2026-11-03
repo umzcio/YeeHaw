@@ -2,12 +2,15 @@ public struct DrawnItem: Equatable, Sendable {
     public var x, width: Double
     public var label: String
     public var appleIdentifier: String?
+    /// The item's top edge (global, top-left origin): each display draws its own copy of the bar, and stacked displays share x.
+    public var y: Double
 
-    public init(x: Double, width: Double, label: String, appleIdentifier: String? = nil) {
+    public init(x: Double, width: Double, label: String, appleIdentifier: String? = nil, y: Double = 0) {
         self.x = x
         self.width = width
         self.label = label
         self.appleIdentifier = appleIdentifier
+        self.y = y
     }
 }
 
@@ -53,10 +56,13 @@ public struct MenuBarItem: Equatable, Identifiable, Sendable {
     public var contested: Bool
     /// The process that owns the item, from the read that matched it; nil for Apple items, unknown owners and placeholders.
     public var pid: Int32?
+    /// The top edge of this copy's frame (global, top-left origin), telling apart the copies each display draws.
+    public var y: Double
 
     public init(id: String, bundleID: BundleID?, appleIdentifier: String?, indexInApp: Int,
                 label: String, keyNames: [String], keyPrefixes: [String],
-                x: Double, width: Double, isPinned: Bool, contested: Bool = false, pid: Int32? = nil) {
+                x: Double, width: Double, isPinned: Bool, contested: Bool = false, pid: Int32? = nil,
+                y: Double = 0) {
         self.id = id
         self.bundleID = bundleID
         self.appleIdentifier = appleIdentifier
@@ -69,7 +75,21 @@ public struct MenuBarItem: Equatable, Identifiable, Sendable {
         self.isPinned = isPinned
         self.contested = contested
         self.pid = pid
+        self.y = y
     }
+}
+
+/// One drawn copy of an item. Every display draws its own copy of the bar under the same id,
+/// so a photograph is proven and stored per copy, not per id.
+public struct ItemSlot: Hashable, Sendable {
+    public var id: String
+    public var x: Double
+    public var y: Double
+    public init(id: String, x: Double, y: Double) { self.id = id; self.x = x; self.y = y }
+}
+
+extension MenuBarItem {
+    public var slot: ItemSlot { ItemSlot(id: id, x: x, y: y) }
 }
 
 public enum ItemMatcher {
@@ -106,7 +126,7 @@ public enum ItemMatcher {
                 items.append(MenuBarItem(
                     id: apple, bundleID: nil, appleIdentifier: apple, indexInApp: 0,
                     label: d.label, keyNames: [], keyPrefixes: [],
-                    x: d.x, width: d.width, isPinned: pinnedIdentifiers.contains(apple)))
+                    x: d.x, width: d.width, isPinned: pinnedIdentifiers.contains(apple), y: d.y))
             } else if let i = unused.firstIndex(where: {
                 abs($0.x - d.x) <= tolerance && abs($0.width - d.width) <= tolerance
             }) {
@@ -121,37 +141,48 @@ public enum ItemMatcher {
                     keyNames: [e.identifier, e.title, e.description].filter { !$0.isEmpty },
                     keyPrefixes: PositionKey.prefixes(bundleID: e.bundleID, executableName: e.executableName,
                                                       notarized: e.notarized),
-                    x: d.x, width: d.width, isPinned: false, contested: !rivals.isEmpty, pid: e.pid))
+                    x: d.x, width: d.width, isPinned: false, contested: !rivals.isEmpty, pid: e.pid,
+                    y: d.y))
             } else {
                 items.append(MenuBarItem(
                     id: "unknown@\(Int(d.x))", bundleID: nil, appleIdentifier: nil, indexInApp: 0,
                     label: d.label, keyNames: [], keyPrefixes: [],
-                    x: d.x, width: d.width, isPinned: false))
+                    x: d.x, width: d.width, isPinned: false, y: d.y))
             }
         }
         return items.sorted { $0.x < $1.x }
     }
 
-    /// The ids of `items` whose photograph, taken between that read and `reread`, can be stored as
-    /// their own: each is in both reads at the same frame (the bar didn't move under the shot), no
-    /// other item in either read overlaps it, neither read had to guess its owner (`contested`),
-    /// and its app isn't switched off. MenuBarAgent keeps listing an item for a moment after its
-    /// app is switched off, while the icon that slides into its place is what's drawn there.
+    /// The copy of `item` in a fresh read that is the same drawn copy: same id, same bar (y), nearest
+    /// in x. A re-read can widen an icon (an app drawing a different glyph), so x isn't matched exactly.
+    public static func sameCopy(of item: MenuBarItem, in read: [MenuBarItem]) -> MenuBarItem? {
+        read.filter { $0.id == item.id && abs($0.y - item.y) <= tolerance }
+            .min { abs($0.x - item.x) < abs($1.x - item.x) }
+    }
+
+    /// The slots (copies) of `items` whose photograph, taken between that read and `reread`, can be
+    /// stored as their own, one per drawn copy: each is in both reads at the same frame (the bar
+    /// didn't move under the shot), no other item on its bar in either read overlaps it, neither
+    /// read had to guess its owner (`contested`), and its app isn't switched off. MenuBarAgent keeps
+    /// listing an item for a moment after its app is switched off, while the icon that slides into
+    /// its place is what's drawn there.
     public static func photographable(_ items: [MenuBarItem], reread: [MenuBarItem],
-                                      offApps: Set<BundleID>) -> Set<String> {
+                                      offApps: Set<BundleID>) -> Set<ItemSlot> {
+        func sameBar(_ a: MenuBarItem, _ b: MenuBarItem) -> Bool { abs(a.y - b.y) <= tolerance }
         func overlaps(_ a: MenuBarItem, _ b: MenuBarItem) -> Bool {
-            min(a.x + a.width, b.x + b.width) - max(a.x, b.x) > neighbourOverlap
+            sameBar(a, b) && min(a.x + a.width, b.x + b.width) - max(a.x, b.x) > neighbourOverlap
         }
         func alone(_ item: MenuBarItem, in read: [MenuBarItem]) -> Bool {
-            !read.contains { $0.id != item.id && overlaps($0, item) }
+            !read.contains { $0.slot != item.slot && overlaps($0, item) }
         }
         return Set(items.filter { item in
-            guard let again = reread.first(where: { $0.id == item.id }),
-                  abs(again.x - item.x) <= tolerance, abs(again.width - item.width) <= tolerance,
+            guard let again = reread.first(where: { $0.id == item.id && sameBar($0, item)
+                                                    && abs($0.x - item.x) <= tolerance }),
+                  abs(again.width - item.width) <= tolerance,
                   !item.contested, !again.contested,
                   !(item.bundleID.map(offApps.contains) ?? false) else { return false }
             return alone(item, in: items) && alone(again, in: reread)
-        }.map(\.id))
+        }.map(\.slot))
     }
 
     /// Which of `id`'s items in a per-app read (`MenuBarReading.drawnBar(owning:)`) can really be
