@@ -217,8 +217,9 @@ final class StatusItemController: NSObject {
         strip.show(below: anchor, items: entries(), notice: currentNotice(), screen: window.screen,
                    highlightFirst: highlightFirst)
 
-        // Re-read the bar in the background: YeeHaw's icon may have moved, and drawn items get
-        // fresh photographs. The strip itself opens at once from the saved state.
+        // Re-read the bar in the background: YeeHaw's icon may have moved, and drawn items whose
+        // photo is missing or old get a new one (`captureIfPermitted`'s rate limit). The strip
+        // itself opens at once from the saved state.
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
             guard let self else { return }
