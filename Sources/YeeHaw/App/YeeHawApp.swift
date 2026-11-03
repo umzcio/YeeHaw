@@ -15,8 +15,9 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
     private var watcher: AllowListWatcher?
     /// Why this quit is happening, read from the quit Apple event in `applicationShouldTerminate`.
     private var quitReason = LaunchRules.QuitReason.ordinary
-    /// Turns SIGTERM (`kill`, `pkill`) into an ordinary quit, so hidden apps are switched back on.
-    private var terminationSignal: DispatchSourceSignal?
+    /// One per signal in `quitSignals`, each turned into an ordinary quit so hidden apps are
+    /// switched back on.
+    private var terminationSignals: [DispatchSourceSignal] = []
     /// Watches for Thaw starting while YeeHaw runs.
     private var thawObserver: NSObjectProtocol?
     /// Watches for hidden apps opening from a copy their Allow-list entry doesn't list.
@@ -54,7 +55,7 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
             return
         }
         Self.log.notice("YeeHaw started")
-        quitOnTerminationSignal()
+        quitOnTerminationSignals()
         watchForThaw()
         // Earlier Spacing Applies left the apps they restarted hidden; show them again, once.
         Task { await HiddenMenuBarApps.unhideOnce() }
@@ -101,19 +102,27 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// SIGTERM is ignored as a signal and handled on the main queue as an ordinary quit instead,
-    /// which switches hidden apps back on (by default it would end the process on the spot).
-    private func quitOnTerminationSignal() {
-        signal(SIGTERM, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        source.setEventHandler {
-            MainActor.assumeIsolated {
-                Self.log.notice("SIGTERM received; quitting the ordinary way")
-                NSApp.terminate(nil)
+    /// What `kill` and `pkill` (SIGTERM), Control-C (SIGINT), closing the Terminal window YeeHaw
+    /// runs in (SIGHUP) and Control-\ (SIGQUIT) send. By default each ends the process on the
+    /// spot, leaving hidden apps switched off. SIGKILL and crashes can't be caught; `--restore` is
+    /// for those.
+    nonisolated static let quitSignals: [Int32] = [SIGTERM, SIGINT, SIGHUP, SIGQUIT]
+
+    /// Each of `quitSignals` is ignored as a signal and handled on the main queue as an ordinary
+    /// quit instead, which switches hidden apps back on.
+    private func quitOnTerminationSignals() {
+        for number in Self.quitSignals {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler {
+                MainActor.assumeIsolated {
+                    Self.log.notice("Signal \(number, privacy: .public) received; quitting the ordinary way")
+                    NSApp.terminate(nil)
+                }
             }
+            source.resume()
+            terminationSignals.append(source)
         }
-        source.resume()
-        terminationSignal = source
     }
 
     /// Thaw edits the same two files. If it starts while YeeHaw runs, YeeHaw stops editing: it
