@@ -400,6 +400,22 @@ final class IconImageProvider {
         return items.sorted { (rank($0), $0.x) < (rank($1), $1.x) }
     }
 
+    /// The shots that worked. One bar window that can't be captured (a display going to sleep, a
+    /// bar being torn down) no longer costs every display its photos; only when every window
+    /// failed is the first error thrown, so the caller logs it as before.
+    nonisolated static func keptShots(_ results: [Result<BarShot, Error>]) throws -> [BarShot] {
+        var shots: [BarShot] = []
+        var firstError: Error?
+        for result in results {
+            switch result {
+            case .success(let shot): shots.append(shot)
+            case .failure(let error): firstError = firstError ?? error
+            }
+        }
+        if shots.isEmpty, let firstError { throw firstError }
+        return shots
+    }
+
     /// `MenuBarAgent`'s bar windows aren't reported as on screen (the WindowServer composites them
     /// into the menu bar), so off-screen windows are included and filtered by shape.
     @concurrent
@@ -409,7 +425,7 @@ final class IconImageProvider {
             $0.owningApplication?.bundleIdentifier == AXMenuBarReader.agentBundleID
                 && $0.frame.height >= 16 && $0.frame.height <= 60 && $0.frame.width >= 200
         }
-        var shots: [BarShot] = []
+        var results: [Result<BarShot, Error>] = []
         for window in windows {
             let filter = SCContentFilter(desktopIndependentWindow: window)
             let scale = CGFloat(filter.pointPixelScale)
@@ -418,10 +434,14 @@ final class IconImageProvider {
             configuration.height = Int((window.frame.height * scale).rounded())
             configuration.showsCursor = false
             configuration.ignoreShadowsSingleWindow = true
-            let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-            shots.append(BarShot(frame: window.frame, image: image, scale: scale))
+            do {
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+                results.append(.success(BarShot(frame: window.frame, image: image, scale: scale)))
+            } catch {
+                results.append(.failure(error))
+            }
         }
-        return shots
+        return try keptShots(results)
     }
 }
 

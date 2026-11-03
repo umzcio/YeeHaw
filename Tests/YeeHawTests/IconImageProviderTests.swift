@@ -261,6 +261,13 @@ struct ShotFailed: Error {}
         #expect(f.stored())
     }
 
+    @Test func aFailedBarKeepsTheOthers() throws {
+        let primary = Self.bar()
+        #expect(try IconImageProvider.keptShots([.success(primary), .failure(ShotFailed())]).count == 1)
+        #expect(throws: ShotFailed.self) { try IconImageProvider.keptShots([.failure(ShotFailed())]) }
+        #expect(try IconImageProvider.keptShots([]).isEmpty)
+    }
+
     @Test func anUnprovenItemIsNotStored() async throws {
         let f = try Fixture()
         defer { try? FileManager.default.removeItem(at: f.directory) }
