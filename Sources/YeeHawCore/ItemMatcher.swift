@@ -145,26 +145,29 @@ public enum ItemMatcher {
         return items.sorted { $0.x < $1.x }
     }
 
-    /// The ids of `items` whose photograph, taken between that read and `reread`, can be stored as
-    /// their own: each is in both reads at the same frame (the bar didn't move under the shot), no
-    /// other item in either read overlaps it, neither read had to guess its owner (`contested`),
-    /// and its app isn't switched off. MenuBarAgent keeps listing an item for a moment after its
-    /// app is switched off, while the icon that slides into its place is what's drawn there.
+    /// The slots (copies) of `items` whose photograph, taken between that read and `reread`, can be
+    /// stored as their own, one per drawn copy: each is in both reads at the same frame (the bar
+    /// didn't move under the shot), no other item on its bar in either read overlaps it, neither
+    /// read had to guess its owner (`contested`), and its app isn't switched off. MenuBarAgent keeps
+    /// listing an item for a moment after its app is switched off, while the icon that slides into
+    /// its place is what's drawn there.
     public static func photographable(_ items: [MenuBarItem], reread: [MenuBarItem],
-                                      offApps: Set<BundleID>) -> Set<String> {
+                                      offApps: Set<BundleID>) -> Set<ItemSlot> {
+        func sameBar(_ a: MenuBarItem, _ b: MenuBarItem) -> Bool { abs(a.y - b.y) <= tolerance }
         func overlaps(_ a: MenuBarItem, _ b: MenuBarItem) -> Bool {
-            min(a.x + a.width, b.x + b.width) - max(a.x, b.x) > neighbourOverlap
+            sameBar(a, b) && min(a.x + a.width, b.x + b.width) - max(a.x, b.x) > neighbourOverlap
         }
         func alone(_ item: MenuBarItem, in read: [MenuBarItem]) -> Bool {
-            !read.contains { $0.id != item.id && overlaps($0, item) }
+            !read.contains { $0.slot != item.slot && overlaps($0, item) }
         }
         return Set(items.filter { item in
-            guard let again = reread.first(where: { $0.id == item.id }),
-                  abs(again.x - item.x) <= tolerance, abs(again.width - item.width) <= tolerance,
+            guard let again = reread.first(where: { $0.id == item.id && sameBar($0, item)
+                                                    && abs($0.x - item.x) <= tolerance }),
+                  abs(again.width - item.width) <= tolerance,
                   !item.contested, !again.contested,
                   !(item.bundleID.map(offApps.contains) ?? false) else { return false }
             return alone(item, in: items) && alone(again, in: reread)
-        }.map(\.id))
+        }.map(\.slot))
     }
 
     /// Which of `id`'s items in a per-app read (`MenuBarReading.drawnBar(owning:)`) can really be

@@ -37,7 +37,7 @@ import Testing
 
     @Test func anItemAloneInTheSamePlaceBothTimesIsProven() {
         let bar = [Self.digup, Self.fiddle]
-        #expect(ItemMatcher.photographable(bar, reread: bar, offApps: []) == [Self.digup.id, Self.fiddle.id])
+        #expect(ItemMatcher.photographable(bar, reread: bar, offApps: []) == [Self.digup.slot, Self.fiddle.slot])
     }
 
     @Test func anItemThatMovedOrWentIsNotProven() {
@@ -53,11 +53,11 @@ import Testing
         // column was YeeHaw's hat.
         let yeehaw = Self.item("com.zapps.yeehaw", x: 1590, width: 24)
         let bar = [Self.digup, yeehaw, Self.fiddle]
-        #expect(ItemMatcher.photographable(bar, reread: bar, offApps: []) == [Self.digup.id])
+        #expect(ItemMatcher.photographable(bar, reread: bar, offApps: []) == [Self.digup.slot])
         // Neighbours' frames reach 2 pt into each other (DigUp's into Fiddle's above); that's no overlap.
         let next = Self.item("com.example.next", x: 1620, width: 20)
         #expect(ItemMatcher.photographable([Self.fiddle, next], reread: [Self.fiddle, next], offApps: [])
-            == [Self.fiddle.id, next.id])
+            == [Self.fiddle.slot, next.slot])
     }
 
     @Test func aContestedItemIsNotProven() {
@@ -72,8 +72,22 @@ import Testing
         #expect(ItemMatcher.photographable([Self.fiddle], reread: [Self.fiddle], offApps: ["edu.umontana.fiddle"]).isEmpty)
     }
 
+    @Test func eachDisplaysCopyIsProvenOnItsOwn() {
+        let left = Self.item("com.example.a", x: 100, width: 20)
+        let right = Self.item("com.example.a", x: 1612, width: 20)
+        let movedRight = Self.item("com.example.a", x: 1650, width: 20)
+        #expect(ItemMatcher.photographable([left, right], reread: [left, movedRight], offApps: []) == [left.slot])
+    }
+
+    @Test func copiesOnStackedDisplaysDontOverlap() {
+        let a = Self.item("com.example.a", x: 100, width: 20)
+        var b = Self.item("com.example.b", x: 100, width: 20)
+        b.y = -900
+        #expect(ItemMatcher.photographable([a, b], reread: [a, b], offApps: []) == [a.slot, b.slot])
+    }
+
     @Test func appleItemsAreProvenTheSameWay() {
         let wifi = Self.item("com.apple.menuextra.wifi", x: 1629, width: 22, apple: true)
-        #expect(ItemMatcher.photographable([wifi], reread: [wifi], offApps: []) == [wifi.id])
+        #expect(ItemMatcher.photographable([wifi], reread: [wifi], offApps: []) == [wifi.slot])
     }
 }

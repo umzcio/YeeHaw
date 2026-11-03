@@ -37,11 +37,11 @@ final class IconImageProvider {
     /// it changed may show items somewhere other than the frames being cropped (a reveal began or
     /// ended meanwhile), so it's thrown away rather than saved under the wrong app.
     var barWrites: @MainActor () -> Int = { 0 }
-    /// Re-reads the bar once a shot is taken and says which of the items it was taken for can be
-    /// stored as their own (`ItemMatcher.photographable`). By default none: a photograph that can't
+    /// Re-reads the bar once a shot is taken and says which copies (slots) of the items it was taken
+    /// for can be stored as their own (`ItemMatcher.photographable`). By default none: a photograph that can't
     /// be proven to be the app's own isn't kept, and its app icon stands in, in the strip as in the
     /// Layout window.
-    var proveOwnership: @MainActor ([MenuBarItem]) async -> Set<String> = { _ in [] }
+    var proveOwnership: @MainActor ([MenuBarItem]) async -> Set<ItemSlot> = { _ in [] }
 
     init(directory: URL = IconImageProvider.defaultDirectory, capturesScreen: Bool = true,
          permitted: @escaping @MainActor () -> Bool = { CGPreflightScreenCaptureAccess() },
@@ -195,7 +195,7 @@ final class IconImageProvider {
         }
         let drawn = items.sorted { $0.x < $1.x }
         for item in targets {
-            guard proven.contains(item.id) else {
+            guard proven.contains(item.slot) else {
                 Self.log.info("Not keeping a photo of \(item.id, privacy: .public): it can't be proven to be its own")
                 continue
             }
@@ -236,7 +236,7 @@ final class IconImageProvider {
             guard let bars = try? await captureBars(), let bar = Self.bar(containing: item, in: bars),
                   let crop = bar.crop(x: item.x, width: item.width), let pixels = Self.pixels(crop) else { return }
             if let last, last.pixels == pixels {
-                guard barWrites() == writesBefore, await proveOwnership([item]).contains(item.id),
+                guard barWrites() == writesBefore, await proveOwnership([item]).contains(item.slot),
                       let glyph = GlyphImage.make(from: crop, scale: bar.scale) else {
                     Self.log.info("Not keeping a settled photo of \(item.id, privacy: .public): it can't be proven to be its own")
                     return

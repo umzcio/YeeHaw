@@ -158,7 +158,7 @@ struct ShotFailed: Error {}
     }
 
     static let item = IconImageProviderTests.drawn("com.example.app", index: 2)
-    static let proveAll: @MainActor ([MenuBarItem]) async -> Set<String> = { items in Set(items.map(\.id)) }
+    static let proveAll: @MainActor ([MenuBarItem]) async -> Set<ItemSlot> = { items in Set(items.map(\.slot)) }
 
     @MainActor struct Fixture {
         let directory: URL
@@ -355,7 +355,7 @@ struct ShotFailed: Error {}
         defer { try? FileManager.default.removeItem(at: f.directory) }
         f.provider.proveOwnership = { items in
             withUnsafeCurrentTask { $0?.cancel() }
-            return Set(items.map(\.id))
+            return Set(items.map(\.slot))
         }
         await Task { await f.provider.captureIfPermitted([Self.item]) }.value
         #expect(f.bars.calls == 1)
