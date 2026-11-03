@@ -39,12 +39,15 @@ final class StripModel {
     /// Black or white, whichever reads best on the strip's fill.
     var ink: StripInk = .black
     @ObservationIgnored let onSelect: (BundleID) -> Void
+    /// A right-click on a tile: the app's right-click menu.
+    @ObservationIgnored let onSecondarySelect: (BundleID) -> Void
     @ObservationIgnored let onNoticeAction: (StripNotice.Action) -> Void
     @ObservationIgnored let onLayout: () -> Void
 
-    init(onSelect: @escaping (BundleID) -> Void, onNoticeAction: @escaping (StripNotice.Action) -> Void = { _ in },
-         onLayout: @escaping () -> Void = {}) {
+    init(onSelect: @escaping (BundleID) -> Void, onSecondarySelect: @escaping (BundleID) -> Void = { _ in },
+         onNoticeAction: @escaping (StripNotice.Action) -> Void = { _ in }, onLayout: @escaping () -> Void = {}) {
         self.onSelect = onSelect
+        self.onSecondarySelect = onSecondarySelect
         self.onNoticeAction = onNoticeAction
         self.onLayout = onLayout
     }
@@ -119,6 +122,8 @@ struct StripView: View {
                                   model.highlighted = nil
                               }
                           }) { model.onSelect(entry.id) }
+                .overlay(SecondaryClickCatcher { model.onSecondarySelect(entry.id) })
+                .accessibilityAction(named: "Show right-click menu") { model.onSecondarySelect(entry.id) }
             }
         }
     }
@@ -135,6 +140,33 @@ struct StripView: View {
     /// The natural width of the tile row.
     static func tilesWidth(_ entries: [StripEntry]) -> CGFloat {
         entries.reduce(0) { $0 + tileWidth($1.image) }
+    }
+}
+
+/// Catches a right-click or Control-click on a tile, for the app's right-click menu. Every other
+/// event passes through to the tile's button: it hit-tests only while the event is one of those.
+private struct SecondaryClickCatcher: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> CatcherView { CatcherView(action: action) }
+    func updateNSView(_ view: CatcherView, context: Context) { view.action = action }
+
+    final class CatcherView: NSView {
+        var action: () -> Void
+        init(action: @escaping () -> Void) {
+            self.action = action
+            super.init(frame: .zero)
+        }
+        @available(*, unavailable) required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let event = NSApp.currentEvent,
+                  event.type == .rightMouseDown || (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
+            else { return nil }
+            return super.hitTest(point)
+        }
+        override func rightMouseDown(with event: NSEvent) { action() }
+        override func mouseDown(with event: NSEvent) { action() }
     }
 }
 

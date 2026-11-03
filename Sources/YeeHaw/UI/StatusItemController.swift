@@ -67,6 +67,7 @@ final class StatusItemController: NSObject {
         strip = StripPanel(
             sampler: .shared,
             onSelect: { [weak self] id in self?.select(id) },
+            onSecondarySelect: { [weak self] id in self?.select(id, secondary: true) },
             onNoticeAction: { [weak self] action in self?.noticeAction(action) },
             onLayout: { [weak self] in self?.layoutChosen() },
             onSettings: { [weak self] in self?.settingsChosen() },
@@ -293,7 +294,7 @@ final class StatusItemController: NSObject {
         }
     }
 
-    private func select(_ id: BundleID) {
+    private func select(_ id: BundleID, secondary: Bool = false) {
         strip.dismiss()
         Task {
             if yeehawItem == nil {
@@ -305,7 +306,7 @@ final class StatusItemController: NSObject {
                 reportProblem(nil, ownIconMissing: true)
                 return
             }
-            switch await reveal.open(id, nextTo: yeehaw) {
+            switch await reveal.open(id, nextTo: yeehaw, secondary: secondary) {
             case .revealed:
                 revealProblem = nil
             case .ignored:

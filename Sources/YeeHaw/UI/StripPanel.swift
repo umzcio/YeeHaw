@@ -75,12 +75,14 @@ final class StripPanel: NSPanel {
     enum DismissReason { case requested, outsideClick, resignedKey }
 
     init(sampler: StripColorSampler, onSelect: @escaping (BundleID) -> Void,
+         onSecondarySelect: @escaping (BundleID) -> Void = { _ in },
          onNoticeAction: @escaping (StripNotice.Action) -> Void, onLayout: @escaping () -> Void,
          onSettings: @escaping () -> Void, onQuit: @escaping () -> Void) {
         self.sampler = sampler
         self.onSettings = onSettings
         self.onQuit = onQuit
-        model = StripModel(onSelect: onSelect, onNoticeAction: onNoticeAction, onLayout: onLayout)
+        model = StripModel(onSelect: onSelect, onSecondarySelect: onSecondarySelect,
+                           onNoticeAction: onNoticeAction, onLayout: onLayout)
         hosting = NSHostingView(rootView: StripView(model: model))
         // The window is sized from `measure`; the hosting view never resizes it.
         hosting.sizingOptions = []

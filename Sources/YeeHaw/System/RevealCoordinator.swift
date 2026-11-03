@@ -62,7 +62,8 @@ final class RevealCoordinator {
     /// a reveal is open (or still ending) waits for it and then runs, so two reveals never share
     /// the controller's one slot and the click isn't lost; only the latest waiting click runs.
     @discardableResult
-    func open(_ id: BundleID, nextTo yeehaw: MenuBarItem) async -> Outcome {
+    /// `secondary` asks for the app's right-click menu: the icon gets a right-click, not a press.
+    func open(_ id: BundleID, nextTo yeehaw: MenuBarItem, secondary: Bool = false) async -> Outcome {
         let start = ContinuousClock.now
         let step: @MainActor (String) -> Void = { [trace] text in
             let line = "reveal \(id) +\(Self.milliseconds(ContinuousClock.now - start)) ms: \(text)"
@@ -81,7 +82,7 @@ final class RevealCoordinator {
             busy = true
         }
         defer { handOff() }
-        return await run(id, nextTo: yeehaw, step: step)
+        return await run(id, nextTo: yeehaw, secondary: secondary, step: step)
     }
 
     /// Passes the coordinator to the waiting click, if any (it stays busy), else frees it.
@@ -94,7 +95,8 @@ final class RevealCoordinator {
         }
     }
 
-    private func run(_ id: BundleID, nextTo yeehaw: MenuBarItem, step: @escaping @MainActor (String) -> Void) async -> Outcome {
+    private func run(_ id: BundleID, nextTo yeehaw: MenuBarItem, secondary: Bool,
+                     step: @escaping @MainActor (String) -> Void) async -> Outcome {
         controller.revealTrace = { text in MainActor.assumeIsolated { step(text) } }
         defer { controller.revealTrace = nil }
 
@@ -123,7 +125,10 @@ final class RevealCoordinator {
             await beforePress()
             step("strip off screen")
         }
-        if await press(item, pid: pid, session: session, step: step) {
+        let pressed = secondary
+            ? await rightClick(item, pid: pid, step: step)
+            : await press(item, pid: pid, session: session, step: step)
+        if pressed {
             session.startWatching(icon: item.x...(item.x + item.width))
             step("close: \(await session.waitForClose())")
             if let onClosed {
@@ -179,6 +184,17 @@ final class RevealCoordinator {
     /// AX press, then `AXShowMenu`, then a synthesized click, each logged with its duration and
     /// result. A failed method falls through only if no menu or window appeared, since the app may
     /// have opened it while the call timed out. Returns whether the press got through.
+    /// A right-click on the revealed icon, as a person would give it for the app's other menu.
+    private func rightClick(_ item: MenuBarItem, pid: pid_t, step: @MainActor (String) -> Void) async -> Bool {
+        let result = await Self.perform(.click, pid: pid, x: item.x, width: item.width, right: true)
+        if case .done = result {
+            step("right-click posted")
+            return true
+        }
+        step("right-click: \(result)")
+        return false
+    }
+
     private func press(_ item: MenuBarItem, pid: pid_t, session: RevealSession,
                        step: @MainActor (String) -> Void) async -> Bool {
         for method in PressMethod.allCases {
@@ -233,7 +249,8 @@ final class RevealCoordinator {
     /// Runs off the main actor: AX calls block, and the app's notifications arrive on the main run
     /// loop while they do.
     @concurrent
-    private static func perform(_ method: PressMethod, pid: pid_t, x: Double, width: Double) async -> PressResult {
+    private static func perform(_ method: PressMethod, pid: pid_t, x: Double, width: Double,
+                                right: Bool = false) async -> PressResult {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, AXMenuBarReader.appTimeout)
         let extras = AXMenuBarReader.element(app, kAXExtrasMenuBarAttribute).map { AXMenuBarReader.children(of: $0) } ?? []
@@ -252,7 +269,7 @@ final class RevealCoordinator {
             let frame = AXMenuBarReader.frame(of: element)
             // The pointer goes back where it was once the click is through.
             guard let pointer = CGEvent(source: nil)?.location,
-                  await postClick(at: CGPoint(x: frame.midX, y: frame.midY))
+                  await postClick(at: CGPoint(x: frame.midX, y: frame.midY), right: right)
             else { return .failed(0) }
             try? await Task.sleep(for: .milliseconds(50))
             CGWarpMouseCursorPosition(pointer)
@@ -264,14 +281,15 @@ final class RevealCoordinator {
     /// Posted like a person's click: the pointer arrives, then a press and release with a gap.
     /// MenuBarAgent ignores a bare down/up pair posted at once at a point the pointer never
     /// reached: it ran its own action and forwarded nothing, so Fiddle's MenuBarExtra never opened.
-    private nonisolated static func postClick(at point: CGPoint) async -> Bool {
+    private nonisolated static func postClick(at point: CGPoint, right: Bool = false) async -> Bool {
+        let button: CGMouseButton = right ? .right : .left
         let source = CGEventSource(stateID: .hidSystemState)
         guard let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
-                                 mouseCursorPosition: point, mouseButton: .left),
-              let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
-                                 mouseCursorPosition: point, mouseButton: .left),
-              let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
-                               mouseCursorPosition: point, mouseButton: .left)
+                                 mouseCursorPosition: point, mouseButton: button),
+              let down = CGEvent(mouseEventSource: source, mouseType: right ? .rightMouseDown : .leftMouseDown,
+                                 mouseCursorPosition: point, mouseButton: button),
+              let up = CGEvent(mouseEventSource: source, mouseType: right ? .rightMouseUp : .leftMouseUp,
+                               mouseCursorPosition: point, mouseButton: button)
         else { return false }
         move.post(tap: .cghidEventTap)
         try? await Task.sleep(for: clickSettle)
