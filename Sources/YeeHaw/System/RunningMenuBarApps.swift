@@ -22,8 +22,10 @@ enum RunningMenuBarApps {
         var summary: [String] = []
         defer { log.notice("Spacing apps: \(summary.joined(separator: "; "), privacy: .public)") }
         return SpacingPlan.appOrder(drawn: drawn.map(\.bundleID), hidden: hidden).compactMap { id in
-            guard let app = running.first(where: { $0.bundleIdentifier == id && !$0.isTerminated
-                      && $0.bundleURL?.pathExtension == "app" }),
+            let candidates = running.filter { $0.bundleIdentifier == id && !$0.isTerminated
+                && $0.bundleURL?.pathExtension == "app" }
+            let owner = ownerPID(of: id, in: drawn)
+            guard let app = candidates.first(where: { $0.processIdentifier == owner }) ?? candidates.first,
                   let url = app.bundleURL else { return nil }
             let name = app.localizedName ?? url.deletingPathExtension().lastPathComponent
             let facts = facts(for: app, windows: windows)
@@ -33,6 +35,12 @@ enum RunningMenuBarApps {
             return RunningMenuBarApp(bundleID: id, bundlePath: url.path, name: name, hasOpenWindows: open,
                                      isHidden: app.isHidden, launchDate: app.launchDate)
         }
+    }
+
+    /// The process that draws `id`'s first item in `drawn`, so with two copies running the one
+    /// whose icon the user sees is the one restarted.
+    nonisolated static func ownerPID(of id: BundleID, in drawn: [MenuBarItem]) -> Int32? {
+        drawn.first { $0.bundleID == id && $0.pid != nil }?.pid
     }
 
     /// Whether `app` has windows open right now (any of its instances).

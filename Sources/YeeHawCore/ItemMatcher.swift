@@ -20,10 +20,12 @@ public struct AppExtra: Equatable, Sendable {
     public var executableName: String
     /// Whether the owning copy is notarized: if not, its executable name is its first prefix.
     public var notarized: Bool
+    /// The process that reported this item: with two copies of one app running, the one that draws it.
+    public var pid: Int32?
 
     public init(bundleID: BundleID, indexInApp: Int, x: Double, width: Double,
                 identifier: String = "", title: String = "", description: String = "",
-                executableName: String = "", notarized: Bool = true) {
+                executableName: String = "", notarized: Bool = true, pid: Int32? = nil) {
         self.bundleID = bundleID
         self.indexInApp = indexInApp
         self.x = x
@@ -33,6 +35,7 @@ public struct AppExtra: Equatable, Sendable {
         self.description = description
         self.executableName = executableName
         self.notarized = notarized
+        self.pid = pid
     }
 }
 
@@ -48,10 +51,12 @@ public struct MenuBarItem: Equatable, Identifiable, Sendable {
     public var isPinned: Bool        // clock, control center
     /// Another app, no more likely to be off, reports this frame too: the owner is a guess.
     public var contested: Bool
+    /// The process that owns the item, from the read that matched it; nil for Apple items, unknown owners and placeholders.
+    public var pid: Int32?
 
     public init(id: String, bundleID: BundleID?, appleIdentifier: String?, indexInApp: Int,
                 label: String, keyNames: [String], keyPrefixes: [String],
-                x: Double, width: Double, isPinned: Bool, contested: Bool = false) {
+                x: Double, width: Double, isPinned: Bool, contested: Bool = false, pid: Int32? = nil) {
         self.id = id
         self.bundleID = bundleID
         self.appleIdentifier = appleIdentifier
@@ -63,6 +68,7 @@ public struct MenuBarItem: Equatable, Identifiable, Sendable {
         self.width = width
         self.isPinned = isPinned
         self.contested = contested
+        self.pid = pid
     }
 }
 
@@ -115,7 +121,7 @@ public enum ItemMatcher {
                     keyNames: [e.identifier, e.title, e.description].filter { !$0.isEmpty },
                     keyPrefixes: PositionKey.prefixes(bundleID: e.bundleID, executableName: e.executableName,
                                                       notarized: e.notarized),
-                    x: d.x, width: d.width, isPinned: false, contested: !rivals.isEmpty))
+                    x: d.x, width: d.width, isPinned: false, contested: !rivals.isEmpty, pid: e.pid))
             } else {
                 items.append(MenuBarItem(
                     id: "unknown@\(Int(d.x))", bundleID: nil, appleIdentifier: nil, indexInApp: 0,

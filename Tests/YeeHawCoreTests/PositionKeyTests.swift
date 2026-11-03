@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import YeeHawCore
 
@@ -74,6 +75,25 @@ import Testing
         #expect(PositionKey.prefixes(bundleID: "edu.umontana.fiddle", executableName: "Fiddle", notarized: true)
             == ["edu.umontana.fiddle", "Fiddle"])
         #expect(PositionKey.prefixes(bundleID: "Nora", executableName: "Nora", notarized: false) == ["Nora"])
+    }
+
+    static let installedCopy = RunningCopy(
+        bundleID: "com.example.a", executableURL: URL(fileURLWithPath: "/Applications/A.app/Contents/MacOS/A"), notarized: true)
+    static let debugCopy = RunningCopy(
+        bundleID: "com.example.a", executableURL: URL(fileURLWithPath: "/dev/A.app/Contents/MacOS/ADebug"), notarized: false)
+
+    @Test func everyRunningCopysPrefixesAreKept() {
+        #expect(PositionKey.prefixes(bundleID: "com.example.a", copies: [Self.installedCopy, Self.debugCopy])
+            == ["com.example.a", "A", "ADebug"])
+    }
+
+    @Test func noRunningCopyMeansTheBundleID() {
+        #expect(PositionKey.prefixes(bundleID: "com.example.a", copies: []) == ["com.example.a"])
+    }
+
+    @Test func oneCopyMatchesTheSingleCopyRule() {
+        #expect(PositionKey.prefixes(bundleID: "com.example.a", copies: [Self.installedCopy])
+            == PositionKey.prefixes(bundleID: "com.example.a", executableName: "A", notarized: true))
     }
 
     // MARK: Slots named after an autosave name
