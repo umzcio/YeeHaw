@@ -76,9 +76,14 @@ final class StatusItemController: NSObject {
             self?.revealProblem = nil
             self?.ownIconMissing = false
         }
-        // A revealed item isn't photographed: the bar reports its final frames at once while the
-        // icons are still sliding (a zWhisper photo with Wi-Fi across it), and once pressed it's
-        // drawn highlighted. Hidden apps keep the photo taken before launch hides them.
+        // A revealed item is photographed only as its menu or popover closes, once it holds still:
+        // at once, the icons are still sliding (a zWhisper photo with Wi-Fi across it), and while
+        // pressed it's drawn highlighted.
+        // Read again first: the app may draw a different icon by now (Fiddle's is wider running).
+        reveal.onClosed = { [icons, controller] item in
+            await controller.refresh()
+            await icons.captureSettled(controller.items.first { $0.id == item.id } ?? item)
+        }
         reveal.beforePress = { [strip] in await strip.waitUntilOffScreen() }
     }
 

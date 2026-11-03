@@ -38,6 +38,10 @@ final class RevealCoordinator {
     /// `StripPanel.waitUntilOffScreen`).
     var beforePress: (@MainActor () async -> Void)?
 
+    /// Awaited once the app's menu or popover closes, while the icon is still drawn (the strip
+    /// photographs it then; see `IconImageProvider.captureSettled`).
+    var onClosed: (@MainActor (MenuBarItem) async -> Void)?
+
     /// `trace` receives each step with its timing; debug runs write it to probe.txt.
     init(controller: MenuBarController, trace: @escaping @MainActor (String) -> Void = { _ in }) {
         self.controller = controller
@@ -122,6 +126,10 @@ final class RevealCoordinator {
         if await press(item, pid: pid, session: session, step: step) {
             session.startWatching(icon: item.x...(item.x + item.width))
             step("close: \(await session.waitForClose())")
+            if let onClosed {
+                await onClosed(item)
+                step("photographed")
+            }
         }
         session.tearDown()
         await end(step)

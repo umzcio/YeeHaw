@@ -152,6 +152,54 @@ final class IconImageProvider {
         }
     }
 
+    /// Between the shots `captureSettled` compares, and the most it takes.
+    static let settleInterval: Duration = .milliseconds(120)
+    static let settleShots = 4
+
+    /// Photographs one revealed third-party item once it holds still: shots `settleInterval`
+    /// apart until two in a row match, at most `settleShots`. A reveal's photo taken at once
+    /// caught neighbours mid-slide or the pressed highlight; taken as the app's menu or popover
+    /// closes and kept only when settled, it shows the icon as the app now draws it (Fiddle's
+    /// filled flame while it runs), which a hidden app can't otherwise show.
+    func captureSettled(_ item: MenuBarItem) async {
+        guard capturesScreen, CGPreflightScreenCaptureAccess(), let id = item.bundleID,
+              id != OwnIconLocator.bundleID else { return }
+        let writesBefore = barWrites()
+        var last: (crop: CGImage, scale: CGFloat, pixels: Data)?
+        for shot in 0..<Self.settleShots {
+            if shot > 0 { try? await Task.sleep(for: Self.settleInterval) }
+            guard let bars = try? await Self.captureBars(), let bar = Self.bar(containing: item, in: bars),
+                  let crop = bar.crop(x: item.x, width: item.width), let pixels = Self.pixels(crop) else { return }
+            if let last, last.pixels == pixels {
+                guard barWrites() == writesBefore, await proveOwnership([item]).contains(item.id),
+                      let glyph = GlyphImage.make(from: crop, scale: bar.scale) else {
+                    Self.log.info("Not keeping a settled photo of \(item.id, privacy: .public): it can't be proven to be its own")
+                    return
+                }
+                let key = Self.cacheKey(bundleID: id, indexInApp: item.indexInApp)
+                captures[key] = glyph
+                store(crop, scale: bar.scale, key: key)
+                return
+            }
+            last = (crop, bar.scale, pixels)
+        }
+        Self.log.info("Not keeping a photo of \(item.id, privacy: .public): it didn't hold still")
+    }
+
+    /// A crop's pixels in one fixed format, so two shots compare byte for byte.
+    nonisolated static func pixels(_ image: CGImage) -> Data? {
+        let width = image.width, height = image.height, bytesPerRow = width * 4
+        var data = Data(count: bytesPerRow * height)
+        let drawn = data.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return drawn ? data : nil
+    }
+
     /// How far an Apple item's crop may reach past its frame into empty bar: the clock's text
     /// can be drawn a little wider than its frame after the time changes.
     nonisolated static let appleCropSlack: Double = 4
