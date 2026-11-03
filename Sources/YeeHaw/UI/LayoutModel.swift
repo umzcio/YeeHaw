@@ -194,7 +194,7 @@ final class LayoutModel {
         repeat {
             refreshPending = false
             await controller.refresh()
-            await images.captureIfPermitted(controller.items)
+            await images.captureIfPermitted(controller.items, maxAge: IconImageProvider.layoutPhotoMaxAge)
             await sampleBarColour()
             guard !applying, !isDragging else {
                 // The re-read is stale by the time Apply or the drag ends; read again then.

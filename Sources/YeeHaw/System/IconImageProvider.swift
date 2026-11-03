@@ -121,16 +121,55 @@ final class IconImageProvider {
         captured(Self.cacheKey(bundleID: id, indexInApp: indexInApp)) ?? appIcon(id)
     }
 
+    /// How old a photo may get before a routine capture (a strip open, launch) takes it again.
+    static let photoMaxAge: Duration = .seconds(600)
+    /// How old the Layout window lets a photo get: it shows drawn items' photos, so they stay current there.
+    static let layoutPhotoMaxAge: Duration = .seconds(60)
+    /// How soon an item that has no photo yet is tried again after a pass that couldn't keep one.
+    static let missingRetry: Duration = .seconds(60)
+    /// When each item was last part of a capture pass, by `attemptKey`.
+    private var lastAttempt: [String: ContinuousClock.Instant] = [:]
+    /// Set while `captureIfPermitted` runs, so a second pass never overlaps it.
+    private var capturing = false
+
+    /// What `lastAttempt` is keyed by: the cache key for an app's item, the item id for an Apple one.
+    static func attemptKey(_ item: MenuBarItem) -> String {
+        guard let id = item.bundleID else { return "apple:" + item.id }
+        return cacheKey(bundleID: id, indexInApp: item.indexInApp)
+    }
+
+    private func hasPhoto(_ item: MenuBarItem) -> Bool {
+        guard let id = item.bundleID else { return appleCaptures[item.id] != nil }
+        return captured(Self.cacheKey(bundleID: id, indexInApp: item.indexInApp)) != nil
+    }
+
+    /// Whether a routine pass should photograph the item: it was never tried this session, or its
+    /// photo is `maxAge` old, or it has none and the last try was `missingRetry` ago.
+    private func isDue(_ item: MenuBarItem, maxAge: Duration, at time: ContinuousClock.Instant) -> Bool {
+        guard let last = lastAttempt[Self.attemptKey(item)] else { return true }
+        return time - last >= (hasPhoto(item) ? maxAge : Self.missingRetry)
+    }
+
     /// Photographs the third-party items in `items`, which must be drawn right now, with one
     /// ScreenCaptureKit shot of each `MenuBarAgent` bar, keeping only the photos
     /// `proveOwnership` vouches for. Does nothing unless Screen Recording is already granted; it
-    /// never prompts.
-    func captureIfPermitted(_ items: [MenuBarItem]) async {
-        guard capturesScreen, permitted() else { return }
+    /// never prompts. Every shot makes macOS flash its recording indicator and re-lay out the bar,
+    /// so a pass only happens when an item is due (it has no photo yet, or its photo is `maxAge`
+    /// old), and never while another pass is still running.
+    func captureIfPermitted(_ items: [MenuBarItem], maxAge: Duration = IconImageProvider.photoMaxAge) async {
+        guard capturesScreen, !capturing, permitted() else { return }
         let targets = items.filter {
             ($0.bundleID != nil && $0.bundleID != OwnIconLocator.bundleID) || $0.appleIdentifier != nil
         }
         guard !targets.isEmpty else { return }
+        let time = now()
+        guard targets.contains(where: { isDue($0, maxAge: maxAge, at: time) }), !Task.isCancelled else { return }
+        // Nothing awaits between the `capturing` guard and this line, so two calls can't both pass.
+        capturing = true
+        defer { capturing = false }
+        // Recorded even if the proof fails, so an item that can never be proven doesn't cost a
+        // shot on every strip open.
+        for item in targets { lastAttempt[Self.attemptKey(item)] = time }
         let writesBefore = barWrites()
         let bars: [BarShot]
         do {
@@ -139,10 +178,17 @@ final class IconImageProvider {
             Self.log.error("Menu bar capture failed: \(error, privacy: .public)")
             return
         }
+        guard !Task.isCancelled else { return }
         // The bar is read again after the shot: an item whose frame or owner is in any doubt is
         // left out. On 27.2 a switched-off app stays listed at its slot for a moment while the
         // icon sliding in is what's drawn there (a Fiddle photo of YeeHaw's own hat).
         let proven = await proveOwnership(items)
+        // `StatusItemController.openStrip` cancels the previous strip refresh; a replaced refresh
+        // must not store photos.
+        guard !Task.isCancelled else {
+            Self.log.info("Menu bar capture dropped: cancelled")
+            return
+        }
         guard barWrites() == writesBefore else {
             Self.log.info("Menu bar capture dropped: the bar changed while it was taken")
             return
@@ -183,7 +229,10 @@ final class IconImageProvider {
         let writesBefore = barWrites()
         var last: (crop: CGImage, scale: CGFloat, pixels: Data)?
         for shot in 0..<Self.settleShots {
-            if shot > 0 { try? await sleep(Self.settleInterval) }
+            if shot > 0 {
+                do { try await sleep(Self.settleInterval) } catch { return }
+            }
+            guard !Task.isCancelled else { return }
             guard let bars = try? await captureBars(), let bar = Self.bar(containing: item, in: bars),
                   let crop = bar.crop(x: item.x, width: item.width), let pixels = Self.pixels(crop) else { return }
             if let last, last.pixels == pixels {
@@ -195,6 +244,7 @@ final class IconImageProvider {
                 let key = Self.cacheKey(bundleID: id, indexInApp: item.indexInApp)
                 captures[key] = glyph
                 store(crop, scale: bar.scale, key: key)
+                lastAttempt[Self.attemptKey(item)] = now()
                 return
             }
             last = (crop, bar.scale, pixels)

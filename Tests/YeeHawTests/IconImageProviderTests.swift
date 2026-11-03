@@ -267,6 +267,120 @@ struct ShotFailed: Error {}
         #expect(f.bars.calls == IconImageProvider.settleShots)
         #expect(!f.stored())
     }
+
+    // MARK: Rate limit
+
+    @Test func aFreshPhotoIsNotRetaken() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 1)
+    }
+
+    @Test func aPhotoIsRetakenOnceItsOld() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        await f.provider.captureIfPermitted([Self.item])
+        f.clock.now += IconImageProvider.photoMaxAge
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 2)
+    }
+
+    @Test func theLayoutsShorterAgeApplies() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        f.clock.now += .seconds(61)
+        await f.provider.captureIfPermitted([Self.item], maxAge: IconImageProvider.layoutPhotoMaxAge)
+        #expect(f.bars.calls == 2)
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 2)
+    }
+
+    @Test func anItemWithNoPhotoIsRetriedAfterAMinuteNotBefore() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = { _ in [] }
+        await f.provider.captureIfPermitted([Self.item])
+        f.clock.now += .seconds(30)
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 1)
+        f.clock.now += .seconds(31)
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.bars.calls == 2)
+    }
+
+    @Test func aNewItemTriggersAPass() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        let other = IconImageProviderTests.drawn("com.example.app", index: 3)
+        await f.provider.captureIfPermitted([Self.item, other])
+        #expect(f.bars.calls == 2)
+    }
+
+    @Test func aSecondPassDoesNotOverlapOneInFlight() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        f.bars.delay = .milliseconds(50)
+        let other = IconImageProviderTests.drawn("com.example.app", index: 3)
+        let first = Task { await f.provider.captureIfPermitted([Self.item]) }
+        while f.bars.calls == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        await f.provider.captureIfPermitted([other])
+        await first.value
+        #expect(f.bars.calls == 1)
+    }
+
+    // MARK: Cancellation
+
+    @Test func aCancelledPassShootsNothing() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        let task = Task { await f.provider.captureIfPermitted([Self.item]) }
+        task.cancel()
+        await task.value
+        #expect(f.bars.calls == 0)
+    }
+
+    @Test func aPassCancelledDuringTheProofStoresNothing() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = { items in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return Set(items.map(\.id))
+        }
+        await Task { await f.provider.captureIfPermitted([Self.item]) }.value
+        #expect(f.bars.calls == 1)
+        #expect(!f.stored())
+    }
+
+    @Test func aSettleCancelledMidwayStopsShooting() async throws {
+        let a = Self.bar(), b = Self.bar(inkX: 136)
+        let f = try Fixture(shots: [[a], [b], [a], [b]], sleep: { _ in throw CancellationError() })
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureSettled(Self.item)
+        #expect(f.bars.calls == 1)
+        #expect(!f.stored())
+    }
+
+    @Test func aCancelledSettleShootsNothing() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        let task = Task { await f.provider.captureSettled(Self.item) }
+        task.cancel()
+        await task.value
+        #expect(f.bars.calls == 0)
+    }
 }
 
 @Suite struct AppleCropTests {
