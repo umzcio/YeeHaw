@@ -157,8 +157,9 @@ public enum ControllerError: Error, Equatable {
 
     // MARK: Hiding
 
-    /// A hide that fails (the write, or macOS not honouring it in time) is undone: the app is
-    /// switched back on and the state is what it was before (`rollBack`). With `waits` false it
+    /// A hide that fails is undone. A failed write puts the record back at once, since nothing was
+    /// switched off; a hide macOS didn't honour in time is switched back on and the state is what
+    /// it was before (`rollBack`). With `waits` false it
     /// returns once written, for a caller that waits for several edits at once (the Layout
     /// window's Apply) and undoes the ones macOS didn't honour itself.
     public func hide(_ id: BundleID, waits: Bool = true) async throws {
@@ -170,11 +171,15 @@ public enum ControllerError: Error, Equatable {
             guard !r.actions.isEmpty else { return }
             let before = state
             save(r.state)
+            var switchedOff = false
             do {
                 try writeAllow(r.actions)
+                switchedOff = true
                 if waits { try await waitIfRunning(id, drawn: false) }
             } catch {
-                rollBack(id, allowed: true, to: before)
+                // A write that never landed left the app on, so the record just goes back. Once it
+                // landed, the app is switched back on first (`rollBack`).
+                if switchedOff { rollBack(id, allowed: true, to: before) } else { save(before) }
                 throw error
             }
         }

@@ -17,6 +17,7 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     private var _frozenAllow: AllowSnapshot?
     private var _failing: Set<GrantedFile> = []
     private var _failingWrites: Set<GrantedFile> = []
+    private var _breakOnWrite: Set<GrantedFile> = []
     private var _log: [String] = []
     private var _allowWrites = 0
     private var _positionWrites = 0
@@ -101,6 +102,9 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     func fail(_ file: GrantedFile) { locked { _ = $0._failing.insert(file) } }
     /// Reads still work; writes to `file` throw `WriteFailed`.
     func failWrites(_ file: GrantedFile) { locked { _ = $0._failingWrites.insert(file) } }
+    /// The next write to `file` throws `WriteFailed`, and from then on reading or writing it fails
+    /// as if the grant were lost (a write refused, then the file gone unreadable).
+    func breakOnNextWrite(_ file: GrantedFile) { locked { _ = $0._breakOnWrite.insert(file) } }
     func append(_ event: String) { locked { $0._log.append(event) } }
 
     /// A change made outside YeeHaw, e.g. in System Settings.
@@ -131,6 +135,10 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
         try locked {
             if $0._failing.contains(file) { throw GrantError.needsGrant(file) }
             if $0._failingWrites.contains(file) { throw WriteFailed() }
+            if $0._breakOnWrite.remove(file) != nil {
+                $0._failing.insert(file)
+                throw WriteFailed()
+            }
             switch (file, key) {
             case (.allowList, "trackedApplications"):
                 $0._allowBlob = try #require(value as? Data)
@@ -484,6 +492,16 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(rig.system.allowSnapshot[Self.a] == true)
         #expect(c.state == .empty)
         #expect(rig.store.load() == .empty)
+    }
+
+    @Test func aHideWhoseWriteFailsIsUndoneEvenWhenTheFileThenWontRead() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true)]))
+        rig.system.breakOnNextWrite(.allowList)
+        let c = rig.controller()
+        await #expect(throws: WriteFailed.self) { try await c.hide(Self.a) }
+        #expect(c.state.hidden.isEmpty)
+        #expect(c.state.journal.isEmpty)
+        #expect(rig.store.load().journal.isEmpty)
     }
 
     @Test func aShowMacOSDoesntHonorIsUndone() async throws {
