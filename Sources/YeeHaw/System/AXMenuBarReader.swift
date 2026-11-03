@@ -28,9 +28,7 @@ struct AXMenuBarReader: MenuBarReading {
     }
 
     func keyPrefixes(of id: BundleID) async -> [String] {
-        let copy = await Self.copies(of: id).first
-        return PositionKey.prefixes(bundleID: id, executableName: copy?.executableURL.lastPathComponent,
-                                    notarized: copy?.notarized ?? true)
+        PositionKey.prefixes(bundleID: id, copies: await Self.copies(of: id))
     }
 
     @concurrent

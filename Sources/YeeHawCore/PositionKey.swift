@@ -1,3 +1,5 @@
+import Foundation
+
 public enum PositionKey {
     public static let controlCenter = "module:BentoBox-0"
     public static let clock = "module:Clock"
@@ -10,6 +12,20 @@ public enum PositionKey {
     public static func prefixes(bundleID: BundleID, executableName: String?, notarized: Bool = true) -> [String] {
         guard let executableName, !executableName.isEmpty, executableName != bundleID else { return [bundleID] }
         return notarized ? [bundleID, executableName] : [executableName, bundleID]
+    }
+
+    /// Every running copy's prefixes, first copy first, without repeats: two copies of one app (a
+    /// debug build beside the installed one) may file its items under different prefixes. Just the
+    /// bundle ID when no copy runs.
+    public static func prefixes(bundleID: BundleID, copies: [RunningCopy]) -> [String] {
+        var result: [String] = []
+        for copy in copies {
+            for prefix in prefixes(bundleID: bundleID, executableName: copy.executableURL.lastPathComponent,
+                                   notarized: copy.notarized) where !result.contains(prefix) {
+                result.append(prefix)
+            }
+        }
+        return result.isEmpty ? [bundleID] : result
     }
 
     /// Every key in `table` under any of `prefixes` (`status:<prefix>::…`), sorted: all of an
