@@ -38,12 +38,20 @@ import Testing
         #expect(r.state == s)
     }
 
-    @Test func launchDropsUntrackedFromHiddenAndJournal() {
+    @Test func launchDropsUntrackedFromHiddenButKeepsThemJournaled() {
         let s = Self.state(hidden: ["A", "G"], journal: ["A", "G", "H"])
         let r = Reconciler.onLaunch(s, allow: ["A": false])
         #expect(r.actions.isEmpty)
         #expect(r.state.hidden == ["A"])
-        #expect(r.state.journal == ["A"])
+        #expect(r.state.journal == ["A", "G", "H"])
+    }
+
+    @Test func quitAndLaunchTogetherNeverLoseAnAppWithNoEntry() {
+        let r = Reconciler.onLaunch(Self.state(journal: ["Z"]), allow: [:])
+        #expect(r.actions.isEmpty)
+        #expect(r.state.journal == ["Z"])
+        let again = Reconciler.onLaunch(r.state, allow: ["Z": false])
+        #expect(again.actions == [.switchOn("Z")])
     }
 
     @Test func quitSwitchesOnJournalOnly() {

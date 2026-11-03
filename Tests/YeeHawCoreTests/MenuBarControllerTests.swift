@@ -1090,6 +1090,15 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(rig.system.allowWrites == 1)
     }
 
+    @Test func launchKeepsAJournaledAppWhoseEntryIsMissing() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.b, true)]),
+                           state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        try await c.launch()
+        #expect(c.state.hidden.isEmpty)
+        #expect(c.state.journal == [Self.a])
+    }
+
     @Test func ownWriteIsNotExternalChange() async throws {
         let system = try Self.revealSystem()
         try system.setExternally(Self.a, allowed: true)
