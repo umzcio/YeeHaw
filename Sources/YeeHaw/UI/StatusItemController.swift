@@ -5,8 +5,8 @@ import YeeHawCore
 /// YeeHaw's own menu bar icon and the strip it opens (spec "Your menu bar icon", "The strip").
 ///
 /// A plain click toggles the strip. Right-click, Control-click and Option-click show the small
-/// menu (Layout…, Settings…, Quit YeeHaw); right-clicks were verified to arrive on macOS 27.2.
-/// VoiceOver gets the same three as actions on the icon.
+/// menu (Layout…, Settings…, Restore Everything and Quit, Quit YeeHaw); right-clicks were verified
+/// to arrive on macOS 27.2. VoiceOver gets the same four as actions on the icon.
 @MainActor
 final class StatusItemController: NSObject {
     /// The status item's autosave name, which keeps YeeHaw's existing position key (`--reveal`'s
@@ -56,6 +56,7 @@ final class StatusItemController: NSObject {
             button.setAccessibilityCustomActions([
                 NSAccessibilityCustomAction(name: "Open Layout") { [weak self] in self?.layoutChosen(); return true },
                 NSAccessibilityCustomAction(name: "Open Settings") { [weak self] in self?.settingsChosen(); return true },
+                NSAccessibilityCustomAction(name: "Restore Everything and Quit") { [weak self] in self?.restoreChosen(); return true },
                 NSAccessibilityCustomAction(name: "Quit YeeHaw") { [weak self] in self?.quitChosen(); return true },
             ])
             button.target = self
@@ -180,6 +181,9 @@ final class StatusItemController: NSObject {
             menu.addItem(item)
         }
         menu.addItem(.separator())
+        let restore = NSMenuItem(title: "Restore Everything and Quit", action: #selector(restoreChosen), keyEquivalent: "")
+        restore.target = self
+        menu.addItem(restore)
         let quit = NSMenuItem(title: "Quit YeeHaw", action: #selector(quitChosen), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -197,13 +201,60 @@ final class StatusItemController: NSObject {
 
     /// Switches back on everything YeeHaw switched off, then quits.
     @objc private func quitChosen() {
+        switchBackOnAndQuit(unhiding: false)
+    }
+
+    /// Quit, plus showing menu bar apps that may be hidden because of YeeHaw (an earlier Spacing
+    /// Apply left some hidden): one place to get every icon back.
+    @objc private func restoreChosen() {
+        switchBackOnAndQuit(unhiding: true)
+    }
+
+    /// If switching back on fails, an alert names the apps still switched off and offers Retry or
+    /// Quit Anyway. Quitting without asking would leave those icons gone with no explanation.
+    private func switchBackOnAndQuit(unhiding: Bool) {
         strip.dismiss()
-        do {
-            try controller.quit()
-        } catch {
-            Self.log.error("Quit could not switch hidden apps back on: \(error, privacy: .public)")
+        while true {
+            do {
+                try controller.quit()
+                break
+            } catch {
+                Self.log.error("Quit could not switch hidden apps back on: \(error, privacy: .public)")
+                let stillOff = controller.state.journal.sorted().map(AppIdentity.name(of:))
+                guard Self.askToRetryQuit(stillOff: stillOff) else { break }
+            }
+        }
+        if unhiding {
+            let owners = Set(controller.items.compactMap(\.bundleID)).union(controller.state.hidden)
+            HiddenMenuBarApps.unhideAll(menuBarOwners: owners)
         }
         NSApp.terminate(nil)
+    }
+
+    /// Shows the failed-quit alert; true when the user chose Retry.
+    private static func askToRetryQuit(stillOff: [String]) -> Bool {
+        let text = quitFailure(stillOff: stillOff)
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = text.title
+        alert.informativeText = text.message
+        alert.addButton(withTitle: "Retry")
+        alert.addButton(withTitle: "Quit Anyway")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// What the failed-quit alert says. `stillOff` are the names of the apps still switched off;
+    /// empty when only a revealed app's position couldn't be put back (the next launch does that).
+    nonisolated static func quitFailure(stillOff: [String]) -> (title: String, message: String) {
+        guard let last = stillOff.last else {
+            return ("YeeHaw couldn’t put an icon back in place",
+                    "The icon YeeHaw was showing may stay next to YeeHaw’s hat until YeeHaw opens again.")
+        }
+        let names = stillOff.count == 1 ? last : stillOff.dropLast().joined(separator: ", ") + " and " + last
+        return ("Some icons are still hidden",
+                "YeeHaw couldn’t switch \(names) back on. If you quit anyway, they stay out of the menu bar "
+                    + "until you open YeeHaw and quit it again, or switch them on in System Settings → Menu Bar.")
     }
 
     // MARK: Strip
