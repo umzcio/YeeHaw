@@ -111,11 +111,19 @@ final class RevealCoordinator {
 
         let item: MenuBarItem
         do {
-            item = try await controller.beginReveal(id, nextTo: yeehaw)
+            item = try await controller.beginReveal(id, nextTo: yeehaw, leftoverInUse: { leftover in
+                RevealSession.anyWindowHangsFromBar(of: Set(
+                    NSRunningApplication.runningApplications(withBundleIdentifier: leftover).map(\.processIdentifier)))
+            })
         } catch {
             // endReveal is a no-op with nothing pending, and finishes a reveal the controller
             // couldn't undo itself (a failed write after the slot was taken, or a failed undo).
             step("beginReveal failed: \(error)")
+            if case ControllerError.revealInUse(let open) = error {
+                // Ending it here would switch that app off under its open menu or panel.
+                step("beginReveal refused: \(open)'s menu or panel is still open from an earlier reveal")
+                return .failed(error)
+            }
             await end(step)
             return .failed(error)
         }
