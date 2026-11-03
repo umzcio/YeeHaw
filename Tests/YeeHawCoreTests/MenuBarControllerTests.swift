@@ -1069,6 +1069,27 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(rig.sleeper.count == sleepsBefore)
     }
 
+    @Test func quitKeepsAJournaledAppWhoseEntryIsMissing() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.b, true)]), state: HidingState(journal: [Self.a]))
+        let c = rig.controller()
+        try c.quit()
+        #expect(c.state.journal == [Self.a])
+        #expect(rig.store.load().journal == [Self.a])
+        rig.system.setAllowBlob(try FakeSystem.blob([(Self.a, false), (Self.b, true)]))
+        try c.quit()
+        #expect(rig.system.allowSnapshot[Self.a] == true)
+        #expect(c.state.journal.isEmpty)
+    }
+
+    @Test func aSwitchOnReachesEveryEntryOfAnAppListedTwice() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true)]), state: HidingState(journal: [Self.a]))
+        let c = rig.controller()
+        rig.system.setAllowBlob(try FakeSystem.blob([(Self.a, true), (Self.a, false)]))
+        try c.quit()
+        #expect(rig.system.allowSnapshot == [Self.a: true])
+        #expect(rig.system.allowWrites == 1)
+    }
+
     @Test func ownWriteIsNotExternalChange() async throws {
         let system = try Self.revealSystem()
         try system.setExternally(Self.a, allowed: true)

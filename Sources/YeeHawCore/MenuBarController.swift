@@ -114,8 +114,9 @@ public enum ControllerError: Error, Equatable {
         var next = state
         var failure: Error?
         do {
-            if !actions.isEmpty { try writeAllow(actions) }
-            next.journal = journal
+            let switched: Set<BundleID> = actions.isEmpty ? [] : try writeAllow(actions)
+            // A switch-on for an app with no entry wasn't written; it stays journaled until it can be.
+            next.journal = journal.union(Self.switchedOn(actions).filter { !switched.contains($0) })
         } catch {
             failure = error
         }
@@ -592,12 +593,15 @@ public enum ControllerError: Error, Equatable {
     /// Reads fresh, applies every action to entries that exist, and writes the list back once,
     /// only if something changed (so a missing `trackedApplications` key is never created). A
     /// location added to an entry is a change even when no switch flips, and the write carries
-    /// the entry's switch as it is. `lastSnapshot` is updated only for the apps written.
-    private func writeAllow(_ actions: [AllowAction]) throws {
+    /// the entry's switch as it is. `lastSnapshot` is updated only for the apps written. Returns
+    /// the apps whose entries hold the asked-for switch; an app with no entry isn't among them.
+    @discardableResult
+    private func writeAllow(_ actions: [AllowAction]) throws -> Set<BundleID> {
         var list = try readAllow()
         let before = list.snapshot
         var written: AllowSnapshot = [:]
         var listed = false
+        var switched = false
         for action in actions {
             let (id, allowed): (BundleID, Bool)
             switch action {
@@ -607,15 +611,16 @@ public enum ControllerError: Error, Equatable {
                 if list.addLocation(location, for: target) { listed = true }
                 continue
             }
-            guard let current = before[id] else { continue }
+            guard before[id] != nil else { continue }
             written[id] = allowed
-            if current != allowed { list.setAllowed(allowed, for: id) }
+            if list.setAllowed(allowed, for: id) { switched = true }
         }
-        if listed || written.contains(where: { before[$0.key] != $0.value }) {
+        if listed || switched {
             try allowFile.write(Self.allowKey, try list.encoded())
             writeCount += 1
         }
         lastSnapshot.merge(written) { _, new in new }
+        return Set(written.keys)
     }
 
     private func readPositions() throws -> [String: Double] {
