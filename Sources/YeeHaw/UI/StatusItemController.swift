@@ -299,6 +299,10 @@ final class StatusItemController: NSObject {
         case notRunning(BundleID)
         /// Anything else (an unreadable file, no position for YeeHaw's icon yet).
         case failed(BundleID)
+        /// The app was drawn but YeeHaw couldn't press its icon.
+        case pressFailed(BundleID)
+        /// An earlier reveal's app still has its menu or panel open (`open`), so `clicked` wasn't revealed.
+        case stillOpen(open: BundleID, clicked: BundleID)
     }
 
     private func currentNotice() -> StripNotice? {
@@ -323,6 +327,11 @@ final class StatusItemController: NSObject {
             return StripNotice(message: "\(name(id)) isn’t open, so it has no menu to show.", action: .openApp(id))
         case .failed(let id):
             return StripNotice(message: "YeeHaw couldn’t show \(name(id))’s menu.")
+        case .pressFailed(let id):
+            return StripNotice(message: "YeeHaw couldn’t click \(name(id))’s icon.", action: .retry(id))
+        case .stillOpen(let open, let clicked):
+            return StripNotice(message: "\(name(open))’s menu is still open. Close it, then try again.",
+                               action: .retry(clicked))
         case nil:
             break
         }
@@ -358,8 +367,10 @@ final class StatusItemController: NSObject {
                 return
             }
             switch await reveal.open(id, nextTo: yeehaw, secondary: secondary) {
-            case .revealed:
+            case .revealed, .nothingOpened:
                 revealProblem = nil
+            case .pressFailed:
+                reportProblem(.pressFailed(id))
             case .ignored:
                 break
             case .failed(ControllerError.notHonored(let failed)):
@@ -368,6 +379,8 @@ final class StatusItemController: NSObject {
                 reportProblem(.notRunning(failed))
             case .failed(ControllerError.needsGrant):
                 reportProblem(nil) // The grant notice says it.
+            case .failed(ControllerError.revealInUse(let open)):
+                reportProblem(.stillOpen(open: open, clicked: id))
             case .failed:
                 reportProblem(.failed(id))
             }
