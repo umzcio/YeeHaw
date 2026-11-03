@@ -218,6 +218,49 @@ struct ShotFailed: Error {}
         #expect(f.provider.image(for: "com.example.app", indexInApp: 2).isTemplate)
     }
 
+    static func shot(frame: CGRect, ink: CGRect) -> IconImageProvider.BarShot {
+        IconImageProvider.BarShot(frame: frame, image: crop(width: 400, height: 48, ink: ink), scale: 2)
+    }
+
+    @Test func thePrimaryDisplaysCopyIsStored() async throws {
+        let primary = Self.shot(frame: CGRect(x: 0, y: 0, width: 200, height: 24),
+                                ink: CGRect(x: 128, y: 10, width: 24, height: 28))
+        let right = Self.shot(frame: CGRect(x: 200, y: 0, width: 200, height: 24),
+                              ink: CGRect(x: 128, y: 10, width: 12, height: 28))
+        let f = try Fixture(shots: [[primary, right]])
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        var copy = Self.item
+        copy.x = 260
+        await f.provider.captureIfPermitted([Self.item, copy])
+        #expect(f.provider.image(for: "com.example.app", indexInApp: 2).size.width == 13)
+    }
+
+    @Test func anUnprovenCopyDoesntRideOnAProvenOne() async throws {
+        let primary = Self.shot(frame: CGRect(x: 0, y: 0, width: 200, height: 24), ink: .zero)
+        let right = Self.shot(frame: CGRect(x: 200, y: 0, width: 200, height: 24),
+                              ink: CGRect(x: 128, y: 10, width: 12, height: 28))
+        let f = try Fixture(shots: [[primary, right]])
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        var copy = Self.item
+        copy.x = 260
+        let provenSlot = Self.item.slot
+        f.provider.proveOwnership = { _ in [provenSlot] }
+        await f.provider.captureIfPermitted([Self.item, copy])
+        #expect(!f.stored())
+    }
+
+    @Test func aCopyIsCroppedFromItsOwnStackedBar() async throws {
+        let upper = Self.shot(frame: CGRect(x: 0, y: -900, width: 200, height: 24), ink: .zero)
+        let primary = Self.shot(frame: CGRect(x: 0, y: 0, width: 200, height: 24),
+                                ink: CGRect(x: 128, y: 10, width: 24, height: 28))
+        let f = try Fixture(shots: [[upper, primary]])
+        defer { try? FileManager.default.removeItem(at: f.directory) }
+        f.provider.proveOwnership = Self.proveAll
+        await f.provider.captureIfPermitted([Self.item])
+        #expect(f.stored())
+    }
+
     @Test func anUnprovenItemIsNotStored() async throws {
         let f = try Fixture()
         defer { try? FileManager.default.removeItem(at: f.directory) }
@@ -393,6 +436,15 @@ struct ShotFailed: Error {}
         let controlCenter = Self.item("cc", x: 1866, width: 26)
         let clock = Self.item("clock", x: 1908, width: 127.5)
         let column = IconImageProvider.widened(clock, among: [controlCenter, clock])
+        #expect(column.x == 1904)
+        #expect(column.width == 127.5 + 8)
+    }
+
+    @Test func widenedIgnoresAnotherDisplaysItems() {
+        let clock = Self.item("clock", x: 1908, width: 127.5)
+        var neighbour = Self.item("cc", x: 1866, width: 26)
+        neighbour.y = -900
+        let column = IconImageProvider.widened(clock, among: [neighbour, clock])
         #expect(column.x == 1904)
         #expect(column.width == 127.5 + 8)
     }

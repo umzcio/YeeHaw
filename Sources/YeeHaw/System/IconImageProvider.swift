@@ -194,11 +194,13 @@ final class IconImageProvider {
             return
         }
         let drawn = items.sorted { $0.x < $1.x }
-        for item in targets {
+        var kept: Set<String> = []
+        for item in Self.photoOrder(targets, bars: bars) {
             guard proven.contains(item.slot) else {
                 Self.log.info("Not keeping a photo of \(item.id, privacy: .public): it can't be proven to be its own")
                 continue
             }
+            guard !kept.contains(Self.attemptKey(item)) else { continue }
             let column = item.bundleID == nil ? Self.widened(item, among: drawn) : (x: item.x, width: item.width)
             guard let bar = Self.bar(containing: item, in: bars),
                   let crop = bar.crop(x: column.x, width: column.width),
@@ -206,11 +208,13 @@ final class IconImageProvider {
                   let glyph = GlyphImage.make(from: crop, scale: bar.scale) else { continue }
             guard let id = item.bundleID else {
                 appleCaptures[item.id] = glyph
+                kept.insert(Self.attemptKey(item))
                 continue
             }
             let key = Self.cacheKey(bundleID: id, indexInApp: item.indexInApp)
             captures[key] = glyph
             store(crop, scale: bar.scale, key: key)
+            kept.insert(Self.attemptKey(item))
         }
     }
 
@@ -273,8 +277,10 @@ final class IconImageProvider {
     /// An Apple item's column, widened by up to `appleCropSlack` on each side where no other
     /// drawn item is (so a neighbour's ink is never included).
     nonisolated static func widened(_ item: MenuBarItem, among drawn: [MenuBarItem]) -> (x: Double, width: Double) {
-        let left = drawn.filter { $0.id != item.id && $0.x < item.x }.map { $0.x + $0.width }.max()
-        let right = drawn.filter { $0.id != item.id && $0.x > item.x }.map(\.x).min()
+        let left = drawn.filter { abs($0.y - item.y) <= ItemMatcher.tolerance && $0.id != item.id && $0.x < item.x }
+            .map { $0.x + $0.width }.max()
+        let right = drawn.filter { abs($0.y - item.y) <= ItemMatcher.tolerance && $0.id != item.id && $0.x > item.x }
+            .map(\.x).min()
         let before = min(appleCropSlack, max(0, item.x - (left ?? -.infinity)))
         let after = min(appleCropSlack, max(0, (right ?? .infinity) - (item.x + item.width)))
         return (item.x - before, item.width + before + after)
@@ -374,10 +380,24 @@ final class IconImageProvider {
         }
     }
 
-    /// The bar whose x range holds the item, preferring the topmost (stacked displays share x).
-    private static func bar(containing item: MenuBarItem, in bars: [BarShot]) -> BarShot? {
-        bars.filter { $0.frame.minX - 0.5 <= item.x && item.x + item.width <= $0.frame.maxX + 0.5 }
+    /// The bar holding the item's copy: its x range and its height both, since stacked displays share x.
+    static func bar(containing item: MenuBarItem, in bars: [BarShot]) -> BarShot? {
+        bars.filter { $0.frame.minX - 0.5 <= item.x && item.x + item.width <= $0.frame.maxX + 0.5
+                      && $0.frame.minY - 0.5 <= item.y && item.y <= $0.frame.maxY + 0.5 }
             .min { $0.frame.minY < $1.frame.minY }
+    }
+
+    /// Whether `bar` is the primary display's (its frame holds the global origin).
+    nonisolated static func isPrimary(_ bar: BarShot) -> Bool {
+        bar.frame.minX <= 0 && 0 < bar.frame.maxX && bar.frame.minY <= 0 && 0 < bar.frame.maxY
+    }
+
+    /// The order copies are tried in when several displays draw one item: the primary display's copy
+    /// first, then left to right. The first that makes a usable glyph is kept, so one copy per photo
+    /// is stored, and the choice doesn't depend on which display happens to be rightmost.
+    static func photoOrder(_ items: [MenuBarItem], bars: [BarShot]) -> [MenuBarItem] {
+        func rank(_ item: MenuBarItem) -> Int { bar(containing: item, in: bars).map(isPrimary) == true ? 0 : 1 }
+        return items.sorted { (rank($0), $0.x) < (rank($1), $1.x) }
     }
 
     /// `MenuBarAgent`'s bar windows aren't reported as on screen (the WindowServer composites them
