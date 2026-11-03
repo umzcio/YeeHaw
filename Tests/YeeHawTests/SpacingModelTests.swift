@@ -243,6 +243,41 @@ import YeeHawCore
         #expect(model.candidates.map(\.app.name) == ["DigUp"])
     }
 
+    @Test func aSnapshotIgnoresLaterReReadsAndClosing() async throws {
+        let mac = FakeSpacingMac()
+        let model = Self.model(mac)
+        model.setApps([Self.app("DigUp")])
+        model.value = 8
+        let snapshot = try #require(model.snapshotForApply())
+        model.setApps([Self.app("DigUp"), Self.app("Flame")])
+        model.windowClosed()
+        #expect(model.isApplying)
+        #expect(model.value == 8)
+        #expect(model.candidates.map(\.app.name) == ["DigUp"])
+        await model.apply(snapshot)
+        #expect(mac.events.filter { $0.hasPrefix("terminate") } == ["terminate DigUp"])
+        #expect(model.current == 8)
+        #expect(!model.isApplying)
+    }
+
+    @Test func aFailedSaveKeepsTheUsersTicks() async {
+        let mac = FakeSpacingMac()
+        mac.writeFails = true
+        let model = Self.model(mac)
+        model.setApps([Self.app("DigUp"), Self.app("Flame")])
+        model.value = 8
+        model.setTicked(false, for: "com.example.flame")
+        await model.apply()
+        #expect(model.report?.saved == false)
+        #expect(model.candidates.map(\.ticked) == [true, false])
+    }
+
+    @Test func nothingToApplyGivesNoSnapshot() {
+        let model = Self.model()
+        #expect(model.snapshotForApply() == nil)
+        #expect(!model.isApplying)
+    }
+
     // MARK: The slider, re-reads and closing
 
     @Test func reloadCurrentKeepsAMovedSlider() {

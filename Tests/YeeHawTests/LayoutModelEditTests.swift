@@ -201,6 +201,26 @@ private final class StubBar: MenuBarReading, PreferencesFile, StateStoring, Slee
         #expect(model.message == nil)
     }
 
+    @Test func spacingAppliesWhatTheFooterShowedWhenApplyWasClicked() async throws {
+        let bar = try StubBar(apps: [Self.a, Self.b])
+        let (model, directory) = try await Self.model(bar)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mac = FakeSpacingMac()
+        let spacing = SpacingModel(applier: SpacingApplier(system: mac.system))
+        model.spacing = spacing
+        spacing.setApps([SpacingModelTests.app("DigUp")])
+        spacing.value = 8
+        let applying = try #require(model.apply())
+        // The window's re-read and a close land before the spacing part starts.
+        spacing.setApps([SpacingModelTests.app("DigUp"), SpacingModelTests.app("Flame")])
+        spacing.windowClosed()
+        _ = await applying.value
+        #expect(mac.events.filter { $0.hasPrefix("terminate") } == ["terminate DigUp"])
+        #expect(spacing.current == 8)
+        #expect(spacing.value == 8)
+        #expect(!model.applying)
+    }
+
     @Test func aFailedEditGoesBackAndTheOthersStand() async throws {
         // A ignores its switch: the hide never shows, so it's undone after the wait.
         let bar = try StubBar(apps: [Self.a, Self.b, Self.c])

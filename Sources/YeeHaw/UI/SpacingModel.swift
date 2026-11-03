@@ -78,6 +78,14 @@ enum SpacingPreview {
     }
 }
 
+/// The spacing change Apply makes, taken when Apply is clicked: the value and the apps ticked then.
+/// The Layout window applies its spacing part only after the layout edits, and the section's list
+/// can change meanwhile (the window re-reads running apps), so Apply works from this copy.
+struct SpacingSnapshot: Equatable {
+    let value: Int
+    let apps: [RunningMenuBarApp]
+}
+
 /// The layout window's spacing section: the slider's value, the apps Apply would restart and
 /// what the last Apply did. Part of the window's draft: nothing is written until the window's
 /// Apply, which runs `apply()` after the layout edits.
@@ -111,6 +119,9 @@ final class SpacingModel {
     @ObservationIgnored var onApplyingChange: ((Bool) -> Void)?
     /// Ticks the user set, kept across re-reads of the running apps.
     @ObservationIgnored private var userTicks: [BundleID: Bool] = [:]
+    /// The change Apply has taken and not finished yet. While it's set the section counts as
+    /// applying, so re-reads, ticks, Revert and closing the window leave the draft alone.
+    private var reserved: SpacingSnapshot?
 
     init(applier: SpacingApplier) {
         self.applier = applier
@@ -121,7 +132,7 @@ final class SpacingModel {
         _ = applier.reconcileHistory()
     }
 
-    var isApplying: Bool { progress != nil }
+    var isApplying: Bool { progress != nil || reserved != nil }
     /// Whether Apply stores something: a new value, or tidy keys for the current one. Otherwise it
     /// only restarts apps still drawing an older spacing.
     var isWriting: Bool { value != current || needsCleanup }
@@ -210,11 +221,27 @@ final class SpacingModel {
         report = nil
     }
 
+    /// Takes the change Apply would make now and holds the draft still until `apply(_:)` has run.
+    /// Nil when there's nothing to apply.
+    func snapshotForApply() -> SpacingSnapshot? {
+        guard canApply else { return nil }
+        let snapshot = SpacingSnapshot(value: value, apps: candidates.filter(\.ticked).map(\.app))
+        reserved = snapshot
+        return snapshot
+    }
+
     /// Writes the slider's value if it's new and restarts the ticked apps one at a time.
     func apply() async {
-        guard canApply else { return }
-        let value = value
-        let apps = candidates.filter(\.ticked).map(\.app)
+        guard let snapshot = snapshotForApply() else { return }
+        await apply(snapshot)
+    }
+
+    /// Writes `snapshot.value` if it's new and restarts `snapshot.apps` one at a time, whatever the
+    /// section shows by now.
+    func apply(_ snapshot: SpacingSnapshot) async {
+        reserved = snapshot
+        let value = snapshot.value
+        let apps = snapshot.apps
         report = nil
         progress = (apps.first?.name ?? "", 0, apps.count)
         onApplyingChange?(true)
@@ -224,15 +251,16 @@ final class SpacingModel {
         let stored = applier.storedState()
         current = stored.value
         needsCleanup = !stored.isCanonical(for: stored.value)
-        // The draft is applied: every tick follows the defaults again, and the restarted apps have
-        // the stored spacing now.
-        userTicks = [:]
+        // A saved draft is applied: every tick follows the defaults again. When the save failed
+        // nothing changed, so the user's ticks stay for another try.
+        if result.saved { userTicks = [:] }
         for restart in result.restarted {
             if let index = candidates.firstIndex(where: { $0.id == restart.app.bundleID }) {
                 candidates[index].spacingAtLaunch = current
             }
         }
         progress = nil
+        reserved = nil
         onApplyingChange?(false)
         retick()
         let report = SpacingReport(value: value, result: result)
