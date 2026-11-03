@@ -16,6 +16,27 @@ import Testing
         #expect(items[1].indexInApp == 2)
     }
 
+    @Test func theOwningProcessIsCarried() {
+        let drawn = [DrawnItem(x: 100, width: 20, label: "A"),
+                     DrawnItem(x: 130, width: 20, label: "Wi-Fi", appleIdentifier: "com.apple.menuextra.wifi")]
+        let extras = [AppExtra(bundleID: "com.example.a", indexInApp: 0, x: 100, width: 20, pid: 501)]
+        let items = ItemMatcher.match(drawn: drawn, extras: extras)
+        #expect(items[0].pid == 501)
+        #expect(items[1].pid == nil)
+    }
+
+    @Test func twoCopiesOfOneAppKeepTheirOwnProcess() {
+        let drawn = [DrawnItem(x: 100, width: 20, label: "A"), DrawnItem(x: 130, width: 20, label: "B")]
+        let extras = [
+            AppExtra(bundleID: "com.example.swarm", indexInApp: 0, x: 100, width: 20, pid: 11),
+            AppExtra(bundleID: "com.example.swarm", indexInApp: 0, x: 130, width: 20, pid: 22),
+        ]
+        let items = ItemMatcher.match(drawn: drawn, extras: extras)
+        #expect(items.map(\.pid) == [11, 22])
+        // Both copies draw, so their ids collide; that is known and out of scope here.
+        #expect(items.map(\.id) == ["com.example.swarm#0", "com.example.swarm#0"])
+    }
+
     @Test func staleOverlappingFrameIsDropped() {
         let drawn = [DrawnItem(x: 1550, width: 31, label: "Flame")]
         let extras = [
