@@ -286,12 +286,13 @@ public enum ControllerError: Error, Equatable {
                 ? PositionKey.keys(for: item, among: items, table: table) : [try neighborKey(item, table)]
             let left = try leftNeighbor.map { try neighborKey($0, table) }
             let right = try rightNeighbor.map { try neighborKey($0, table) }
-            try writePositions(table.placement(of: keys, leftNeighbor: left, rightNeighbor: right))
+            try writePositions(try table.placement(of: keys, leftNeighbor: left, rightNeighbor: right))
         }
     }
 
-    /// Places an app's icons between two items, whether or not it's drawn yet: every existing key
-    /// of the app under any of its prefixes gets the slot, else `Item-0` under the first (as a
+    /// Places an app's icons between two items, whether or not it's drawn yet: the app's icons
+    /// (every existing key under any of its prefixes) get distinct values in the slot, in their
+    /// existing order, else `Item-0` under the first (as a
     /// reveal does), so it works for an app that's just been switched on. A neighbour that isn't
     /// drawn yet (an app shown just before, placed already) is found by its app's own keys.
     public func place(_ id: BundleID, leftNeighbor: MenuBarItem?, rightNeighbor: MenuBarItem?) async throws {
@@ -314,8 +315,9 @@ public enum ControllerError: Error, Equatable {
             }
             let left = try leftNeighbor.map(key)
             let right = try rightNeighbor.map(key)
-            let keys = Self.revealKeys(prefixes: prefixes, table)
-            try writePositions(table.placement(of: keys, leftNeighbor: left, rightNeighbor: right))
+            // One value per icon, in the app's own order, so a multi-icon app comes back as it was.
+            let groups = table.groupedByValue(Self.revealKeys(prefixes: prefixes, table))
+            try writePositions(try table.placement(ofGroups: groups, leftNeighbor: left, rightNeighbor: right))
         }
     }
 
@@ -508,7 +510,7 @@ public enum ControllerError: Error, Equatable {
         } else {
             key = nil
         }
-        // The clock is 0 by definition; any other key must exist or the placement would be a guess.
+        // The clock is 0 by definition, key or not (PositionTable counts a missing one as 0); any other key must exist or the placement would be a guess.
         guard let key, key == PositionKey.clock || table.values[key] != nil else {
             throw ControllerError.unresolvedNeighbor
         }

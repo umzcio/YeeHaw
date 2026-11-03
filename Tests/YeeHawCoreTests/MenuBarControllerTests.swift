@@ -631,6 +631,42 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(rig.system.positionWrites == 0)
     }
 
+    @Test func aMultiIconAppIsPlacedWithDistinctValuesInItsOwnOrder() async throws {
+        let rig = Self.rig(try FakeSystem(
+            allow: [(Self.a, false), (Self.b, true), (Self.yeehaw, true)],
+            positions: ["status:\(Self.a)::Item-0": 500, "status:\(Self.a)::Item-1": 490, "status:\(Self.b)::Item-0": 300,
+                        "status:\(Self.yeehaw)::Item-0": 100, PositionKey.clock: 0]))
+        let c = rig.controller()
+        try await c.place(Self.a, leftNeighbor: FakeSystem.item(Self.b), rightNeighbor: FakeSystem.item(Self.yeehaw))
+        let p = rig.system.positions
+        let first = try #require(p["status:\(Self.a)::Item-0"])
+        let second = try #require(p["status:\(Self.a)::Item-1"])
+        #expect(300 > first)
+        #expect(first > second)
+        #expect(second > 100)
+    }
+
+    @Test func nothingIsPlacedRightOfTheClock() throws {
+        let clockItem = FakeSystem.appleItem("com.apple.menuextra.clock")
+        let withClock = Self.rig(try FakeSystem(
+            allow: [(Self.a, true)],
+            positions: ["status:\(Self.a)::Item-0": 200, PositionKey.clock: 0]))
+        let c = withClock.controller()
+        #expect(throws: ControllerError.unresolvedNeighbor) {
+            try c.move(FakeSystem.item(Self.a), leftNeighbor: clockItem, rightNeighbor: nil)
+        }
+        #expect(withClock.system.positionWrites == 0)
+
+        let noClock = Self.rig(try FakeSystem(
+            allow: [(Self.a, true)],
+            positions: ["status:\(Self.a)::Item-0": 200]))
+        let d = noClock.controller()
+        #expect(throws: ControllerError.unresolvedNeighbor) {
+            try d.move(FakeSystem.item(Self.a), leftNeighbor: clockItem, rightNeighbor: nil)
+        }
+        #expect(noClock.system.positionWrites == 0)
+    }
+
     /// Ruling R51: MenuBarAgent honours `module:` writes for Apple items (Wi-Fi verified on 27.2).
     @Test func moveOfAppleItemWritesItsModuleKey() throws {
         let rig = Self.rig(try FakeSystem(
