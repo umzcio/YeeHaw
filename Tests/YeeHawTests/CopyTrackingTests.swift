@@ -21,4 +21,13 @@ import YeeHawCore
         #expect(RevealCoordinator.pressTarget(for: Self.item(pid: nil), running: [11]) == 11)
         #expect(RevealCoordinator.pressTarget(for: Self.item(pid: nil), running: []) == nil)
     }
+
+    @Test func spacingRestartsTheCopyThatDrawsTheIcon() {
+        #expect(RunningMenuBarApps.ownerPID(of: "com.example.swarm", in: [Self.item(pid: 22)]) == 22)
+    }
+
+    @Test func anAppThatDrawsNothingHasNoOwner() {
+        #expect(RunningMenuBarApps.ownerPID(of: "com.example.other", in: [Self.item(pid: 22)]) == nil)
+        #expect(RunningMenuBarApps.ownerPID(of: "com.example.swarm", in: [Self.item(pid: nil)]) == nil)
+    }
 }
