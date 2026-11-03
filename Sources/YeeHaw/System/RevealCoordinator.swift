@@ -268,6 +268,8 @@ private final class RevealSession {
         kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification,
         kAXApplicationDeactivatedNotification,
     ]
+    /// How far below the menu bar a menu or popover's window may start (a popover's arrow).
+    private static let hangingSlack: CGFloat = 12
     /// Bounds every AX call made on the main actor (adding and removing notifications).
     private static let messagingTimeout: Float = 0.5
 
@@ -382,8 +384,11 @@ private final class RevealSession {
         timer?.cancel()
         timer = Task { [weak self] in
             try? await Task.sleep(for: .seconds(RevealCoordinator.inactivityTimeout))
-            guard !Task.isCancelled else { return }
-            self?.close("no activity for \(Int(RevealCoordinator.inactivityTimeout)) s")
+            guard !Task.isCancelled, let self else { return }
+            // Hiding the icon under an open popover would leave the popover stranded.
+            if self.hangsFromBar() { self.restartTimer() } else {
+                self.close("no activity for \(Int(RevealCoordinator.inactivityTimeout)) s")
+            }
         }
     }
 
@@ -456,8 +461,36 @@ private final class RevealSession {
         guard reason == nil else { return }
         if appWindowsContain(screenPoint) {
             activity()
+        } else if hangsFromBar() {
+            // A click in the menu bar doesn't close a popover, and elsewhere it closes it a moment
+            // later; either way the window watch ends the reveal once it's gone. Ending it now
+            // would hide the icon while its popover stays open, sliding to a neighbour's icon.
+            activity()
         } else {
             close("mouse-down outside the app")
+        }
+    }
+
+    /// Whether a window that appeared after the press still hangs from the menu bar (its top
+    /// within a few points of the bar's bottom): a menu or popover, not a window the app opened.
+    private func hangsFromBar() -> Bool {
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+        let windows = info as? [[String: Any]] ?? []
+        return windows.contains { window in
+            guard (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init) == pid,
+                  let number = (window[kCGWindowNumber as String] as? Int).map(CGWindowID.init),
+                  !windowsBeforePress.contains(number),
+                  let bounds = window[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds)
+            else { return false }
+            // CG bounds have a top-left origin on the primary display; find the window's screen.
+            let center = NSPoint(x: rect.midX, y: primaryHeight - rect.midY)
+            guard let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) else { return false }
+            let screenTop = primaryHeight - screen.frame.maxY
+            // An auto-hidden bar leaves no top inset; it still has its own thickness.
+            let barBottom = screenTop + max(screen.frame.maxY - screen.visibleFrame.maxY, NSStatusBar.system.thickness)
+            return rect.minY <= barBottom + Self.hangingSlack
         }
     }
 
