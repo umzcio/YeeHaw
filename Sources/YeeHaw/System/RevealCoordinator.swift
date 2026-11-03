@@ -124,6 +124,7 @@ final class RevealCoordinator {
             return .revealed
         }
         let session = RevealSession(pid: pid)
+        session.log = step
         session.onFirstSurface = { what in step("\(what) (first menu or window on screen)") }
         if !session.isObserving { step("AX observer unavailable; only clicks and the timeout can end it") }
 
@@ -136,11 +137,21 @@ final class RevealCoordinator {
             : await press(item, pid: pid, session: session, step: step)
         if pressed {
             session.startWatching(icon: item.x...(item.x + item.width))
-            step("close: \(await session.waitForClose())")
-            if let onClosed {
-                await onClosed(item)
-                step("photographed")
+            while true {
+                let close = await session.waitForClose()
+                step("close: \(close.signal.rawValue)")
+                if close.skipsPhoto {
+                    step("not photographing: the close was a click outside the app")
+                } else if let onClosed {
+                    await onClosed(item)
+                    step("photographed")
+                }
+                if await end(step, unlessInUse: { session.isInUseAgain }) { break }
+                step("the app's menu or panel opened again before the switch-off; watching again")
+                session.resumeWatching()
             }
+            session.tearDown()
+            return .revealed  // Step 6 refines this
         }
         session.tearDown()
         await end(step)
@@ -150,19 +161,23 @@ final class RevealCoordinator {
     /// `endReveal`, retried once after `endRetryDelay`. It runs in its own unstructured task so a
     /// cancelled caller can't cut it short: `TaskSleeper` ignores cancellation, so the controller's
     /// polls would race through, and the retry's sleep would be skipped.
-    private func end(_ step: @escaping @MainActor (String) -> Void) async {
+    /// `unlessInUse` goes to `endReveal`; this returns false only when it held the switch-off back
+    /// (the app opened its menu or panel again), and true otherwise, failures included.
+    @discardableResult
+    private func end(_ step: @escaping @MainActor (String) -> Void,
+                     unlessInUse: (@MainActor () -> Bool)? = nil) async -> Bool {
         let controller = controller
-        await Task { @MainActor in
+        return await Task { @MainActor in
             do {
-                try await controller.endReveal()
+                guard try await controller.endReveal(unlessInUse: unlessInUse) else { return false }
                 step("endReveal done")
-                return
+                return true
             } catch {
                 step("endReveal failed: \(error); retrying in \(Int(Self.endRetryDelay)) s")
             }
             try? await Task.sleep(for: .seconds(Self.endRetryDelay))
             do {
-                try await controller.endReveal()
+                guard try await controller.endReveal(unlessInUse: unlessInUse) else { return false }
                 step("endReveal done on retry")
             } catch {
                 let message = "ERROR: endReveal failed twice (\(error)). The app may be left on and its "
@@ -170,6 +185,7 @@ final class RevealCoordinator {
                 Self.log.fault("\(message, privacy: .public)")
                 step(message)
             }
+            return true
         }.value
     }
 
@@ -344,13 +360,17 @@ enum RevealGeometry {
     }
 }
 
-/// One reveal's close signals. The first one to arrive wins; `tearDown` removes them all.
+/// One reveal's close signals; `tearDown` removes them all.
 ///
-/// The app is done with its menu on: `AXMenuClosed` for its outermost menu; its popover or window
-/// losing focus (`AXFocusedWindowChanged`) or being destroyed (`AXUIElementDestroyed`); the app
-/// being deactivated (`AXApplicationDeactivated`, e.g. Cmd-Tab away); a global mouse-down (any
-/// button, so a right-click on YeeHaw's icon counts) outside its windows; or `RevealCoordinator.inactivityTimeout` with none of the app's own
-/// activity (menus or windows opening, clicks inside its windows).
+/// The app may be done with its menu on: `AXMenuClosed` for its outermost menu; its popover or
+/// window losing focus (`AXFocusedWindowChanged`) or being destroyed (`AXUIElementDestroyed`); the
+/// app being deactivated (`AXApplicationDeactivated`, e.g. Cmd-Tab away); its post-press windows
+/// going off screen; a global mouse-down (any button, so a right-click on YeeHaw's icon counts)
+/// outside its windows; or `RevealCoordinator.inactivityTimeout` with none of the app's own
+/// activity (menus or windows opening, clicks inside its windows). Each is only a hint:
+/// `RevealClosePolicy` decides whether the reveal ends, so the app is never switched off under a
+/// panel that's still up. Once the close is decided the listeners stay installed until
+/// `tearDown`, watching only for the app opening its menu or panel again before the switch-off.
 @MainActor
 private final class RevealSession {
     private static let appNotifications = [
@@ -372,8 +392,24 @@ private final class RevealSession {
     private var windows: [AXUIElement] = []
     /// Open menus, so closing a submenu doesn't count as closing the menu.
     private var menuDepth = 0
-    private var reason: String?
-    private var waiter: CheckedContinuation<String, Never>?
+    private enum Phase { case watching, closing(RevealCloseSignal, since: ContinuousClock.Instant), ended }
+    /// How a reveal's menu or popover closed, as the coordinator acts on it.
+    struct Close { let signal: RevealCloseSignal; let skipsPhoto: Bool }
+    private var phase = Phase.watching
+    private var decided: Close?
+    private var waiter: CheckedContinuation<Close, Never>?
+    private var recheck: Task<Void, Never>?
+    /// A menu or bar-hanging window opened after the close was decided.
+    private var reopened = false
+    /// When the last outside click came, so a close that follows it soon after counts as one.
+    private var outsideClickAt: ContinuousClock.Instant?
+    /// After an outside click in the menu bar: other processes' windows on screen at the click,
+    /// and the new bar-hanging ones' bounds at the last recheck.
+    private var otherAppWatch: (before: Set<CGWindowID>, lastBounds: [CGWindowID: CGRect])?
+    /// True once any menu or window of the app's opened after the press.
+    private(set) var everOpened = false
+    /// Receives the session's own steps (the coordinator's `step`).
+    var log: ((String) -> Void)?
     /// Every AX notification received, in order, for the debug log.
     private var seen: [String] = []
     /// The app's on-screen windows before the press. A window that appears after it and goes away
@@ -393,16 +429,19 @@ private final class RevealSession {
 
     var isObserving: Bool { observer != nil }
 
-    /// True once the press visibly did something: a menu or window opened, or it already closed.
+    /// True once the press visibly did something: a menu or window opened since it.
     var surfaceOpened: Bool {
-        menuDepth > 0 || !windows.isEmpty || reason != nil
-            || !Self.onScreenWindows(of: pid).subtracting(windowsBeforePress).isEmpty
+        everOpened || !postPressWindows().isEmpty
     }
+
+    /// Asked right before the switch-off is written: the app opened a menu again after the close
+    /// was decided, or one of its post-press windows hangs from the bar.
+    var isInUseAgain: Bool { reopened || hangsFromBar() }
 
     /// Observes the app's AX notifications right away, so a menu that opens during the press is seen.
     init(pid: pid_t) {
         self.pid = pid
-        windowsBeforePress = Self.onScreenWindows(of: pid)
+        windowsBeforePress = Self.onScreenWindows(owner: { $0 == pid })
         app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, Self.messagingTimeout)
         var created: AXObserver?
@@ -439,14 +478,26 @@ private final class RevealSession {
         }
     }
 
-    func waitForClose() async -> String {
-        if let reason { return reason }
+    /// Returns once the policy decides the app is done with its menu (at once if it already has).
+    func waitForClose() async -> Close {
+        if let decided { return decided }
         return await withCheckedContinuation { waiter = $0 }
+    }
+
+    /// After the app opened its menu or panel again before the switch-off: watch for the next close.
+    func resumeWatching() {
+        phase = .watching
+        decided = nil
+        reopened = false
+        windowsSincePress = []
+        restartTimer()
     }
 
     func tearDown() {
         timer?.cancel()
         timer = nil
+        recheck?.cancel()
+        recheck = nil
         windowWatch?.cancel()
         windowWatch = nil
         if let monitor { NSEvent.removeMonitor(monitor) }
@@ -466,28 +517,135 @@ private final class RevealSession {
 
     // MARK: Signals
 
-    private func close(_ why: String) {
-        guard reason == nil else { return }
-        reason = why
-        waiter?.resume(returning: why)
+    /// A close hint: held, ignored or acted on as `RevealClosePolicy` decides.
+    private func signal(_ s: RevealCloseSignal) {
+        switch phase {
+        case .ended:
+            return
+        case .closing(let pending, _):
+            // Only an outside click outranks the hint being held: its photo is skipped.
+            guard s == .outsideClick, pending != .outsideClick else { return }
+            phase = .closing(.outsideClick, since: .now)
+        case .watching:
+            var hint = s
+            if hint != .outsideClick {
+                let point = NSEvent.mouseLocation
+                if NSEvent.pressedMouseButtons != 0, !appWindowsContain(point), !isOnIcon(point) {
+                    // Another app's click, seen here as an AX notification before (or instead of)
+                    // the global mouse-down.
+                    outsideClickAt = .now
+                    if RevealGeometry.isInMenuBar(point, screens: RevealGeometry.screens()) { watchOtherApps() }
+                    hint = .outsideClick
+                } else if let at = outsideClickAt, ContinuousClock.now - at < .seconds(RevealClosePolicy.clickCap) {
+                    // The surface an outside click dismissed (while it still hung from the bar)
+                    // closing a moment later.
+                    hint = .outsideClick
+                }
+            }
+            phase = .closing(hint, since: .now)
+        }
+        evaluate()
+    }
+
+    /// Judges the pending hint against the screen and the mouse as they are now.
+    private func evaluate() {
+        guard case .closing(let s, let since) = phase else { return }
+        let postPress = postPressWindows()
+        if !postPress.isEmpty {
+            windowsSincePress.formUnion(postPress)
+            everOpened = true
+        }
+        let inputs = RevealCloseInputs(
+            postPressWindowsOnScreen: !postPress.isEmpty,
+            hangsFromBar: hangsFromBar(),
+            mouseButtonDown: NSEvent.pressedMouseButtons != 0,
+            otherAppOpening: otherAppOpening(),
+            elapsed: Self.seconds(ContinuousClock.now - since))
+        switch RevealClosePolicy.decide(s, inputs) {
+        case .keepWaiting:
+            log?("close hint \(s.rawValue) ignored: a window the press opened hangs from the bar")
+            recheck?.cancel()
+            recheck = nil
+            // `outsideClickAt` and `otherAppWatch` stay: the surface closing a moment later is
+            // that click's doing.
+            phase = .watching
+            if timer != nil { restartTimer() }
+        case .endNow:
+            finish(s)
+        case .endAfterCappedWait(let remaining):
+            guard recheck == nil else { return }
+            var reasons: [String] = []
+            if inputs.postPressWindowsOnScreen { reasons.append("a window the press opened is still up") }
+            if inputs.mouseButtonDown { reasons.append("a mouse button is down") }
+            if s == .outsideClick, inputs.otherAppOpening { reasons.append("another app is opening its menu") }
+            let ms = Int((remaining * 1000).rounded())
+            log?("close hint \(s.rawValue): holding the switch-off (\(reasons.joined(separator: ", "))), at most \(ms) ms")
+            recheck = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(RevealClosePolicy.recheckInterval))
+                    guard let self, !Task.isCancelled else { return }
+                    self.evaluate()
+                }
+            }
+        }
+    }
+
+    /// Whether another app's menu or panel is still opening from the outside click: true until a
+    /// new window of another process hangs from the bar with the same bounds on two rechecks.
+    private func otherAppOpening() -> Bool {
+        guard let watch = otherAppWatch else { return false }
+        let pid = pid
+        let now = Self.barHangingWindows(owner: { $0 != pid }, excluding: watch.before)
+        let settled = now.contains { watch.lastBounds[$0.key] == $0.value }
+        otherAppWatch = (watch.before, now)
+        return !settled
+    }
+
+    /// Snapshots every other process's windows (YeeHaw's own strip included), so the ones an
+    /// outside click in the menu bar opens can be told apart.
+    private func watchOtherApps() {
+        let pid = pid
+        otherAppWatch = (Self.onScreenWindows(owner: { $0 != pid }), [:])
+    }
+
+    /// The close is decided: the coordinator photographs (unless skipped) and switches the app off.
+    private func finish(_ s: RevealCloseSignal) {
+        recheck?.cancel()
+        recheck = nil
+        phase = .ended
+        // A lost AXMenuClosed mustn't leave the menu counted as open.
+        menuDepth = 0
+        reopened = false
+        outsideClickAt = nil
+        otherAppWatch = nil
+        let close = Close(signal: s, skipsPhoto: RevealClosePolicy.skipsPhoto(s))
+        decided = close
+        waiter?.resume(returning: close)
         waiter = nil
     }
 
-    /// The app is still in use: push the inactivity timeout back (once watching has started).
+    /// The app is still in use: drop a pending close hint and push the inactivity timeout back
+    /// (once watching has started).
     private func activity() {
+        outsideClickAt = nil
+        otherAppWatch = nil
+        if case .closing = phase {
+            recheck?.cancel()
+            recheck = nil
+            phase = .watching
+            log?("close hint dropped: the app is in use again")
+        }
         if timer != nil { restartTimer() }
     }
 
-    /// Inactivity, not a hard limit: `activity()` calls this again on the app's own activity.
+    /// Inactivity, not a hard limit: `activity()` calls this again on the app's own activity, and
+    /// the policy keeps the reveal (and restarts this) while a window hangs from the bar.
     private func restartTimer() {
         timer?.cancel()
         timer = Task { [weak self] in
             try? await Task.sleep(for: .seconds(RevealCoordinator.inactivityTimeout))
             guard !Task.isCancelled, let self else { return }
-            // Hiding the icon under an open popover would leave the popover stranded.
-            if self.hangsFromBar() { self.restartTimer() } else {
-                self.close("no activity for \(Int(RevealCoordinator.inactivityTimeout)) s")
-            }
+            self.signal(.inactivity)
         }
     }
 
@@ -497,14 +655,19 @@ private final class RevealSession {
             onFirstSurface = nil
             first(name)
         }
-        guard reason == nil else { return }
+        if case .ended = phase {
+            // Only a re-open matters now: it holds back the switch-off.
+            if [kAXMenuOpenedNotification, kAXWindowCreatedNotification].contains(name) { reopened = true }
+            return
+        }
         switch name {
         case kAXMenuOpenedNotification:
             menuDepth += 1
+            everOpened = true
             activity()
         case kAXMenuClosedNotification:
             menuDepth = max(menuDepth - 1, 0)
-            if menuDepth == 0 { close("AXMenuClosed") } else { activity() }
+            if menuDepth == 0 { signal(.menuClosed) } else { activity() }
         case kAXWindowCreatedNotification:
             track(element)
             activity()
@@ -516,12 +679,12 @@ private final class RevealSession {
                 track(element)
                 activity()
             } else {
-                close("AXFocusedWindowChanged")
+                signal(.focusMovedAway)
             }
         case kAXUIElementDestroyedNotification:
-            if windows.contains(where: { CFEqual($0, element) }) { close("AXUIElementDestroyed") }
+            if windows.contains(where: { CFEqual($0, element) }) { signal(.windowDestroyed) }
         case kAXApplicationDeactivatedNotification:
-            close("AXApplicationDeactivated")
+            signal(.appDeactivated)
         default:
             break
         }
@@ -530,44 +693,40 @@ private final class RevealSession {
     private func track(_ window: AXUIElement) {
         guard !CFEqual(window, app), !windows.contains(where: { CFEqual($0, window) }) else { return }
         windows.append(window)
+        everOpened = true
         if let observer {
             AXUIElementSetMessagingTimeout(window, Self.messagingTimeout)
             AXObserverAddNotification(observer, window, kAXUIElementDestroyedNotification as CFString, refcon)
         }
     }
 
-    /// Closes once every window that appeared after the press is gone again.
+    /// A close hint once every window that appeared after the press is gone again; after the
+    /// close, a post-press window hanging from the bar is the app opening its panel again.
     private func checkWindows() {
-        guard reason == nil else { return }
-        let new = Self.onScreenWindows(of: pid).subtracting(windowsBeforePress)
+        if case .ended = phase {
+            if hangsFromBar() { reopened = true }
+            return
+        }
+        let new = postPressWindows()
         if !new.isEmpty {
             windowsSincePress.formUnion(new)
+            everOpened = true
         } else if !windowsSincePress.isEmpty {
-            close("the app's menu or popover went off screen")
+            signal(.windowsGone)
         }
-    }
-
-    private static func onScreenWindows(of pid: pid_t) -> Set<CGWindowID> {
-        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-        let windows = info as? [[String: Any]] ?? []
-        return Set(windows.compactMap { window in
-            guard (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init) == pid else { return nil }
-            return (window[kCGWindowNumber as String] as? Int).map(CGWindowID.init)
-        })
     }
 
     private func mouseDown(at screenPoint: NSPoint) {
-        guard reason == nil else { return }
+        if case .ended = phase { return }
         if appWindowsContain(screenPoint) || isOnIcon(screenPoint) {
             activity()
-        } else if hangsFromBar() {
-            // A click in the menu bar doesn't close a popover, and elsewhere it closes it a moment
-            // later; either way the window watch ends the reveal once it's gone. Ending it now
-            // would hide the icon while its popover stays open, sliding to a neighbour's icon.
-            activity()
-        } else {
-            close("mouse-down outside the app")
+            return
         }
+        // A click in the menu bar doesn't close a popover, and elsewhere it closes it a moment
+        // later; the policy keeps the reveal while it still hangs from the bar.
+        outsideClickAt = .now
+        if RevealGeometry.isInMenuBar(screenPoint, screens: RevealGeometry.screens()) { watchOtherApps() }
+        signal(.outsideClick)
     }
 
     /// Whether a point (AppKit screen coordinates) is on the revealed icon in the menu bar.
@@ -576,27 +735,71 @@ private final class RevealSession {
         return RevealGeometry.isOnIcon(screenPoint, icon: icon, screens: RevealGeometry.screens())
     }
 
+    // MARK: Windows
+
+    /// The app's on-screen windows that appeared after the press.
+    private func postPressWindows() -> Set<CGWindowID> {
+        let pid = pid
+        return Self.onScreenWindows(owner: { $0 == pid }).subtracting(windowsBeforePress)
+    }
+
     /// Whether a window that appeared after the press still hangs from the menu bar (its top
     /// within a few points of the bar's bottom): a menu or popover, not a window the app opened.
     private func hangsFromBar() -> Bool {
-        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let pid = pid
+        return !Self.barHangingWindows(owner: { $0 == pid }, excluding: windowsBeforePress).isEmpty
+    }
+
+    /// Whether any visible window of these processes hangs from the menu bar (an earlier reveal's
+    /// menu or panel still open).
+    static func anyWindowHangsFromBar(of pids: Set<pid_t>) -> Bool {
+        !barHangingWindows(owner: { pids.contains($0) }, excluding: []).isEmpty
+    }
+
+    private static func windowList() -> [[String: Any]] {
         let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-        let windows = info as? [[String: Any]] ?? []
-        return windows.contains { window in
-            guard (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init) == pid,
+        return info as? [[String: Any]] ?? []
+    }
+
+    /// A window faded out but left ordered in (alpha 0) isn't on screen to anyone looking; counting
+    /// it would hold a reveal open forever.
+    private static func isVisible(_ window: [String: Any]) -> Bool {
+        (window[kCGWindowAlpha as String] as? Double).map { $0 > 0 } ?? true
+    }
+
+    private static func owner(of window: [String: Any]) -> pid_t? {
+        (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init)
+    }
+
+    /// The visible on-screen windows of the processes `owner` accepts.
+    private static func onScreenWindows(owner: (pid_t) -> Bool) -> Set<CGWindowID> {
+        Set(windowList().compactMap { window in
+            guard let pid = Self.owner(of: window), owner(pid), isVisible(window) else { return nil }
+            return (window[kCGWindowNumber as String] as? Int).map(CGWindowID.init)
+        })
+    }
+
+    /// The visible windows of the processes `owner` accepts, not in `excluding`, whose top is
+    /// within `hangingSlack` of the menu bar's bottom, with their CG bounds.
+    private static func barHangingWindows(owner: (pid_t) -> Bool, excluding: Set<CGWindowID>) -> [CGWindowID: CGRect] {
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        var hanging: [CGWindowID: CGRect] = [:]
+        for window in windowList() {
+            guard let pid = Self.owner(of: window), owner(pid), isVisible(window),
                   let number = (window[kCGWindowNumber as String] as? Int).map(CGWindowID.init),
-                  !windowsBeforePress.contains(number),
+                  !excluding.contains(number),
                   let bounds = window[kCGWindowBounds as String] as? NSDictionary,
                   let rect = CGRect(dictionaryRepresentation: bounds)
-            else { return false }
+            else { continue }
             // CG bounds have a top-left origin on the primary display; find the window's screen.
             let center = NSPoint(x: rect.midX, y: primaryHeight - rect.midY)
-            guard let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) else { return false }
+            guard let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) else { continue }
             let screenTop = primaryHeight - screen.frame.maxY
             // An auto-hidden bar leaves no top inset; it still has its own thickness.
             let barBottom = screenTop + max(screen.frame.maxY - screen.visibleFrame.maxY, NSStatusBar.system.thickness)
-            return rect.minY <= barBottom + Self.hangingSlack
+            if rect.minY <= barBottom + hangingSlack { hanging[number] = rect }
         }
+        return hanging
     }
 
     /// Whether a point (AppKit screen coordinates) is inside any on-screen window of the app,
@@ -605,15 +808,18 @@ private final class RevealSession {
         // CG window bounds use a top-left origin on the primary display.
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
         let point = CGPoint(x: screenPoint.x, y: primaryHeight - screenPoint.y)
-        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-        let windows = info as? [[String: Any]] ?? []
-        return windows.contains { window in
-            guard (window[kCGWindowOwnerPID as String] as? Int).map(pid_t.init) == pid,
+        return Self.windowList().contains { window in
+            guard Self.owner(of: window) == pid,
                   let bounds = window[kCGWindowBounds as String] as? NSDictionary,
                   let rect = CGRect(dictionaryRepresentation: bounds)
             else { return false }
             return rect.contains(point)
         }
+    }
+
+    private static func seconds(_ duration: Duration) -> Double {
+        let parts = duration.components
+        return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
     }
 
     // MARK: AX observer plumbing
