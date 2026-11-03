@@ -51,6 +51,7 @@ public struct AllowList {
         try PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0)
     }
 
+    /// An app listed more than once counts as allowed only when every entry says so: which entry MenuBarAgent honours isn't known, so YeeHaw never takes an app for shown while one entry hides it.
     public var snapshot: AllowSnapshot {
         var result: AllowSnapshot = [:]
         for index in stride(from: 0, to: items.count, by: 2) {
@@ -58,49 +59,59 @@ public struct AllowList {
                   let value = items[index + 1] as? [String: Any],
                   let allowed = value["isAllowed"] as? Bool
             else { continue }
-            result[id] = allowed
+            result[id] = (result[id] ?? true) && allowed
         }
         return result
     }
 
-    /// Returns false when `id` is not a tracked bundle entry.
+    /// Sets every entry of `id`. Returns true when an entry changed; false when all already said
+    /// so or `id` isn't tracked.
     @discardableResult
     public mutating func setAllowed(_ allowed: Bool, for id: BundleID) -> Bool {
-        for index in stride(from: 0, to: items.count, by: 2) {
-            guard Self.bundleID(of: items[index]) == id,
-                  var value = items[index + 1] as? [String: Any],
-                  value["isAllowed"] is Bool
-            else { continue }
+        var changed = false
+        for index in entryIndices(of: id) {
+            guard var value = items[index + 1] as? [String: Any], let current = value["isAllowed"] as? Bool,
+                  current != allowed else { continue }
             value["isAllowed"] = allowed
             items[index + 1] = value
-            return true
+            changed = true
         }
-        return false
+        return changed
     }
 
-    /// The copies `id`'s entry lists, in order; forms YeeHaw doesn't know are left out.
+    /// The copies every entry of `id` lists, in order and without repeats; forms YeeHaw doesn't
+    /// know are left out.
     public func locations(for id: BundleID) -> [AllowLocation] {
-        guard let index = entryIndex(of: id),
-              let listed = (items[index + 1] as? [String: Any])?["menuItemLocations"] as? [Any] else { return [] }
-        return listed.compactMap(AllowLocation.init(plist:))
+        var result: [AllowLocation] = []
+        for index in entryIndices(of: id) {
+            guard let listed = (items[index + 1] as? [String: Any])?["menuItemLocations"] as? [Any] else { continue }
+            for location in listed.compactMap(AllowLocation.init(plist:)) where !result.contains(location) {
+                result.append(location)
+            }
+        }
+        return result
     }
 
-    /// Appends `location` to the entry's `menuItemLocations` (starting the list if it has none),
-    /// unless it's listed already. Returns false when nothing changed or `id` isn't tracked.
+    /// Appends `location` to every entry's `menuItemLocations` that doesn't list it (starting the
+    /// list if it has none). Returns false when nothing changed or `id` isn't tracked.
     @discardableResult
     public mutating func addLocation(_ location: AllowLocation, for id: BundleID) -> Bool {
-        guard let index = entryIndex(of: id), var value = items[index + 1] as? [String: Any] else { return false }
-        var listed = value["menuItemLocations"] as? [Any] ?? []
+        var changed = false
         let form = location.plist as NSDictionary
-        guard !listed.contains(where: { ($0 as? NSDictionary) == form }) else { return false }
-        listed.append(location.plist)
-        value["menuItemLocations"] = listed
-        items[index + 1] = value
-        return true
+        for index in entryIndices(of: id) {
+            guard var value = items[index + 1] as? [String: Any] else { continue }
+            var listed = value["menuItemLocations"] as? [Any] ?? []
+            guard !listed.contains(where: { ($0 as? NSDictionary) == form }) else { continue }
+            listed.append(location.plist)
+            value["menuItemLocations"] = listed
+            items[index + 1] = value
+            changed = true
+        }
+        return changed
     }
 
-    private func entryIndex(of id: BundleID) -> Int? {
-        stride(from: 0, to: items.count, by: 2).first { Self.bundleID(of: items[$0]) == id }
+    private func entryIndices(of id: BundleID) -> [Int] {
+        stride(from: 0, to: items.count, by: 2).filter { Self.bundleID(of: items[$0]) == id }
     }
 
     private static func bundleID(of key: Any) -> BundleID? {
