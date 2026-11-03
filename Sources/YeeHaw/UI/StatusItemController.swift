@@ -29,6 +29,8 @@ final class StatusItemController: NSObject {
     /// Why the last click in the strip didn't open an app's menu, shown in the strip until it next
     /// closes or a reveal works.
     private var revealProblem: RevealProblem?
+    /// Which hidden apps' reveals opened nothing lately, for the strip's health notice.
+    private var health = MenuBarHealth()
     /// Set when a click in the strip found no drawn YeeHaw icon to reveal next to.
     private var ownIconMissing = false
     private var refreshTask: Task<Void, Never>?
@@ -306,8 +308,10 @@ final class StatusItemController: NSObject {
     }
 
     private func currentNotice() -> StripNotice? {
-        Self.notice(needsGrant: controller.state.needsGrant, problem: revealProblem, ownIconMissing: ownIconMissing,
-                    name: AppIdentity.name(of:))
+        let owners = controller.items.compactMap(\.bundleID) + controller.state.hidden
+        let issue = health.issue(among: HiddenMenuBarApps.runningFacts(of: owners), own: OwnIconLocator.bundleID)
+        return Self.notice(needsGrant: controller.state.needsGrant, problem: revealProblem, ownIconMissing: ownIconMissing,
+                           health: issue, name: AppIdentity.name(of:))
     }
 
     /// The strip's notice, most pressing first: a missing grant (Settings fixes it), then why the
@@ -359,8 +363,12 @@ final class StatusItemController: NSObject {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { _, error in
                 if let error { Self.log.error("Could not open \(id, privacy: .public): \(error, privacy: .public)") }
             }
-        case .unhide, .restart:
-            break
+        case .unhide(let id):
+            if HiddenMenuBarApps.unhide(id) { health.forget(id) }
+        case .restart(let id):
+            Task {
+                if await AppRestarter.restart(id) { health.forget(id) }
+            }
         }
     }
 
@@ -377,8 +385,12 @@ final class StatusItemController: NSObject {
                 return
             }
             switch await reveal.open(id, nextTo: yeehaw, secondary: secondary) {
-            case .revealed, .nothingOpened:
+            case .revealed:
                 revealProblem = nil
+                health.recordReveal(id, opened: true)
+            case .nothingOpened:
+                revealProblem = nil
+                health.recordReveal(id, opened: false)
             case .pressFailed:
                 reportProblem(.pressFailed(id))
             case .ignored:
