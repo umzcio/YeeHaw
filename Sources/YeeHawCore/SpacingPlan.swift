@@ -9,7 +9,7 @@ public struct RunningMenuBarApp: Equatable, Sendable {
     /// Whether it has windows open, which a restart would interrupt: hidden (Command-H),
     /// minimized and other-Space windows count (see `SpacingPlan.hasOpenWindows`).
     public var hasOpenWindows: Bool
-    /// Hidden with Command-H; it's reopened hidden too.
+    /// Hidden (Command-H) when the list was read. Apply never reopens an app hidden.
     public var isHidden: Bool
     /// When this process launched, which says the spacing it picked up.
     public var launchDate: Date?
@@ -101,11 +101,8 @@ extension SpacingPlan {
     /// (hidden and minimized windows too), anything on screen, and for a regular app, any window
     /// the window server knows of (it may be full screen in another Space, which Accessibility
     /// doesn't list; a false positive only leaves the app unticked). An accessory app's off-screen
-    /// windows don't count: menu bar apps keep closed windows around. `exempt` holds processes
-    /// YeeHaw hid itself after restarting them (some open their main window at launch); they
-    /// count as windowless while they stay hidden.
-    public static func hasOpenWindows(_ facts: WindowFacts, exempt: Set<Int32> = []) -> Bool {
-        if facts.isHidden, exempt.contains(facts.pid) { return false }
+    /// windows don't count: menu bar apps keep closed windows around.
+    public static func hasOpenWindows(_ facts: WindowFacts) -> Bool {
         if let ax = facts.axWindows, ax > 0 { return true }
         if facts.onScreenWindows > 0 { return true }
         return facts.isRegular && facts.windowsAnywhere > 0

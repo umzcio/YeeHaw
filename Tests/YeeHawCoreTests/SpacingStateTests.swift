@@ -166,15 +166,6 @@ import Testing
         #expect(SpacingPlan.hasOpenWindows(Self.facts(hidden: true, ax: 1, anywhere: 1)))
     }
 
-    @Test func appYeeHawHidDuringItsRestartIsWindowlessWhileStillHidden() {
-        let exempt: Set<Int32> = [42]
-        #expect(!SpacingPlan.hasOpenWindows(Self.facts(hidden: true, ax: 1, anywhere: 1), exempt: exempt))
-        // Once the user shows it, its windows count again.
-        #expect(SpacingPlan.hasOpenWindows(Self.facts(hidden: false, ax: 1, onScreen: 1), exempt: exempt))
-        // A different process of the same app isn't exempt.
-        #expect(SpacingPlan.hasOpenWindows(Self.facts(hidden: true, ax: 1, pid: 7), exempt: exempt))
-    }
-
     @Test func regularAppWithAWindowInAnotherSpaceHasWindows() {
         // Accessibility lists only the current Space's windows; a full-screen window elsewhere
         // still shows up in the window server's full list.

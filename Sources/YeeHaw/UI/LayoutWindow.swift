@@ -122,8 +122,7 @@ final class LayoutWindowController: NSObject, NSWindowDelegate {
             await model.refresh()
             spacing.reloadCurrent()
             let controller = model.controller
-            spacing.setApps(await RunningMenuBarApps.list(drawn: controller.items, hidden: controller.state.hidden,
-                                                         exempt: spacing.applier.hiddenAfterRestart))
+            spacing.setApps(await RunningMenuBarApps.list(drawn: controller.items, hidden: controller.state.hidden))
         }
     }
 

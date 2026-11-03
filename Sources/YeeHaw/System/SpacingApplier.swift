@@ -17,22 +17,32 @@ struct SpacingSystem {
     var isRunning: (RunningMenuBarApp) -> Bool
     /// Asks the app to quit, the way Quit in its menu would. False if it refused outright.
     var terminate: (RunningMenuBarApp) -> Bool
-    /// Opens the app again without bringing it to the front: its new process ID, or nil if it
-    /// couldn't be opened.
-    var open: (RunningMenuBarApp) async -> Int32?
+    /// Opens the app again with `options`: its new process ID, or nil if it couldn't be opened.
+    var open: (RunningMenuBarApp, RelaunchOptions) async -> Int32?
     /// Whether the reopened app's menu bar item is back.
     var isDrawn: (RunningMenuBarApp) async -> Bool
-    /// Hides the app, like Command-H, if it isn't hidden already.
-    var hide: (RunningMenuBarApp) -> Void
-    /// Whether the app has windows open right now; processes in the set (hidden by YeeHaw after
-    /// a restart) count as windowless while they stay hidden.
-    var hasOpenWindows: (RunningMenuBarApp, Set<Int32>) async -> Bool
+    /// Whether the app has windows open right now.
+    var hasOpenWindows: (RunningMenuBarApp) async -> Bool
     var sleep: (Duration) async -> Void
+}
+
+/// How Spacing Apply opens an app it restarted. Never hidden: a hidden app still gets its menu
+/// bar item's clicks but can't show the panel or popover they open (SwiftUI `MenuBarExtra` apps
+/// and AppKit popover panels both stop working), and nothing would ever show it again. Never
+/// brought to the front either. An app that opens a window at launch (DigUp does) may show it;
+/// that window is the app's own, and the user closes it like any other.
+struct RelaunchOptions: Equatable, Sendable {
+    var activates: Bool
+    var hides: Bool
+    var addsToRecentItems: Bool
+
+    static let standard = RelaunchOptions(activates: false, hides: false, addsToRecentItems: false)
 }
 
 /// Applies a spacing (spec Technique 4 and "Spacing Apply"): writes both preferences, then
 /// restarts the chosen apps one at a time so they pick it up. Never force-quits: an app still
-/// running ten seconds after being asked to quit is skipped and left alone.
+/// running ten seconds after being asked to quit is skipped and left alone. It never hides an app
+/// it reopens (`RelaunchOptions`).
 @MainActor
 final class SpacingApplier {
     enum SkipReason: Error, Equatable {
@@ -75,18 +85,11 @@ final class SpacingApplier {
     /// How long an app gets to quit, and a reopened app to draw its item: 10 s each.
     static let quitPolls = 100
     static let drawPolls = 100
-    /// How long a reopened app that had no windows is kept hidden after its item is back: 1 s.
-    static let settlePolls = 10
 
     private let system: SpacingSystem
     private let own: BundleID
     /// Told as each app's restart begins: the app, its index and how many there are.
     var onProgress: ((RunningMenuBarApp, Int, Int) -> Void)?
-    /// Processes YeeHaw hid after restarting them because they had no windows open. Some open
-    /// their main window at launch (DigUp does); that hidden window isn't the user's, so the
-    /// app still counts as windowless until it's shown or quits (`forgetHidden`).
-    private(set) var hiddenAfterRestart: Set<Int32> = []
-    private var observers: [NSObjectProtocol] = []
     /// Whether `apply` is running.
     private(set) var isApplying = false
     /// Set by `stopAfterCurrentApp`: no further app is asked to quit.
@@ -96,10 +99,6 @@ final class SpacingApplier {
     init(system: SpacingSystem, own: BundleID = OwnIconLocator.bundleID) {
         self.system = system
         self.own = own
-    }
-
-    isolated deinit {
-        observers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
     }
 
     /// Both preferences as stored on both hosts.
@@ -120,17 +119,6 @@ final class SpacingApplier {
         Self.log.notice("Spacing: changed outside YeeHaw to \(stored, privacy: .public); history starts again")
         system.saveHistory(fresh)
         return fresh
-    }
-
-    /// The user showed the app, or it quit: its windows count again.
-    func forgetHidden(_ pid: Int32) {
-        hiddenAfterRestart.remove(pid)
-    }
-
-    /// Whether `app` is reopened hidden: it was hidden before, or had no windows open (it comes
-    /// back the way a login item does, without a window or the focus).
-    static func reopensHidden(_ app: RunningMenuBarApp) -> Bool {
-        app.isHidden || !app.hasOpenWindows
     }
 
     /// Stores `value` (the default deletes the keys, back to stock; keys already right are left
@@ -231,7 +219,7 @@ final class SpacingApplier {
     private func restart(_ app: RunningMenuBarApp) async -> Swift.Result<Restart, SkipReason> {
         guard system.isRunning(app) else { return .failure(.notRunning) }
         // The list may be minutes old: an app that opened a window since isn't interrupted.
-        if !app.hasOpenWindows, await system.hasOpenWindows(app, hiddenAfterRestart) {
+        if !app.hasOpenWindows, await system.hasOpenWindows(app) {
             return .failure(.openedWindows)
         }
         guard system.terminate(app) else { return .failure(.refusedToQuit) }
@@ -245,30 +233,14 @@ final class SpacingApplier {
     /// Opens an app that has quit and waits for its item; nil if it couldn't be opened.
     private func reopen(_ app: RunningMenuBarApp) async -> Restart? {
         let started = ContinuousClock.now
-        guard let pid = await system.open(app) else {
+        guard await system.open(app, .standard) != nil else {
             Self.log.error("Spacing: \(app.bundleID, privacy: .public) quit but didn't reopen")
             return nil
         }
         let drawn = await poll(Self.drawPolls) { await self.system.isDrawn(app) }
         let elapsed = ContinuousClock.now - started
         Self.log.notice("Spacing: restarted \(app.bundleID, privacy: .public); item drawn: \(drawn, privacy: .public) after \(elapsed, privacy: .public)")
-        if Self.reopensHidden(app) {
-            await keepHidden(app)
-            if !app.hasOpenWindows { hiddenAfterRestart.insert(pid) }
-        }
         return Restart(app: app, iconReturned: drawn)
-    }
-
-    /// An app reopened hidden stays hidden. Some open their main window at launch even when
-    /// launched hidden (DigUp does, and takes the focus), so the app is hidden again, the way
-    /// Command-H would, for a moment while it settles. Its windows are left as they are, and it
-    /// shows them the next time it's used.
-    private func keepHidden(_ app: RunningMenuBarApp) async {
-        for _ in 0..<Self.settlePolls {
-            system.hide(app)
-            await system.sleep(Self.pollInterval)
-        }
-        system.hide(app)
     }
 
     /// Checks `done` up to `polls` + 1 times, `pollInterval` apart; whether it came true.
@@ -290,14 +262,6 @@ extension SpacingApplier {
         self.init(system: .live(hidden: hidden))
         Self.live.removeAll { $0.applier == nil }
         Self.live.append(WeakApplier(applier: self))
-        let center = NSWorkspace.shared.notificationCenter
-        for name in [NSWorkspace.didUnhideApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
-                guard let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?
-                    .processIdentifier else { return }
-                MainActor.assumeIsolated { self?.forgetHidden(pid) }
-            })
-        }
     }
 }
 
@@ -338,13 +302,11 @@ extension SpacingSystem {
                 let running = RunningMenuBarApps.instances(of: app).filter { !$0.isTerminated }
                 return !running.isEmpty && running.map { $0.terminate() }.allSatisfy(\.self)
             },
-            open: { app in
+            open: { app, options in
                 let configuration = NSWorkspace.OpenConfiguration()
-                configuration.activates = false
-                configuration.addsToRecentItems = false
-                // Launched hidden, like a login item, so one that opens its main window at
-                // launch (DigUp does) doesn't put it on screen or take the focus.
-                configuration.hides = SpacingApplier.reopensHidden(app)
+                configuration.activates = options.activates
+                configuration.hides = options.hides
+                configuration.addsToRecentItems = options.addsToRecentItems
                 do {
                     let running = try await NSWorkspace.shared.openApplication(at: URL(filePath: app.bundlePath),
                                                                                configuration: configuration)
@@ -360,12 +322,7 @@ extension SpacingSystem {
                 }
                 return await AXMenuBarReader().drawnBar(owning: app.bundleID).contains { $0.bundleID == app.bundleID }
             },
-            hide: { app in
-                for instance in RunningMenuBarApps.instances(of: app) where !instance.isHidden && !instance.isTerminated {
-                    instance.hide()
-                }
-            },
-            hasOpenWindows: { app, exempt in await RunningMenuBarApps.hasOpenWindows(app, exempt: exempt) },
+            hasOpenWindows: { app in await RunningMenuBarApps.hasOpenWindows(app) },
             sleep: { duration in try? await Task.sleep(for: duration) })
     }
 }
