@@ -30,4 +30,10 @@ import YeeHawCore
         #expect(RunningMenuBarApps.ownerPID(of: "com.example.other", in: [Self.item(pid: 22)]) == nil)
         #expect(RunningMenuBarApps.ownerPID(of: "com.example.swarm", in: [Self.item(pid: nil)]) == nil)
     }
+
+    @Test func anotherCopyElsewhereNeedsANewInstance() {
+        #expect(SpacingApplier.needsNewInstance(bundlePath: "/Applications/A.app", runningPaths: ["/Users/x/dev/A.app"]))
+        #expect(!SpacingApplier.needsNewInstance(bundlePath: "/Applications/A.app", runningPaths: ["/Applications/A.app"]))
+        #expect(!SpacingApplier.needsNewInstance(bundlePath: "/Applications/A.app", runningPaths: []))
+    }
 }

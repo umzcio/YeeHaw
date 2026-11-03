@@ -19,8 +19,9 @@ struct SpacingSystem {
     var terminate: (RunningMenuBarApp) -> Bool
     /// Opens the app again with `options`: its new process ID, or nil if it couldn't be opened.
     var open: (RunningMenuBarApp, RelaunchOptions) async -> Int32?
-    /// Whether the reopened app's menu bar item is back.
-    var isDrawn: (RunningMenuBarApp) async -> Bool
+    /// Whether the reopened process's menu bar item is back. The process ID matters when another
+    /// copy of the app runs: its icon is drawn all along.
+    var isDrawn: (RunningMenuBarApp, Int32) async -> Bool
     /// Whether the app has windows open right now.
     var hasOpenWindows: (RunningMenuBarApp) async -> Bool
     var sleep: (Duration) async -> Void
@@ -230,14 +231,21 @@ final class SpacingApplier {
         return .success(restart)
     }
 
+    /// Whether opening `bundlePath` needs a new instance: another copy of the app is running from a
+    /// different folder, and LaunchServices would otherwise hand back that copy.
+    nonisolated static func needsNewInstance(bundlePath: String, runningPaths: [String]) -> Bool {
+        let path = (bundlePath as NSString).standardizingPath
+        return runningPaths.contains { ($0 as NSString).standardizingPath != path }
+    }
+
     /// Opens an app that has quit and waits for its item; nil if it couldn't be opened.
     private func reopen(_ app: RunningMenuBarApp) async -> Restart? {
         let started = ContinuousClock.now
-        guard await system.open(app, .standard) != nil else {
+        guard let pid = await system.open(app, .standard) else {
             Self.log.error("Spacing: \(app.bundleID, privacy: .public) quit but didn't reopen")
             return nil
         }
-        let drawn = await poll(Self.drawPolls) { await self.system.isDrawn(app) }
+        let drawn = await poll(Self.drawPolls) { await self.system.isDrawn(app, pid) }
         let elapsed = ContinuousClock.now - started
         Self.log.notice("Spacing: restarted \(app.bundleID, privacy: .public); item drawn: \(drawn, privacy: .public) after \(elapsed, privacy: .public)")
         return Restart(app: app, iconReturned: drawn)
@@ -307,6 +315,12 @@ extension SpacingSystem {
                 configuration.activates = options.activates
                 configuration.hides = options.hides
                 configuration.addsToRecentItems = options.addsToRecentItems
+                // Another copy running from a different folder would otherwise be handed back
+                // by LaunchServices instead of this bundle starting.
+                let others = NSRunningApplication.runningApplications(withBundleIdentifier: app.bundleID)
+                    .filter { !$0.isTerminated }.compactMap { $0.bundleURL?.path }
+                configuration.createsNewApplicationInstance = SpacingApplier.needsNewInstance(
+                    bundlePath: app.bundlePath, runningPaths: others)
                 do {
                     let running = try await NSWorkspace.shared.openApplication(at: URL(filePath: app.bundlePath),
                                                                                configuration: configuration)
@@ -316,11 +330,11 @@ extension SpacingSystem {
                     return nil
                 }
             },
-            isDrawn: { app in
+            isDrawn: { app, pid in
                 if hidden().contains(app.bundleID) {
-                    return RunningMenuBarApps.instances(of: app).contains { $0.isFinishedLaunching }
+                    return RunningMenuBarApps.instances(of: app).contains { $0.processIdentifier == pid && $0.isFinishedLaunching }
                 }
-                return await AXMenuBarReader().drawnBar(owning: app.bundleID).contains { $0.bundleID == app.bundleID }
+                return await AXMenuBarReader().drawnBar(owning: app.bundleID).contains { $0.bundleID == app.bundleID && $0.pid == pid }
             },
             hasOpenWindows: { app in await RunningMenuBarApps.hasOpenWindows(app) },
             sleep: { duration in try? await Task.sleep(for: duration) })

@@ -34,6 +34,8 @@ final class FakeSpacingMac {
     var onTerminate: (() -> Void)?
     /// The process IDs `open` hands out, from 1000 up.
     private(set) var nextPID: Int32 = 1000
+    /// The process IDs `isDrawn` was asked about, in order.
+    var drawnChecks: [Int32] = []
     private var quitting: [BundleID: Int] = [:]
     private var drawing: [BundleID: Int] = [:]
 
@@ -80,7 +82,8 @@ final class FakeSpacingMac {
                 nextPID += 1
                 return nextPID
             },
-            isDrawn: { [self] app in
+            isDrawn: { [self] app, pid in
+                drawnChecks.append(pid)
                 guard let left = drawing[app.bundleID] else { return false }
                 if left <= 0 { return true }
                 drawing[app.bundleID] = left - 1
@@ -347,6 +350,14 @@ final class FakeSpacingMac {
         mac.drawnAfterPolls = [Self.digUp.bundleID: 5]
         _ = await Self.applier(mac).apply(8, relaunch: [Self.windowed])
         #expect(mac.sleeps.count == 5)
+    }
+
+    @Test func drawnIsAskedAboutTheReopenedProcess() async {
+        let mac = FakeSpacingMac()
+        mac.drawnAfterPolls = [Self.digUp.bundleID: 2]
+        _ = await Self.applier(mac).apply(8, relaunch: [Self.windowed])
+        #expect(!mac.drawnChecks.isEmpty)
+        #expect(Set(mac.drawnChecks) == [1001])
     }
 
     @Test func itemNeverDrawnStopsWaitingAfterTenSecondsAndIsReported() async {
