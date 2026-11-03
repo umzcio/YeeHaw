@@ -117,8 +117,9 @@ public enum ControllerError: Error, Equatable {
         var next = state
         var failure: Error?
         do {
-            if !actions.isEmpty { try writeAllow(actions) }
-            next.journal = journal
+            let switched: Set<BundleID> = actions.isEmpty ? [] : try writeAllow(actions)
+            // A switch-on for an app with no entry wasn't written; it stays journaled until it can be.
+            next.journal = journal.union(Self.switchedOn(actions).filter { !switched.contains($0) })
         } catch {
             failure = error
         }
@@ -159,8 +160,9 @@ public enum ControllerError: Error, Equatable {
 
     // MARK: Hiding
 
-    /// A hide that fails (the write, or macOS not honouring it in time) is undone: the app is
-    /// switched back on and the state is what it was before (`rollBack`). With `waits` false it
+    /// A hide that fails is undone. A failed write puts the record back at once, since nothing was
+    /// switched off; a hide macOS didn't honour in time is switched back on and the state is what
+    /// it was before (`rollBack`). With `waits` false it
     /// returns once written, for a caller that waits for several edits at once (the Layout
     /// window's Apply) and undoes the ones macOS didn't honour itself.
     public func hide(_ id: BundleID, waits: Bool = true) async throws {
@@ -172,11 +174,15 @@ public enum ControllerError: Error, Equatable {
             guard !r.actions.isEmpty else { return }
             let before = state
             save(r.state)
+            var switchedOff = false
             do {
                 try writeAllow(r.actions)
+                switchedOff = true
                 if waits { try await waitIfRunning(id, drawn: false) }
             } catch {
-                rollBack(id, allowed: true, to: before)
+                // A write that never landed left the app on, so the record just goes back. Once it
+                // landed, the app is switched back on first (`rollBack`).
+                if switchedOff { rollBack(id, allowed: true, to: before) } else { save(before) }
                 throw error
             }
         }
@@ -289,12 +295,13 @@ public enum ControllerError: Error, Equatable {
                 ? PositionKey.keys(for: item, among: items, table: table) : [try neighborKey(item, table)]
             let left = try leftNeighbor.map { try neighborKey($0, table) }
             let right = try rightNeighbor.map { try neighborKey($0, table) }
-            try writePositions(table.placement(of: keys, leftNeighbor: left, rightNeighbor: right))
+            try writePositions(try table.placement(of: keys, leftNeighbor: left, rightNeighbor: right))
         }
     }
 
-    /// Places an app's icons between two items, whether or not it's drawn yet: every existing key
-    /// of the app under any of its prefixes gets the slot, else `Item-0` under the first (as a
+    /// Places an app's icons between two items, whether or not it's drawn yet: the app's icons
+    /// (every existing key under any of its prefixes) get distinct values in the slot, in their
+    /// existing order, else `Item-0` under the first (as a
     /// reveal does), so it works for an app that's just been switched on. A neighbour that isn't
     /// drawn yet (an app shown just before, placed already) is found by its app's own keys.
     public func place(_ id: BundleID, leftNeighbor: MenuBarItem?, rightNeighbor: MenuBarItem?) async throws {
@@ -317,8 +324,9 @@ public enum ControllerError: Error, Equatable {
             }
             let left = try leftNeighbor.map(key)
             let right = try rightNeighbor.map(key)
-            let keys = Self.revealKeys(prefixes: prefixes, table)
-            try writePositions(table.placement(of: keys, leftNeighbor: left, rightNeighbor: right))
+            // One value per icon, in the app's own order, so a multi-icon app comes back as it was.
+            let groups = table.groupedByValue(Self.revealKeys(prefixes: prefixes, table))
+            try writePositions(try table.placement(ofGroups: groups, leftNeighbor: left, rightNeighbor: right))
         }
     }
 
@@ -526,7 +534,7 @@ public enum ControllerError: Error, Equatable {
         } else {
             key = nil
         }
-        // The clock is 0 by definition; any other key must exist or the placement would be a guess.
+        // The clock is 0 by definition, key or not (PositionTable counts a missing one as 0); any other key must exist or the placement would be a guess.
         guard let key, key == PositionKey.clock || table.values[key] != nil else {
             throw ControllerError.unresolvedNeighbor
         }
@@ -608,12 +616,15 @@ public enum ControllerError: Error, Equatable {
     /// Reads fresh, applies every action to entries that exist, and writes the list back once,
     /// only if something changed (so a missing `trackedApplications` key is never created). A
     /// location added to an entry is a change even when no switch flips, and the write carries
-    /// the entry's switch as it is. `lastSnapshot` is updated only for the apps written.
-    private func writeAllow(_ actions: [AllowAction]) throws {
+    /// the entry's switch as it is. `lastSnapshot` is updated only for the apps written. Returns
+    /// the apps whose entries hold the asked-for switch; an app with no entry isn't among them.
+    @discardableResult
+    private func writeAllow(_ actions: [AllowAction]) throws -> Set<BundleID> {
         var list = try readAllow()
         let before = list.snapshot
         var written: AllowSnapshot = [:]
         var listed = false
+        var switched = false
         for action in actions {
             let (id, allowed): (BundleID, Bool)
             switch action {
@@ -623,15 +634,16 @@ public enum ControllerError: Error, Equatable {
                 if list.addLocation(location, for: target) { listed = true }
                 continue
             }
-            guard let current = before[id] else { continue }
+            guard before[id] != nil else { continue }
             written[id] = allowed
-            if current != allowed { list.setAllowed(allowed, for: id) }
+            if list.setAllowed(allowed, for: id) { switched = true }
         }
-        if listed || written.contains(where: { before[$0.key] != $0.value }) {
+        if listed || switched {
             try allowFile.write(Self.allowKey, try list.encoded())
             writeCount += 1
         }
         lastSnapshot.merge(written) { _, new in new }
+        return Set(written.keys)
     }
 
     private func readPositions() throws -> [String: Double] {

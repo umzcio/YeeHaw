@@ -71,6 +71,33 @@ import Testing
         #expect(try Self.decode(list.encoded()) == Self.decode(data))
     }
 
+    @Test func anAppListedTwiceIsAllowedOnlyWhenEveryEntryIs() throws {
+        let on = Self.bundleValue("A", allowed: true)
+        let off = Self.bundleValue("A", allowed: false)
+        for values in [[on, off], [off, on]] {
+            let items: [Any] = [Self.bundleKey("A"), values[0], Self.bundleKey("A"), values[1]]
+            let data = try PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0)
+            #expect(try AllowList(data: data).snapshot == ["A": false])
+        }
+    }
+
+    @Test func settingAnAppListedTwiceSetsBothEntries() throws {
+        let items: [Any] = [Self.bundleKey("A"), Self.bundleValue("A", allowed: true),
+                            Self.bundleKey("A"), Self.bundleValue("A", allowed: false)]
+        let data = try PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0)
+        var list = try AllowList(data: data)
+        let flipped = list.setAllowed(true, for: "A")
+        #expect(flipped)
+        let again = try AllowList(data: list.encoded())
+        #expect(again.snapshot == ["A": true])
+        let decoded = try #require(
+            PropertyListSerialization.propertyList(from: list.encoded(), options: [], format: nil) as? [Any])
+        #expect((decoded[1] as? [String: Any])?["isAllowed"] as? Bool == true)
+        #expect((decoded[3] as? [String: Any])?["isAllowed"] as? Bool == true)
+        let flippedAgain = list.setAllowed(true, for: "A")
+        #expect(!flippedAgain)
+    }
+
     // MARK: Locations
 
     static let fiddle = "edu.umontana.fiddle"
@@ -130,6 +157,26 @@ import Testing
         let added = list.addLocation(.bundle(Self.fiddle), for: Self.fiddle)
         #expect(added)
         #expect(list.locations(for: Self.fiddle) == [.bundle(Self.fiddle)])
+    }
+
+    @Test func locationsOfAnAppListedTwiceAreMerged() throws {
+        let fiddle = Self.fiddle
+        let items: [Any] = [
+            Self.bundleKey(fiddle), ["isAllowed": true] as [String: Any],
+            Self.bundleKey(fiddle), ["isAllowed": true, "menuItemLocations": [AllowLocation.bundle(fiddle).plist]] as [String: Any],
+        ]
+        let data = try PropertyListSerialization.data(fromPropertyList: items, format: .binary, options: 0)
+        var list = try AllowList(data: data)
+        #expect(list.locations(for: fiddle) == [.bundle(fiddle)])
+        let added = list.addLocation(.bundle(fiddle), for: fiddle)
+        #expect(added)
+        let decoded = try #require(
+            PropertyListSerialization.propertyList(from: list.encoded(), options: [], format: nil) as? [Any])
+        for index in [1, 3] {
+            let listed = try #require((decoded[index] as? [String: Any])?["menuItemLocations"] as? [Any])
+            #expect(listed.count == 1)
+            #expect(AllowLocation(plist: listed[0]) == .bundle(fiddle))
+        }
     }
 
     @Test func addLocationOnUntrackedChangesNothing() throws {

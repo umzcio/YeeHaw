@@ -17,6 +17,7 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     private var _frozenAllow: AllowSnapshot?
     private var _failing: Set<GrantedFile> = []
     private var _failingWrites: Set<GrantedFile> = []
+    private var _breakOnWrite: Set<GrantedFile> = []
     private var _log: [String] = []
     private var _allowWrites = 0
     private var _positionWrites = 0
@@ -101,6 +102,9 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
     func fail(_ file: GrantedFile) { locked { _ = $0._failing.insert(file) } }
     /// Reads still work; writes to `file` throw `WriteFailed`.
     func failWrites(_ file: GrantedFile) { locked { _ = $0._failingWrites.insert(file) } }
+    /// The next write to `file` throws `WriteFailed`, and from then on reading or writing it fails
+    /// as if the grant were lost (a write refused, then the file gone unreadable).
+    func breakOnNextWrite(_ file: GrantedFile) { locked { _ = $0._breakOnWrite.insert(file) } }
     func append(_ event: String) { locked { $0._log.append(event) } }
 
     /// A change made outside YeeHaw, e.g. in System Settings.
@@ -131,6 +135,10 @@ final class FakeSystem: MenuBarReading, @unchecked Sendable {
         try locked {
             if $0._failing.contains(file) { throw GrantError.needsGrant(file) }
             if $0._failingWrites.contains(file) { throw WriteFailed() }
+            if $0._breakOnWrite.remove(file) != nil {
+                $0._failing.insert(file)
+                throw WriteFailed()
+            }
             switch (file, key) {
             case (.allowList, "trackedApplications"):
                 $0._allowBlob = try #require(value as? Data)
@@ -486,6 +494,16 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(rig.store.load() == .empty)
     }
 
+    @Test func aHideWhoseWriteFailsIsUndoneEvenWhenTheFileThenWontRead() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true)]))
+        rig.system.breakOnNextWrite(.allowList)
+        let c = rig.controller()
+        await #expect(throws: WriteFailed.self) { try await c.hide(Self.a) }
+        #expect(c.state.hidden.isEmpty)
+        #expect(c.state.journal.isEmpty)
+        #expect(rig.store.load().journal.isEmpty)
+    }
+
     @Test func aShowMacOSDoesntHonorIsUndone() async throws {
         let rig = Self.rig(try FakeSystem(allow: [(Self.a, true), (Self.b, true)]))
         let c = rig.controller()
@@ -629,6 +647,42 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
             try c.move(FakeSystem.item(Self.a), leftNeighbor: FakeSystem.item(Self.b), rightNeighbor: nil)
         }
         #expect(rig.system.positionWrites == 0)
+    }
+
+    @Test func aMultiIconAppIsPlacedWithDistinctValuesInItsOwnOrder() async throws {
+        let rig = Self.rig(try FakeSystem(
+            allow: [(Self.a, false), (Self.b, true), (Self.yeehaw, true)],
+            positions: ["status:\(Self.a)::Item-0": 500, "status:\(Self.a)::Item-1": 490, "status:\(Self.b)::Item-0": 300,
+                        "status:\(Self.yeehaw)::Item-0": 100, PositionKey.clock: 0]))
+        let c = rig.controller()
+        try await c.place(Self.a, leftNeighbor: FakeSystem.item(Self.b), rightNeighbor: FakeSystem.item(Self.yeehaw))
+        let p = rig.system.positions
+        let first = try #require(p["status:\(Self.a)::Item-0"])
+        let second = try #require(p["status:\(Self.a)::Item-1"])
+        #expect(300 > first)
+        #expect(first > second)
+        #expect(second > 100)
+    }
+
+    @Test func nothingIsPlacedRightOfTheClock() throws {
+        let clockItem = FakeSystem.appleItem("com.apple.menuextra.clock")
+        let withClock = Self.rig(try FakeSystem(
+            allow: [(Self.a, true)],
+            positions: ["status:\(Self.a)::Item-0": 200, PositionKey.clock: 0]))
+        let c = withClock.controller()
+        #expect(throws: ControllerError.unresolvedNeighbor) {
+            try c.move(FakeSystem.item(Self.a), leftNeighbor: clockItem, rightNeighbor: nil)
+        }
+        #expect(withClock.system.positionWrites == 0)
+
+        let noClock = Self.rig(try FakeSystem(
+            allow: [(Self.a, true)],
+            positions: ["status:\(Self.a)::Item-0": 200]))
+        let d = noClock.controller()
+        #expect(throws: ControllerError.unresolvedNeighbor) {
+            try d.move(FakeSystem.item(Self.a), leftNeighbor: clockItem, rightNeighbor: nil)
+        }
+        #expect(noClock.system.positionWrites == 0)
     }
 
     /// Ruling R51: MenuBarAgent honours `module:` writes for Apple items (Wi-Fi verified on 27.2).
@@ -1120,6 +1174,36 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(c.state.journal.isEmpty)
         #expect(rig.store.load().journal.isEmpty)
         #expect(rig.sleeper.count == sleepsBefore)
+    }
+
+    @Test func quitKeepsAJournaledAppWhoseEntryIsMissing() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.b, true)]), state: HidingState(journal: [Self.a]))
+        let c = rig.controller()
+        try c.quit()
+        #expect(c.state.journal == [Self.a])
+        #expect(rig.store.load().journal == [Self.a])
+        rig.system.setAllowBlob(try FakeSystem.blob([(Self.a, false), (Self.b, true)]))
+        try c.quit()
+        #expect(rig.system.allowSnapshot[Self.a] == true)
+        #expect(c.state.journal.isEmpty)
+    }
+
+    @Test func aSwitchOnReachesEveryEntryOfAnAppListedTwice() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.a, true)]), state: HidingState(journal: [Self.a]))
+        let c = rig.controller()
+        rig.system.setAllowBlob(try FakeSystem.blob([(Self.a, true), (Self.a, false)]))
+        try c.quit()
+        #expect(rig.system.allowSnapshot == [Self.a: true])
+        #expect(rig.system.allowWrites == 1)
+    }
+
+    @Test func launchKeepsAJournaledAppWhoseEntryIsMissing() async throws {
+        let rig = Self.rig(try FakeSystem(allow: [(Self.b, true)]),
+                           state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        try await c.launch()
+        #expect(c.state.hidden.isEmpty)
+        #expect(c.state.journal == [Self.a])
     }
 
     @Test func ownWriteIsNotExternalChange() async throws {

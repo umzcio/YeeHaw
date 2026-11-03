@@ -66,7 +66,9 @@ public enum Reconciler {
         let hiddenSet = Set(state.hidden)
         let offs = state.hidden.filter { allow[$0] == true }
         let ons = s.journal.filter { allow[$0] != nil && !hiddenSet.contains($0) }.sorted()
-        state.journal = s.journal.filter { hiddenSet.contains($0) }.union(offs)
+        // An app whose entry is missing can't be switched on now; it stays journaled, so it's
+        // switched on once macOS lists it again.
+        state.journal = s.journal.filter { hiddenSet.contains($0) || allow[$0] == nil }.union(offs)
         let restore = s.pendingReveal?.originalPositions ?? [:]
         state.pendingReveal = nil
         let listed = state.hidden.flatMap { id in listing(id, locations[id] ?? []) }
