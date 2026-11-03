@@ -16,8 +16,11 @@ final class RevealCoordinator {
     /// How long one AX press may block. An app busy tracking the menu it just opened can run past
     /// this and return `-25204`, so a timeout isn't treated as a failure.
     nonisolated static let pressTimeout: Float = 0.2
-    /// After a failed press, how long to wait for a menu or window before trying the next method.
-    static let pressGrace: Double = 0.3
+    /// After a press, how long to wait for a menu or window before trying another method (the
+    /// window poll is the signal; zWhisper's popover sends no notification).
+    static let pressGrace: Double = 0.6
+    /// How often that wait checks for a menu or window.
+    static let surfaceCheckInterval: Double = 0.05
     /// Between a synthesized click's pointer move, press and release.
     nonisolated static let clickSettle: Duration = .milliseconds(60)
     /// How long to keep re-reading the app's extras bar when the revealed item isn't in it yet.
@@ -133,9 +136,9 @@ final class RevealCoordinator {
             step("strip off screen")
         }
         let pressed = secondary
-            ? await rightClick(item, pid: pid, step: step)
+            ? await rightClick(item, pid: pid, session: session, step: step)
             : await press(item, pid: pid, session: session, step: step)
-        if pressed {
+        if pressed || session.surfaceOpened {
             session.startWatching(icon: item.x...(item.x + item.width))
             while true {
                 let close = await session.waitForClose()
@@ -151,11 +154,13 @@ final class RevealCoordinator {
                 session.resumeWatching()
             }
             session.tearDown()
-            return .revealed  // Step 6 refines this
+            if !session.everOpened { step("the press opened nothing before the reveal ended") }
+            return session.everOpened ? .revealed : .nothingOpened
         }
         session.tearDown()
         await end(step)
-        return .revealed
+        step("press failed: nothing reached the icon")
+        return .pressFailed
     }
 
     /// `endReveal`, retried once after `endRetryDelay`. It runs in its own unstructured task so a
@@ -203,68 +208,90 @@ final class RevealCoordinator {
         case notFound
     }
 
-    /// AX press, then `AXShowMenu`, then a synthesized click, each logged with its duration and
-    /// result. A failed method falls through only if no menu or window appeared, since the app may
-    /// have opened it while the call timed out. Returns whether the press got through.
     /// A right-click on the revealed icon, as a person would give it for the app's other menu.
-    private func rightClick(_ item: MenuBarItem, pid: pid_t, step: @MainActor (String) -> Void) async -> Bool {
-        let result = await Self.perform(.click, pid: pid, x: item.x, width: item.width, right: true)
+    /// Returns whether it was posted, or else whether the app opened something anyway.
+    private func rightClick(_ item: MenuBarItem, pid: pid_t, session: RevealSession,
+                            step: @MainActor (String) -> Void) async -> Bool {
+        let (result, took) = await performFinding(.click, item: item, pid: pid, right: true)
         if case .done = result {
             step("right-click posted")
             return true
         }
-        step("right-click: \(result)")
-        return false
+        step("right-click: \(result) after \(took) ms")
+        return session.surfaceOpened
     }
 
+    /// AX press, then `AXShowMenu`, then a synthesized click, each logged with its duration and
+    /// result. Every method runs only while nothing has opened yet, so the icon is activated at
+    /// most once after the app showed its menu or window: a failed method may still have opened it
+    /// while the call timed out. Returns whether the press got through or something opened.
     private func press(_ item: MenuBarItem, pid: pid_t, session: RevealSession,
                        step: @MainActor (String) -> Void) async -> Bool {
         for method in PressMethod.allCases {
-            let started = ContinuousClock.now
-            var result = await Self.perform(method, pid: pid, x: item.x, width: item.width)
-            // The app's extras bar can lag behind what's drawn; re-read it for a moment.
-            while case .notFound = result, ContinuousClock.now - started < .seconds(Self.findTimeout), !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Self.findInterval))
-                result = await Self.perform(method, pid: pid, x: item.x, width: item.width)
+            if session.surfaceOpened {
+                step("press: the app opened its menu or window; no \(method.rawValue)")
+                return true
             }
-            let took = Self.milliseconds(ContinuousClock.now - started)
+            let (result, took) = await performFinding(method, item: item, pid: pid)
             switch result {
             case .notFound:
                 step("press \(method.rawValue): no extras-bar element at x \(item.x) width \(item.width) after \(took) ms")
-                return false
+                return session.surfaceOpened
             case .done where method == .click:
                 step("press \(method.rawValue): click posted in \(took) ms; notifications so far: \(session.seenSummary)")
                 return true
             case .done:
                 step("press \(method.rawValue): worked in \(took) ms; notifications so far: \(session.seenSummary)")
-                if !session.surfaceOpened {
-                    try? await Task.sleep(for: .seconds(Self.pressGrace))
+                if await waitForSurface(session) {
+                    step("press \(method.rawValue): menu or window on screen")
+                    return true
                 }
-                if session.surfaceOpened { return true }
                 // A SwiftUI MenuBarExtra (Fiddle) takes AXPress without error and opens nothing:
                 // it only opens on a real click. AXShowMenu does no better, so click.
                 step("press \(method.rawValue): nothing opened within \(Int(Self.pressGrace * 1000)) ms; clicking")
-                let clicked = await Self.perform(.click, pid: pid, x: item.x, width: item.width)
+                if session.surfaceOpened { return true }
+                let (clicked, _) = await performFinding(.click, item: item, pid: pid)
                 if case .done = clicked {
                     step("press \(PressMethod.click.rawValue): click posted")
                     return true
                 }
                 step("press \(PressMethod.click.rawValue): \(clicked)")
-                return false
+                return session.surfaceOpened
             case .failed(let code):
-                if !session.surfaceOpened {
-                    try? await Task.sleep(for: .seconds(Self.pressGrace))
-                }
                 step("press \(method.rawValue): returned \(code) after \(took) ms; "
-                     + "notifications by the grace check: \(session.seenSummary)")
-                if session.surfaceOpened {
-                    step("press \(method.rawValue): the app opened its menu or window anyway")
+                     + "notifications so far: \(session.seenSummary)")
+                if await waitForSurface(session) {
+                    step("press \(method.rawValue): menu or window on screen")
                     return true
                 }
+                step("press \(method.rawValue): nothing opened within \(Int(Self.pressGrace * 1000)) ms; trying the next method")
             }
         }
         step("press: every method failed")
-        return false
+        return session.surfaceOpened
+    }
+
+    /// Waits up to `pressGrace` for the app's menu or window, returning as soon as one is up.
+    private func waitForSurface(_ session: RevealSession) async -> Bool {
+        let started = ContinuousClock.now
+        while !session.surfaceOpened {
+            guard ContinuousClock.now - started < .seconds(Self.pressGrace), !Task.isCancelled else { return false }
+            try? await Task.sleep(for: .seconds(Self.surfaceCheckInterval))
+        }
+        return true
+    }
+
+    /// One press method, re-reading the app's extras bar for a moment while the revealed item
+    /// isn't in it yet (it can lag behind what's drawn). Returns the result and how long it took.
+    private func performFinding(_ method: PressMethod, item: MenuBarItem, pid: pid_t,
+                                right: Bool = false) async -> (PressResult, took: Int64) {
+        let started = ContinuousClock.now
+        var result = await Self.perform(method, pid: pid, x: item.x, width: item.width, right: right)
+        while case .notFound = result, ContinuousClock.now - started < .seconds(Self.findTimeout), !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(Self.findInterval))
+            result = await Self.perform(method, pid: pid, x: item.x, width: item.width, right: right)
+        }
+        return (result, Self.milliseconds(ContinuousClock.now - started))
     }
 
     /// Re-reads the app's extras-bar children and acts on the one at the revealed item's frame.
