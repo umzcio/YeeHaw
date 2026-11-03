@@ -311,6 +311,39 @@ final class RevealCoordinator {
     }
 }
 
+/// Menu bar geometry for a reveal's click checks, kept pure so it can be tested.
+enum RevealGeometry {
+    struct Screen: Equatable {
+        let frame: NSRect
+        /// The bar's height: the screen's top inset, at least the status bar's thickness
+        /// (an auto-hidden bar leaves no inset).
+        let barHeight: CGFloat
+    }
+
+    @MainActor static func screens() -> [Screen] {
+        NSScreen.screens.map { screen in
+            Screen(frame: screen.frame,
+                   barHeight: max(screen.frame.maxY - screen.visibleFrame.maxY, NSStatusBar.system.thickness))
+        }
+    }
+
+    /// Whether a point (AppKit screen coordinates) is in a screen's menu bar. The top edge
+    /// counts: a click on the screen's top row has `y == frame.maxY`, which `NSRect.contains`
+    /// leaves out.
+    static func isInMenuBar(_ point: NSPoint, screens: [Screen]) -> Bool {
+        guard let screen = screens.first(where: {
+            $0.frame.minX <= point.x && point.x < $0.frame.maxX
+                && $0.frame.minY <= point.y && point.y <= $0.frame.maxY
+        }) else { return false }
+        return point.y >= screen.frame.maxY - screen.barHeight
+    }
+
+    /// Whether a point (AppKit screen coordinates) is on the revealed icon in the menu bar.
+    static func isOnIcon(_ point: NSPoint, icon: ClosedRange<Double>, screens: [Screen]) -> Bool {
+        icon.contains(point.x) && isInMenuBar(point, screens: screens)
+    }
+}
+
 /// One reveal's close signals. The first one to arrive wins; `tearDown` removes them all.
 ///
 /// The app is done with its menu on: `AXMenuClosed` for its outermost menu; its popover or window
@@ -388,7 +421,9 @@ private final class RevealSession {
         let since = ProcessInfo.processInfo.systemUptime
         monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
             let timestamp = event.timestamp
-            let location = event.locationInWindow
+            // Where the click happened, not where the pointer is now. `locationInWindow` is relative to
+            // the other app's window for a global event, so flip the global Quartz location instead.
+            let location = StripPanel.appKitScreenPoint(event.cgEvent?.location) ?? NSEvent.mouseLocation
             MainActor.assumeIsolated {
                 guard timestamp >= since else { return }
                 self?.mouseDown(at: location)
@@ -537,10 +572,8 @@ private final class RevealSession {
 
     /// Whether a point (AppKit screen coordinates) is on the revealed icon in the menu bar.
     private func isOnIcon(_ screenPoint: NSPoint) -> Bool {
-        guard let icon, icon.contains(screenPoint.x),
-              let screen = NSScreen.screens.first(where: { $0.frame.contains(screenPoint) }) else { return false }
-        let bar = max(screen.frame.maxY - screen.visibleFrame.maxY, NSStatusBar.system.thickness)
-        return screenPoint.y >= screen.frame.maxY - bar
+        guard let icon else { return false }
+        return RevealGeometry.isOnIcon(screenPoint, icon: icon, screens: RevealGeometry.screens())
     }
 
     /// Whether a window that appeared after the press still hangs from the menu bar (its top
