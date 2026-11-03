@@ -36,6 +36,24 @@ public struct RelaunchCandidate: Equatable, Sendable {
     }
 }
 
+/// What the unhide pass needs to know about one running app.
+public struct RunningAppFacts: Equatable, Sendable {
+    public var bundleID: BundleID
+    /// The app bundle's path, e.g. `/Applications/DigUp.app`.
+    public var bundlePath: String
+    /// Hidden, like Command-H.
+    public var isHidden: Bool
+    /// A regular app, with a Dock icon (not a menu-bar-only accessory app).
+    public var isRegular: Bool
+
+    public init(bundleID: BundleID, bundlePath: String, isHidden: Bool, isRegular: Bool) {
+        self.bundleID = bundleID
+        self.bundlePath = bundlePath
+        self.isHidden = isHidden
+        self.isRegular = isRegular
+    }
+}
+
 /// Menu bar spacing (spec Technique 4): the two current-host global preferences each app reads
 /// when it launches, and which running apps Apply may restart so they pick a new value up.
 public enum SpacingPlan {
@@ -117,5 +135,18 @@ extension SpacingPlan {
             order.append(id)
         }
         return order
+    }
+
+    /// Whether a hidden app should be shown again because YeeHaw may be why it's hidden: earlier
+    /// versions reopened the apps Spacing Apply restarted hidden and never showed them, and a hidden
+    /// app can't open the panel or popover its menu bar item shows. Only apps Apply could have
+    /// restarted count (not Apple's, not YeeHaw, inside an Applications folder). A menu-bar-only app
+    /// counts whenever it's hidden, since people don't hide those themselves; a regular app only
+    /// when it owns a menu bar item (`menuBarOwners`), so an ordinary app someone hid stays hidden.
+    public static func shouldUnhide(_ app: RunningAppFacts, menuBarOwners: Set<BundleID>, own: BundleID,
+                                    home: String = NSHomeDirectory()) -> Bool {
+        guard app.isHidden, !app.bundleID.hasPrefix("com.apple."), app.bundleID != own,
+              isInApplicationsFolder(app.bundlePath, home: home) else { return false }
+        return !app.isRegular || menuBarOwners.contains(app.bundleID)
     }
 }

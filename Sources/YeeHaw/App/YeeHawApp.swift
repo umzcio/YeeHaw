@@ -56,6 +56,8 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         Self.log.notice("YeeHaw started")
         quitOnTerminationSignal()
         watchForThaw()
+        // Earlier Spacing Applies left the apps they restarted hidden; show them again, once.
+        Task { await HiddenMenuBarApps.unhideOnce() }
 
         let grants = FileGrantStore()
         let controller = MenuBarController.live(grants: grants)
