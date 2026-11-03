@@ -22,6 +22,8 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
     private var thawObserver: NSObjectProtocol?
     /// Watches for hidden apps opening from a copy their Allow-list entry doesn't list.
     private var launchObserver: NSObjectProtocol?
+    /// Held for as long as YeeHaw runs, so no other copy starts (`InstanceLock`).
+    private var instanceLock: InstanceLock?
 
     static func main() {
         let app = NSApplication.shared
@@ -39,10 +41,19 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         }
 
         // Before anything is written, debug runs that write included.
+        let lock = InstanceLock.acquire()
+        switch lock {
+        case .acquired(let held):
+            instanceLock = held
+        case .heldElsewhere:
+            break
+        case .unavailable(let reason):
+            Self.log.error("Instance lock unavailable (\(reason, privacy: .public)); relying on the bundle ID check")
+        }
         let apps = NSWorkspace.shared.runningApplications
         if case .refuse(let refusal) = LaunchRules.check(os: ProcessInfo.processInfo.operatingSystemVersion,
                                                          running: Set(apps.compactMap(\.bundleIdentifier)),
-                                                         anotherInstance: Self.anotherInstanceRuns(among: apps)) {
+                                                         anotherInstance: lock.isHeldElsewhere || Self.anotherInstanceRuns(among: apps)) {
             if command != nil {
                 DebugCommand.refused(refusal)
                 exit(1)
@@ -89,9 +100,9 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Whether another copy of YeeHaw (a build run from elsewhere, or `open -n`) is the one that
-    /// keeps running. Two copies would each save their own record of what they switched off over
-    /// the other's.
+    /// Whether another copy of YeeHaw with the same bundle ID (`open -n`, or a copy from before
+    /// `InstanceLock` existed, which never takes the lock) is the one that keeps running. Copies
+    /// without a bundle ID are caught by the lock instead.
     private static func anotherInstanceRuns(among apps: [NSRunningApplication]) -> Bool {
         let me = NSRunningApplication.current
         let ownID = Bundle.main.bundleIdentifier ?? OwnIconLocator.bundleID

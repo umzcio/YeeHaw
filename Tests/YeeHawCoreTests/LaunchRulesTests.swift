@@ -133,8 +133,19 @@ import Testing
         // Same instant: the lower process ID wins.
         #expect(LaunchRules.isAnotherInstance(mine: (pid: 20, launched: early), other: (pid: 10, launched: early)))
         #expect(!LaunchRules.isAnotherInstance(mine: (pid: 10, launched: early), other: (pid: 20, launched: early)))
-        // Unknown launch date for the other copy: it counts as running.
+        // Unknown launch date for the other copy: the lower process ID wins.
         #expect(LaunchRules.isAnotherInstance(mine: (pid: 20, launched: late), other: (pid: 10, launched: nil)))
+    }
+
+    @Test func unknownLaunchDatesNeverMakeBothCopiesStepAside() {
+        let late = Date(timeIntervalSince1970: 200)
+        // Each pair is the same two processes seen from both sides: exactly one steps aside.
+        for (a, b) in [((pid: Int32(10), launched: Date?.none), (pid: Int32(20), launched: Date?.none)),
+                       ((pid: 10, launched: nil), (pid: 20, launched: late)),
+                       ((pid: 10, launched: late), (pid: 20, launched: nil))] {
+            #expect(LaunchRules.isAnotherInstance(mine: a, other: b) != LaunchRules.isAnotherInstance(mine: b, other: a))
+        }
+        #expect(!LaunchRules.isAnotherInstance(mine: (pid: 10, launched: nil), other: (pid: 20, launched: nil)))
     }
 }
 

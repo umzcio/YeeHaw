@@ -61,11 +61,12 @@ public enum LaunchRules {
 
     /// Whether `other`, a process with YeeHaw's bundle ID, is the copy that keeps running rather
     /// than this one (`mine`): the one launched first wins, then the lower process ID, so two
-    /// copies opened together never both quit. A copy whose launch date is unknown counts.
+    /// copies opened together never both quit. When either launch date is unknown, the lower process
+    /// ID wins, so two copies never both step aside.
     public static func isAnotherInstance(mine: (pid: Int32, launched: Date?),
                                          other: (pid: Int32, launched: Date?)) -> Bool {
         guard other.pid != mine.pid else { return false }
-        guard let theirs = other.launched, let ours = mine.launched else { return true }
+        guard let theirs = other.launched, let ours = mine.launched else { return other.pid < mine.pid }
         if theirs != ours { return theirs < ours }
         return other.pid < mine.pid
     }
