@@ -129,7 +129,10 @@ final class RevealCoordinator {
         }
         step("reveal done, drawn at x \(item.x) width \(item.width)")
 
-        guard let pid = NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.processIdentifier else {
+        guard let pid = Self.pressTarget(
+            for: item,
+            running: NSRunningApplication.runningApplications(withBundleIdentifier: id).map(\.processIdentifier)
+        ) else {
             step("app is not running")
             await end(step)
             return .revealed
@@ -203,6 +206,14 @@ final class RevealCoordinator {
     }
 
     // MARK: Pressing
+
+    /// The process to press and watch: the copy that owns the revealed item while it still runs,
+    /// since two copies of one app can run at once (a debug build beside the installed one) and
+    /// only the drawing copy's extras hold the item. Otherwise the first running copy, as before.
+    nonisolated static func pressTarget(for item: MenuBarItem, running: [pid_t]) -> pid_t? {
+        if let pid = item.pid, running.contains(pid) { return pid }
+        return running.first
+    }
 
     private enum PressMethod: String, CaseIterable {
         case axPress = "AXPress"
