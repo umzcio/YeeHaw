@@ -40,17 +40,21 @@ struct AXMenuBarReader: MenuBarReading {
         await Self.readBar(owning: id)
     }
 
-    /// The drawn bar plus one app's extras, so a reveal's poll doesn't message every app. Every
-    /// drawn item is returned (others with no owner), so the caller can count them.
+    /// The drawn bar plus one app's extras, from every running copy of it, so a reveal's poll doesn't
+    /// message every app. Every drawn item is returned (others with no owner), so the caller can
+    /// count them.
     @concurrent
     private static func readBar(owning id: BundleID) async -> [MenuBarItem] {
         let apps = NSWorkspace.shared.runningApplications
+        let owners = apps.filter { $0.bundleIdentifier == id && !$0.isTerminated }
         guard let agent = apps.first(where: { $0.bundleIdentifier == agentBundleID }),
-              let owner = apps.first(where: { $0.bundleIdentifier == id }) else { return [] }
+              !owners.isEmpty else { return [] }
         let drawn = drawnItems(agentPID: agent.processIdentifier)
-        let extras = appExtras(pid: owner.processIdentifier, bundleID: id,
-                               executableName: owner.executableURL?.lastPathComponent ?? "",
-                               notarized: Notarization.isNotarized(owner))
+        let extras = owners.flatMap { owner in
+            appExtras(pid: owner.processIdentifier, bundleID: id,
+                      executableName: owner.executableURL?.lastPathComponent ?? "",
+                      notarized: Notarization.isNotarized(owner))
+        }
         return ItemMatcher.match(drawn: drawn, extras: extras)
     }
 
@@ -125,7 +129,7 @@ struct AXMenuBarReader: MenuBarReading {
                 identifier: string(item, kAXIdentifierAttribute),
                 title: string(item, kAXTitleAttribute),
                 description: string(item, kAXDescriptionAttribute),
-                executableName: executableName, notarized: notarized)
+                executableName: executableName, notarized: notarized, pid: pid)
         }
     }
 
