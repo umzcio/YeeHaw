@@ -18,6 +18,8 @@ final class RevealCoordinator {
     nonisolated static let pressTimeout: Float = 0.2
     /// After a failed press, how long to wait for a menu or window before trying the next method.
     static let pressGrace: Double = 0.3
+    /// Between a synthesized click's pointer move, press and release.
+    nonisolated static let clickSettle: Duration = .milliseconds(60)
     /// How long to keep re-reading the app's extras bar when the revealed item isn't in it yet.
     static let findTimeout: Double = 0.5
     static let findInterval: Double = 0.1
@@ -118,7 +120,7 @@ final class RevealCoordinator {
             step("strip off screen")
         }
         if await press(item, pid: pid, session: session, step: step) {
-            session.startWatching()
+            session.startWatching(icon: item.x...(item.x + item.width))
             step("close: \(await session.waitForClose())")
         }
         session.tearDown()
@@ -184,10 +186,25 @@ final class RevealCoordinator {
             case .notFound:
                 step("press \(method.rawValue): no extras-bar element at x \(item.x) width \(item.width) after \(took) ms")
                 return false
-            case .done:
-                let outcome = method == .click ? "click posted" : "worked"
-                step("press \(method.rawValue): \(outcome) in \(took) ms; notifications so far: \(session.seenSummary)")
+            case .done where method == .click:
+                step("press \(method.rawValue): click posted in \(took) ms; notifications so far: \(session.seenSummary)")
                 return true
+            case .done:
+                step("press \(method.rawValue): worked in \(took) ms; notifications so far: \(session.seenSummary)")
+                if !session.surfaceOpened {
+                    try? await Task.sleep(for: .seconds(Self.pressGrace))
+                }
+                if session.surfaceOpened { return true }
+                // A SwiftUI MenuBarExtra (Fiddle) takes AXPress without error and opens nothing:
+                // it only opens on a real click. AXShowMenu does no better, so click.
+                step("press \(method.rawValue): nothing opened within \(Int(Self.pressGrace * 1000)) ms; clicking")
+                let clicked = await Self.perform(.click, pid: pid, x: item.x, width: item.width)
+                if case .done = clicked {
+                    step("press \(PressMethod.click.rawValue): click posted")
+                    return true
+                }
+                step("press \(PressMethod.click.rawValue): \(clicked)")
+                return false
             case .failed(let code):
                 if !session.surfaceOpened {
                     try? await Task.sleep(for: .seconds(Self.pressGrace))
@@ -227,7 +244,7 @@ final class RevealCoordinator {
             let frame = AXMenuBarReader.frame(of: element)
             // The pointer goes back where it was once the click is through.
             guard let pointer = CGEvent(source: nil)?.location,
-                  postClick(at: CGPoint(x: frame.midX, y: frame.midY))
+                  await postClick(at: CGPoint(x: frame.midX, y: frame.midY))
             else { return .failed(0) }
             try? await Task.sleep(for: .milliseconds(50))
             CGWarpMouseCursorPosition(pointer)
@@ -236,14 +253,22 @@ final class RevealCoordinator {
     }
 
     /// A left click at a point in global top-left coordinates (the same space as AX frames).
-    private nonisolated static func postClick(at point: CGPoint) -> Bool {
+    /// Posted like a person's click: the pointer arrives, then a press and release with a gap.
+    /// MenuBarAgent ignores a bare down/up pair posted at once at a point the pointer never
+    /// reached: it ran its own action and forwarded nothing, so Fiddle's MenuBarExtra never opened.
+    private nonisolated static func postClick(at point: CGPoint) async -> Bool {
         let source = CGEventSource(stateID: .hidSystemState)
-        guard let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
+        guard let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
+                                 mouseCursorPosition: point, mouseButton: .left),
+              let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
                                  mouseCursorPosition: point, mouseButton: .left),
               let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
                                mouseCursorPosition: point, mouseButton: .left)
         else { return false }
+        move.post(tap: .cghidEventTap)
+        try? await Task.sleep(for: clickSettle)
         down.post(tap: .cghidEventTap)
+        try? await Task.sleep(for: clickSettle)
         up.post(tap: .cghidEventTap)
         return true
     }
@@ -292,6 +317,9 @@ private final class RevealSession {
     private let windowsBeforePress: Set<CGWindowID>
     private var windowsSincePress: Set<CGWindowID> = []
     private var windowWatch: Task<Void, Never>?
+    /// The revealed icon's span in the bar (screen x). A click on it is the app in use, not a
+    /// click outside: it toggles the app's own menu or popover.
+    private var icon: ClosedRange<Double>?
 
     var seenSummary: String { "[" + seen.joined(separator: ", ") + "]" }
 
@@ -301,7 +329,10 @@ private final class RevealSession {
     var isObserving: Bool { observer != nil }
 
     /// True once the press visibly did something: a menu or window opened, or it already closed.
-    var surfaceOpened: Bool { menuDepth > 0 || !windows.isEmpty || reason != nil }
+    var surfaceOpened: Bool {
+        menuDepth > 0 || !windows.isEmpty || reason != nil
+            || !Self.onScreenWindows(of: pid).subtracting(windowsBeforePress).isEmpty
+    }
 
     /// Observes the app's AX notifications right away, so a menu that opens during the press is seen.
     init(pid: pid_t) {
@@ -319,7 +350,8 @@ private final class RevealSession {
     }
 
     /// Starts the outside-click monitor and the inactivity timer, once the press is done.
-    func startWatching() {
+    func startWatching(icon: ClosedRange<Double>) {
+        self.icon = icon
         // Mouse-downs from before now (the synthesized click among them) don't count.
         let since = ProcessInfo.processInfo.systemUptime
         monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
@@ -459,7 +491,7 @@ private final class RevealSession {
 
     private func mouseDown(at screenPoint: NSPoint) {
         guard reason == nil else { return }
-        if appWindowsContain(screenPoint) {
+        if appWindowsContain(screenPoint) || isOnIcon(screenPoint) {
             activity()
         } else if hangsFromBar() {
             // A click in the menu bar doesn't close a popover, and elsewhere it closes it a moment
@@ -469,6 +501,14 @@ private final class RevealSession {
         } else {
             close("mouse-down outside the app")
         }
+    }
+
+    /// Whether a point (AppKit screen coordinates) is on the revealed icon in the menu bar.
+    private func isOnIcon(_ screenPoint: NSPoint) -> Bool {
+        guard let icon, icon.contains(screenPoint.x),
+              let screen = NSScreen.screens.first(where: { $0.frame.contains(screenPoint) }) else { return false }
+        let bar = max(screen.frame.maxY - screen.visibleFrame.maxY, NSStatusBar.system.thickness)
+        return screenPoint.y >= screen.frame.maxY - bar
     }
 
     /// Whether a window that appeared after the press still hangs from the menu bar (its top
