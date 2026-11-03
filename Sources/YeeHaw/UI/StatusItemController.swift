@@ -5,8 +5,8 @@ import YeeHawCore
 /// YeeHaw's own menu bar icon and the strip it opens (spec "Your menu bar icon", "The strip").
 ///
 /// A plain click toggles the strip. Right-click, Control-click and Option-click show the small
-/// menu (Layout…, Settings…, Quit YeeHaw); right-clicks were verified to arrive on macOS 27.2.
-/// VoiceOver gets the same three as actions on the icon.
+/// menu (Layout…, Settings…, Restore Everything and Quit, Quit YeeHaw); right-clicks were verified
+/// to arrive on macOS 27.2. VoiceOver gets the same four as actions on the icon.
 @MainActor
 final class StatusItemController: NSObject {
     /// The status item's autosave name, which keeps YeeHaw's existing position key (`--reveal`'s
@@ -29,6 +29,8 @@ final class StatusItemController: NSObject {
     /// Why the last click in the strip didn't open an app's menu, shown in the strip until it next
     /// closes or a reveal works.
     private var revealProblem: RevealProblem?
+    /// Which hidden apps' reveals opened nothing lately, for the strip's health notice.
+    private var health = MenuBarHealth()
     /// Set when a click in the strip found no drawn YeeHaw icon to reveal next to.
     private var ownIconMissing = false
     private var refreshTask: Task<Void, Never>?
@@ -56,6 +58,7 @@ final class StatusItemController: NSObject {
             button.setAccessibilityCustomActions([
                 NSAccessibilityCustomAction(name: "Open Layout") { [weak self] in self?.layoutChosen(); return true },
                 NSAccessibilityCustomAction(name: "Open Settings") { [weak self] in self?.settingsChosen(); return true },
+                NSAccessibilityCustomAction(name: "Restore Everything and Quit") { [weak self] in self?.restoreChosen(); return true },
                 NSAccessibilityCustomAction(name: "Quit YeeHaw") { [weak self] in self?.quitChosen(); return true },
             ])
             button.target = self
@@ -180,6 +183,9 @@ final class StatusItemController: NSObject {
             menu.addItem(item)
         }
         menu.addItem(.separator())
+        let restore = NSMenuItem(title: "Restore Everything and Quit", action: #selector(restoreChosen), keyEquivalent: "")
+        restore.target = self
+        menu.addItem(restore)
         let quit = NSMenuItem(title: "Quit YeeHaw", action: #selector(quitChosen), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -197,13 +203,60 @@ final class StatusItemController: NSObject {
 
     /// Switches back on everything YeeHaw switched off, then quits.
     @objc private func quitChosen() {
+        switchBackOnAndQuit(unhiding: false)
+    }
+
+    /// Quit, plus showing menu bar apps that may be hidden because of YeeHaw (an earlier Spacing
+    /// Apply left some hidden): one place to get every icon back.
+    @objc private func restoreChosen() {
+        switchBackOnAndQuit(unhiding: true)
+    }
+
+    /// If switching back on fails, an alert names the apps still switched off and offers Retry or
+    /// Quit Anyway. Quitting without asking would leave those icons gone with no explanation.
+    private func switchBackOnAndQuit(unhiding: Bool) {
         strip.dismiss()
-        do {
-            try controller.quit()
-        } catch {
-            Self.log.error("Quit could not switch hidden apps back on: \(error, privacy: .public)")
+        while true {
+            do {
+                try controller.quit()
+                break
+            } catch {
+                Self.log.error("Quit could not switch hidden apps back on: \(error, privacy: .public)")
+                let stillOff = controller.state.journal.sorted().map(AppIdentity.name(of:))
+                guard Self.askToRetryQuit(stillOff: stillOff) else { break }
+            }
+        }
+        if unhiding {
+            let owners = Set(controller.items.compactMap(\.bundleID)).union(controller.state.hidden)
+            HiddenMenuBarApps.unhideAll(menuBarOwners: owners)
         }
         NSApp.terminate(nil)
+    }
+
+    /// Shows the failed-quit alert; true when the user chose Retry.
+    private static func askToRetryQuit(stillOff: [String]) -> Bool {
+        let text = quitFailure(stillOff: stillOff)
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = text.title
+        alert.informativeText = text.message
+        alert.addButton(withTitle: "Retry")
+        alert.addButton(withTitle: "Quit Anyway")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// What the failed-quit alert says. `stillOff` are the names of the apps still switched off;
+    /// empty when only a revealed app's position couldn't be put back (the next launch does that).
+    nonisolated static func quitFailure(stillOff: [String]) -> (title: String, message: String) {
+        guard let last = stillOff.last else {
+            return ("YeeHaw couldn’t put an icon back in place",
+                    "The icon YeeHaw was showing may stay next to YeeHaw’s hat until YeeHaw opens again.")
+        }
+        let names = stillOff.count == 1 ? last : stillOff.dropLast().joined(separator: ", ") + " and " + last
+        return ("Some icons are still hidden",
+                "YeeHaw couldn’t switch \(names) back on. If you quit anyway, they stay out of the menu bar "
+                    + "until you open YeeHaw and quit it again, or switch them on in System Settings → Menu Bar.")
     }
 
     // MARK: Strip
@@ -248,17 +301,23 @@ final class StatusItemController: NSObject {
         case notRunning(BundleID)
         /// Anything else (an unreadable file, no position for YeeHaw's icon yet).
         case failed(BundleID)
+        /// The app was drawn but YeeHaw couldn't press its icon.
+        case pressFailed(BundleID)
+        /// An earlier reveal's app still has its menu or panel open (`open`), so `clicked` wasn't revealed.
+        case stillOpen(open: BundleID, clicked: BundleID)
     }
 
     private func currentNotice() -> StripNotice? {
-        Self.notice(needsGrant: controller.state.needsGrant, problem: revealProblem, ownIconMissing: ownIconMissing,
-                    name: AppIdentity.name(of:))
+        let owners = controller.items.compactMap(\.bundleID) + controller.state.hidden
+        let issue = health.issue(among: HiddenMenuBarApps.runningFacts(of: owners), own: OwnIconLocator.bundleID)
+        return Self.notice(needsGrant: controller.state.needsGrant, problem: revealProblem, ownIconMissing: ownIconMissing,
+                           health: issue, name: AppIdentity.name(of:))
     }
 
     /// The strip's notice, most pressing first: a missing grant (Settings fixes it), then why the
-    /// last click failed, each with the button that helps, if one can.
+    /// last click failed, then a hidden or stuck app, each with the button that helps, if one can.
     static func notice(needsGrant: Set<GrantedFile>, problem: RevealProblem?, ownIconMissing: Bool,
-                       name: (BundleID) -> String) -> StripNotice? {
+                       health: HealthIssue? = nil, name: (BundleID) -> String) -> StripNotice? {
         if !needsGrant.isEmpty {
             let files = [GrantedFile.allowList, .positions].filter(needsGrant.contains)
                 .compactMap(AppPermission.init(file:)).map(\.title)
@@ -272,6 +331,19 @@ final class StatusItemController: NSObject {
             return StripNotice(message: "\(name(id)) isn’t open, so it has no menu to show.", action: .openApp(id))
         case .failed(let id):
             return StripNotice(message: "YeeHaw couldn’t show \(name(id))’s menu.")
+        case .pressFailed(let id):
+            return StripNotice(message: "YeeHaw couldn’t click \(name(id))’s icon.", action: .retry(id))
+        case .stillOpen(let open, let clicked):
+            return StripNotice(message: "\(name(open))’s menu is still open. Close it, then try again.",
+                               action: .retry(clicked))
+        case nil:
+            break
+        }
+        switch health {
+        case .hidden(let id)?:
+            return StripNotice(message: "\(name(id)) is hidden, so its icon may open nothing.", action: .unhide(id))
+        case .stuck(let id)?:
+            return StripNotice(message: "\(name(id)) opened nothing the last two times.", action: .restart(id))
         case nil:
             break
         }
@@ -291,6 +363,12 @@ final class StatusItemController: NSObject {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { _, error in
                 if let error { Self.log.error("Could not open \(id, privacy: .public): \(error, privacy: .public)") }
             }
+        case .unhide(let id):
+            if HiddenMenuBarApps.unhide(id) { health.forget(id) }
+        case .restart(let id):
+            Task {
+                if await AppRestarter.restart(id) { health.forget(id) }
+            }
         }
     }
 
@@ -309,6 +387,12 @@ final class StatusItemController: NSObject {
             switch await reveal.open(id, nextTo: yeehaw, secondary: secondary) {
             case .revealed:
                 revealProblem = nil
+                health.recordReveal(id, opened: true)
+            case .nothingOpened:
+                revealProblem = nil
+                health.recordReveal(id, opened: false)
+            case .pressFailed:
+                reportProblem(.pressFailed(id))
             case .ignored:
                 break
             case .failed(ControllerError.notHonored(let failed)):
@@ -317,6 +401,8 @@ final class StatusItemController: NSObject {
                 reportProblem(.notRunning(failed))
             case .failed(ControllerError.needsGrant):
                 reportProblem(nil) // The grant notice says it.
+            case .failed(ControllerError.revealInUse(let open)):
+                reportProblem(.stillOpen(open: open, clicked: id))
             case .failed:
                 reportProblem(.failed(id))
             }

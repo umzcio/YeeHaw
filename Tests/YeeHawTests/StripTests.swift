@@ -207,9 +207,9 @@ import YeeHawCore
 
 @Suite @MainActor struct StripNoticeTests {
     static func notice(_ grants: Set<GrantedFile> = [], _ problem: StatusItemController.RevealProblem? = nil,
-                       ownIconMissing: Bool = false) -> StripNotice? {
+                       ownIconMissing: Bool = false, health: HealthIssue? = nil) -> StripNotice? {
         StatusItemController.notice(needsGrant: grants, problem: problem, ownIconMissing: ownIconMissing,
-                                    name: { $0 == "dig" ? "DigUp" : $0 })
+                                    health: health, name: { $0 == "dig" ? "DigUp" : $0 })
     }
 
     @Test func nothingWrongShowsNothing() {
@@ -242,5 +242,33 @@ import YeeHawCore
         #expect(Self.notice([], .failed("dig"))?.action == nil)
         #expect(Self.notice([], .failed("dig"))?.actionTitle == nil)
         #expect(Self.notice(ownIconMissing: true) == StripNotice(message: "YeeHaw can’t find its own menu bar icon."))
+    }
+
+    @Test func aFailedPressOffersToTryAgain() {
+        #expect(Self.notice([], .pressFailed("dig"))
+                == StripNotice(message: "YeeHaw couldn’t click DigUp’s icon.", action: .retry("dig")))
+    }
+
+    @Test func aStillOpenEarlierRevealNamesItAndRetriesTheClickedApp() {
+        #expect(Self.notice([], .stillOpen(open: "dig", clicked: "x"))
+                == StripNotice(message: "DigUp’s menu is still open. Close it, then try again.", action: .retry("x")))
+    }
+
+    @Test func aHiddenAppOffersUnhide() {
+        let notice = Self.notice(health: .hidden("dig"))
+        #expect(notice == StripNotice(message: "DigUp is hidden, so its icon may open nothing.", action: .unhide("dig")))
+        #expect(notice?.actionTitle == "Unhide")
+    }
+
+    @Test func aStuckAppOffersRestart() {
+        let notice = Self.notice(health: .stuck("dig"))
+        #expect(notice == StripNotice(message: "DigUp opened nothing the last two times.", action: .restart("dig")))
+        #expect(notice?.actionTitle == "Restart")
+    }
+
+    @Test func grantsAndClickProblemsComeBeforeHealthAndHealthBeforeTheOwnIcon() {
+        #expect(Self.notice([.allowList], health: .hidden("dig"))?.action == .openSettings)
+        #expect(Self.notice([], .didNotAppear("dig"), health: .stuck("x"))?.action == .retry("dig"))
+        #expect(Self.notice(ownIconMissing: true, health: .stuck("dig"))?.action == .restart("dig"))
     }
 }

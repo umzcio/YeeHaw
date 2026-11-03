@@ -28,6 +28,8 @@ final class FakeSpacingMac {
     /// Apps that have a window open when Apply checks again.
     var windowsNow: Set<BundleID> = []
     var sleeps: [Duration] = []
+    /// The options each reopen asked for, in order.
+    var openOptions: [RelaunchOptions] = []
     /// Runs as an app is asked to quit, mid-Apply.
     var onTerminate: (() -> Void)?
     /// The process IDs `open` hands out, from 1000 up.
@@ -69,8 +71,9 @@ final class FakeSpacingMac {
                 quitting[app.bundleID] = (quitAfterPolls[app.bundleID] ?? 0) ?? Int.max
                 return true
             },
-            open: { [self] app in
+            open: { [self] app, options in
                 events.append("open \(app.name)")
+                openOptions.append(options)
                 drawing[app.bundleID] = (drawnAfterPolls[app.bundleID] ?? 0) ?? Int.max
                 guard !failsToOpen.contains(app.bundleID) else { return nil }
                 quitting[app.bundleID] = nil
@@ -83,10 +86,7 @@ final class FakeSpacingMac {
                 drawing[app.bundleID] = left - 1
                 return false
             },
-            hide: { [self] app in
-                if events.last != "hide \(app.name)" { events.append("hide \(app.name)") }
-            },
-            hasOpenWindows: { [self] app, _ in windowsNow.contains(app.bundleID) },
+            hasOpenWindows: { [self] app in windowsNow.contains(app.bundleID) },
             sleep: { [self] duration in sleeps.append(duration) })
     }
 
@@ -137,7 +137,7 @@ final class FakeSpacingMac {
         let mac = FakeSpacingMac()
         let result = await Self.applier(mac).apply(8, relaunch: [Self.digUp])
         #expect(mac.events.prefix(2) == ["write NSStatusItemSpacing=8", "write NSStatusItemSelectionPadding=8"])
-        #expect(mac.events.dropFirst(2) == ["terminate DigUp", "open DigUp", "hide DigUp"])
+        #expect(mac.events.dropFirst(2) == ["terminate DigUp", "open DigUp"])
         #expect(result.saved && result.wrote)
         #expect(result.restarted == [.init(app: Self.digUp, iconReturned: true)])
         #expect(result.skipped.isEmpty)
@@ -225,7 +225,7 @@ final class FakeSpacingMac {
         #expect(applier.isApplying == false)
         let result = await applier.apply(8, relaunch: [Self.digUp, Self.other])
         // DigUp, already quit, is opened again; Other is never touched.
-        #expect(mac.events.dropFirst(2) == ["terminate DigUp", "open DigUp", "hide DigUp"])
+        #expect(mac.events.dropFirst(2) == ["terminate DigUp", "open DigUp"])
         #expect(result.restarted.map(\.app) == [Self.digUp])
         #expect(stopped)
         #expect(applier.isApplying == false)
@@ -242,7 +242,7 @@ final class FakeSpacingMac {
         mac.quitAfterPolls = [Self.digUp.bundleID: 3]
         let result = await Self.applier(mac).apply(8, relaunch: [Self.digUp, Self.other])
         #expect(mac.events.dropFirst(2)
-            == ["terminate DigUp", "open DigUp", "hide DigUp", "terminate Other", "open Other", "hide Other"])
+            == ["terminate DigUp", "open DigUp", "terminate Other", "open Other"])
         #expect(result.restarted.map(\.app) == [Self.digUp, Self.other])
     }
 
@@ -353,48 +353,48 @@ final class FakeSpacingMac {
         let mac = FakeSpacingMac()
         mac.drawnAfterPolls = [Self.digUp.bundleID: nil]
         let result = await Self.applier(mac).apply(8, relaunch: [Self.windowed, Self.other])
-        // Ten seconds for DigUp's item, then Other settles hidden.
-        #expect(mac.sleeps.reduce(.zero, +) == .seconds(10) + SpacingApplier.pollInterval * SpacingApplier.settlePolls)
+        // Ten seconds for DigUp's item; Other needs no wait.
+        #expect(mac.sleeps.reduce(.zero, +) == .seconds(10))
         // It did restart, without its icon; the next app still gets its turn.
         #expect(result.restarted == [.init(app: Self.windowed, iconReturned: false),
                                      .init(app: Self.other, iconReturned: true)])
     }
 
-    @Test func windowlessAppIsKeptHiddenWhileItSettlesAndIsExempt() async {
-        // DigUp opens its main window when it launches, even launched hidden: an app that had
-        // no windows open is hidden again for a second after its item is back, and that hidden
-        // window doesn't count as open while it stays hidden.
+    @Test func everyReopenIsShownAndLeftInTheBackground() async {
+        var windowed = Self.windowed
+        windowed.isHidden = true
+        var other = Self.other
+        other.isHidden = true
         let mac = FakeSpacingMac()
-        let applier = Self.applier(mac)
-        _ = await applier.apply(8, relaunch: [Self.digUp])
-        #expect(mac.events.last == "hide DigUp")
-        #expect(mac.sleeps.reduce(.zero, +) == SpacingApplier.pollInterval * SpacingApplier.settlePolls)
-        #expect(applier.hiddenAfterRestart == [mac.nextPID])
-        applier.forgetHidden(mac.nextPID)
-        #expect(applier.hiddenAfterRestart.isEmpty)
+        _ = await Self.applier(mac).apply(8, relaunch: [windowed, other])
+        #expect(mac.openOptions == [.standard, .standard])
+        #expect(RelaunchOptions.standard == RelaunchOptions(activates: false, hides: false, addsToRecentItems: false))
+    }
+
+    @Test func noAppIsHiddenAfterItsRestart() async {
+        var windowed = Self.windowed
+        windowed.isHidden = true
+        var other = Self.other
+        other.isHidden = true
+        let mac = FakeSpacingMac()
+        _ = await Self.applier(mac).apply(8, relaunch: [windowed, other])
+        #expect(mac.events.dropFirst(2) == ["terminate DigUp", "open DigUp", "terminate Other", "open Other"])
+        #expect(!mac.events.contains { $0.hasPrefix("hide") })
+        #expect(mac.sleeps.isEmpty)
+    }
+
+    @Test func windowlessAppNeedsNoSettleWait() async {
+        let mac = FakeSpacingMac()
+        _ = await Self.applier(mac).apply(8, relaunch: [Self.digUp])
+        #expect(mac.events.last == "open DigUp")
+        #expect(mac.sleeps.isEmpty)
     }
 
     @Test func appWithWindowsIsNotHidden() async {
         let mac = FakeSpacingMac()
-        let applier = Self.applier(mac)
-        _ = await applier.apply(8, relaunch: [Self.windowed])
+        _ = await Self.applier(mac).apply(8, relaunch: [Self.windowed])
         #expect(!mac.events.contains { $0.hasPrefix("hide") })
         #expect(mac.sleeps.isEmpty)
-        #expect(applier.hiddenAfterRestart.isEmpty)
-    }
-
-    @Test func hiddenAppWithWindowsComesBackHidden() async {
-        var hidden = Self.windowed
-        hidden.isHidden = true
-        let mac = FakeSpacingMac()
-        let applier = Self.applier(mac)
-        _ = await applier.apply(8, relaunch: [hidden])
-        #expect(mac.events.last == "hide DigUp")
-        // Its windows are real: it isn't exempt.
-        #expect(applier.hiddenAfterRestart.isEmpty)
-        #expect(SpacingApplier.reopensHidden(hidden))
-        #expect(SpacingApplier.reopensHidden(Self.digUp))
-        #expect(!SpacingApplier.reopensHidden(Self.windowed))
     }
 
     @Test func reportsProgressForEachApp() async {

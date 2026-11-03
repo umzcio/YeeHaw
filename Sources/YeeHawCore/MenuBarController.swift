@@ -10,6 +10,9 @@ public enum ControllerError: Error, Equatable {
     case unresolvedNeighbor
     /// A preference file holds a value of the wrong type; YeeHaw won't overwrite it.
     case malformed(GrantedFile)
+    /// An earlier reveal of this app is still pending and its menu or panel is open, so YeeHaw
+    /// won't switch it off to make room for another reveal.
+    case revealInUse(BundleID)
 }
 
 /// Joins the pure rules (Allow list, position table, reconciler) to the system through ports.
@@ -355,14 +358,20 @@ public enum ControllerError: Error, Equatable {
     /// Briefly draws a hidden app immediately left of YeeHaw's icon and returns its item (index 0
     /// when drawn). Only apps YeeHaw hid can be revealed; they stay in `hidden` and the journal.
     /// `pendingReveal` is saved before anything is written, and the reveal is undone if not honored.
-    public func beginReveal(_ id: BundleID, nextTo yeehaw: MenuBarItem) async throws -> MenuBarItem {
+    /// A leftover reveal of another app is finished first, unless `leftoverInUse` says that app's
+    /// menu or panel is still open: then nothing is written and this throws `revealInUse`.
+    public func beginReveal(_ id: BundleID, nextTo yeehaw: MenuBarItem,
+                            leftoverInUse: (@MainActor (BundleID) -> Bool)? = nil) async throws -> MenuBarItem {
         try await gated {
             guard state.hidden.contains(id), state.journal.contains(id) else {
                 throw ControllerError.notTracked(id)
             }
             // Switching on an app that isn't running would draw nothing; nothing is written.
             guard await reader.runningBundleIDs().contains(id) else { throw ControllerError.notRunning(id) }
-            if state.pendingReveal != nil { try await finishReveal() }
+            if let leftover = state.pendingReveal?.bundleID {
+                let check = leftoverInUse.map { inUse in { @MainActor in inUse(leftover) } }
+                guard try await finishReveal(stillInUse: check) else { throw ControllerError.revealInUse(leftover) }
+            }
             // Asked before the read, so nothing suspends between reading the table and writing it.
             let prefixes = await reader.keyPrefixes(of: id)
             let locations = await runningLocations(of: id)
@@ -399,8 +408,11 @@ public enum ControllerError: Error, Equatable {
 
     /// Switches the revealed app off (unless it was shown meanwhile), waits until it's gone, then
     /// restores its positions.
-    public func endReveal() async throws {
-        try await gated { try await finishReveal() }
+    /// `unlessInUse` is asked right before the switch-off is written; when it returns true nothing
+    /// is written, the reveal stays pending and this returns false (the app opened its menu again).
+    @discardableResult
+    public func endReveal(unlessInUse: (@MainActor () -> Bool)? = nil) async throws -> Bool {
+        try await gated { try await finishReveal(stillInUse: unlessInUse) }
     }
 
     // MARK: Private
@@ -408,8 +420,12 @@ public enum ControllerError: Error, Equatable {
     /// Ungated: callers already hold the gate. The positions go back even when switching the app
     /// off fails. If the switch-off write itself failed, `pendingReveal` stays so a retry (or the
     /// next launch) switches it off; if only the wait ran out, the write landed and it clears.
-    private func finishReveal() async throws {
-        guard let pending = state.pendingReveal else { return }
+    /// `stillInUse` is asked right before the switch-off write, after the reads; when it returns
+    /// true nothing has been written, so this returns false and leaves `pendingReveal`, the Allow
+    /// list and the positions as they are. Otherwise (and with nothing pending) it returns true.
+    @discardableResult
+    private func finishReveal(stillInUse: (@MainActor () -> Bool)? = nil) async throws -> Bool {
+        guard let pending = state.pendingReveal else { return true }
         var writeFailure: Error?
         var waitFailure: Error?
         if state.journal.contains(pending.bundleID) {
@@ -422,6 +438,7 @@ public enum ControllerError: Error, Equatable {
                     ? await reader.drawnBar(owning: id).count - items.filter { $0.bundleID == id }.count : 0
                 // A copy opened during the reveal is listed too (`Reconciler.launched` leaves it here).
                 let locations = await runningLocations(of: id)
+                if stillInUse?() == true { return false }
                 try writeAllow(locations.map { .addLocation(id, $0) } + [.switchOff(id)])
                 do {
                     if running {
@@ -442,6 +459,7 @@ public enum ControllerError: Error, Equatable {
         next.pendingReveal = nil
         save(next)
         if let waitFailure { throw waitFailure }
+        return true
     }
 
     /// Every existing key of the app under any of its prefixes (hiding is per app, so the whole

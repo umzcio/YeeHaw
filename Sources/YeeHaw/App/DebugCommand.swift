@@ -4,9 +4,10 @@ import Foundation
 import YeeHawCore
 
 /// Hands-on checks run from the command line. `--probe` only reads, so it may run next to a running
-/// YeeHaw. `--grant` saves the grants the user picks, `--reveal` starts the controller, and
-/// `--onboarding-preview` shows the first-run window against the Mac as it is; those three pass the
-/// same launch checks as YeeHaw itself (macOS version, Thaw, another copy running) first.
+/// YeeHaw. `--grant` saves the grants the user picks, `--reveal` starts the controller,
+/// `--restore` puts back what YeeHaw switched off, and `--onboarding-preview` shows the first-run
+/// window against the Mac as it is; those four pass the same launch checks as YeeHaw itself (macOS
+/// version, Thaw, another copy running) first.
 /// Output goes to stdout and to `~/Library/Logs/YeeHaw/probe.txt`, since an app launched with
 /// `open` has no visible stdout.
 enum DebugCommand {
@@ -20,6 +21,11 @@ enum DebugCommand {
     case onboardingPreview
     /// `--reveal <bundleID>`: shows a stand-in YeeHaw icon and runs one reveal next to it.
     case reveal(BundleID)
+    /// `--restore`: what quitting YeeHaw does (every app it switched off goes back on, and a
+    /// revealed app's positions go back), plus unhiding menu bar apps that may be hidden because of
+    /// YeeHaw. For after a crash or a force quit, without starting YeeHaw. Opening YeeHaw again hides
+    /// the user's hidden apps again.
+    case restore
     /// One of the bundle ID arguments was given without a bundle ID.
     case missingBundleID(flag: String)
 
@@ -39,6 +45,10 @@ enum DebugCommand {
             self = .onboardingPreview
             return
         }
+        if arguments.contains("--restore") {
+            self = .restore
+            return
+        }
         guard let index = arguments.firstIndex(of: "--reveal") else { return nil }
         let next = arguments.index(after: index)
         guard next < arguments.endIndex, !arguments[next].hasPrefix("-") else {
@@ -52,7 +62,7 @@ enum DebugCommand {
     var isReadOnly: Bool {
         switch self {
         case .probe, .missingBundleID: true
-        case .grant, .onboardingPreview, .reveal: false
+        case .grant, .onboardingPreview, .reveal, .restore: false
         }
     }
 
@@ -78,6 +88,8 @@ enum DebugCommand {
             lines = ["onboarding preview closed (finished: \(finished)); completion not recorded"]
         case .reveal(let id):
             lines = await Self.reveal(id, grants: grants)
+        case .restore:
+            lines = await Self.restore(grants: grants)
         case .missingBundleID(let flag):
             lines = ["\(flag) needs a bundle ID, for example \(flag) com.example.app"]
         }
@@ -109,6 +121,24 @@ enum DebugCommand {
         }
         let coordinator = RevealCoordinator(controller: controller) { lines.append($0) }
         await coordinator.open(id, nextTo: yeehaw)
+        return lines
+    }
+
+    /// `--restore`. The unhide pass also counts the user's hidden apps as menu bar apps, since
+    /// they're switched off and not drawn.
+    @MainActor
+    private static func restore(grants: FileGrantStore) async -> [String] {
+        let controller = MenuBarController.live(grants: grants)
+        let off = controller.state.journal.sorted()
+        var lines: [String] = []
+        do {
+            try controller.quit()
+            lines.append("switched back on: \(listed(off))")
+        } catch {
+            lines.append("could not switch back on \(listed(controller.state.journal.sorted())): \(error)")
+        }
+        let owners = Set(await AXMenuBarReader().items().compactMap(\.bundleID)).union(controller.state.hidden)
+        lines.append("unhidden: \(listed(HiddenMenuBarApps.unhideAll(menuBarOwners: owners)))")
         return lines
     }
 

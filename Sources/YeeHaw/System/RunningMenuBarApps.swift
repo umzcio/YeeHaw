@@ -14,9 +14,9 @@ enum RunningMenuBarApps {
     static let minimumWindowSide: Double = 100
 
     /// The running apps owning a third-party item: those drawn, in the bar's order, then the
-    /// hidden ones that are running. `exempt` holds processes YeeHaw hid after restarting them.
+    /// hidden ones that are running.
     @concurrent
-    static func list(drawn: [MenuBarItem], hidden: [BundleID], exempt: Set<Int32>) async -> [RunningMenuBarApp] {
+    static func list(drawn: [MenuBarItem], hidden: [BundleID]) async -> [RunningMenuBarApp] {
         let running = NSWorkspace.shared.runningApplications
         let windows = WindowCounts.read()
         var summary: [String] = []
@@ -27,7 +27,7 @@ enum RunningMenuBarApps {
                   let url = app.bundleURL else { return nil }
             let name = app.localizedName ?? url.deletingPathExtension().lastPathComponent
             let facts = facts(for: app, windows: windows)
-            let open = SpacingPlan.hasOpenWindows(facts, exempt: exempt)
+            let open = SpacingPlan.hasOpenWindows(facts)
             summary.append("\(id) ax \(facts.axWindows.map(String.init) ?? "-") on \(facts.onScreenWindows) all \(facts.windowsAnywhere)"
                            + "\(facts.isHidden ? " hidden" : "")\(facts.isRegular ? " regular" : "") -> \(open ? "windows" : "none")")
             return RunningMenuBarApp(bundleID: id, bundlePath: url.path, name: name, hasOpenWindows: open,
@@ -37,10 +37,10 @@ enum RunningMenuBarApps {
 
     /// Whether `app` has windows open right now (any of its instances).
     @concurrent
-    static func hasOpenWindows(_ app: RunningMenuBarApp, exempt: Set<Int32>) async -> Bool {
+    static func hasOpenWindows(_ app: RunningMenuBarApp) async -> Bool {
         let windows = WindowCounts.read()
         return instances(of: app).contains { instance in
-            !instance.isTerminated && SpacingPlan.hasOpenWindows(facts(for: instance, windows: windows), exempt: exempt)
+            !instance.isTerminated && SpacingPlan.hasOpenWindows(facts(for: instance, windows: windows))
         }
     }
 

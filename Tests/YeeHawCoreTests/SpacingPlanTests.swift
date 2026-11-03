@@ -72,4 +72,35 @@ import Testing
         #expect(SpacingPlan.clamped(40) == 32)
         #expect(SpacingPlan.clamped(8) == 8)
     }
+
+    // MARK: Unhiding
+
+    static func facts(_ id: BundleID, path: String, hidden: Bool = true, regular: Bool = false) -> RunningAppFacts {
+        RunningAppFacts(bundleID: id, bundlePath: path, isHidden: hidden, isRegular: regular)
+    }
+
+    static func shouldUnhide(_ facts: RunningAppFacts, owners: Set<BundleID> = []) -> Bool {
+        SpacingPlan.shouldUnhide(facts, menuBarOwners: owners, own: "com.zapps.yeehaw", home: home)
+    }
+
+    @Test func hiddenMenuBarOnlyAppIsUnhidden() {
+        #expect(Self.shouldUnhide(Self.facts("com.abdurrahim.DigUp", path: "/Applications/DigUp.app")))
+        #expect(!Self.shouldUnhide(Self.facts("com.abdurrahim.DigUp", path: "/Applications/DigUp.app", hidden: false)))
+    }
+
+    @Test func hiddenRegularAppIsUnhiddenOnlyWithAMenuBarItem() {
+        let outlook = Self.facts("com.microsoft.Outlook", path: "/Applications/Outlook.app", regular: true)
+        #expect(!Self.shouldUnhide(outlook, owners: []))
+        #expect(Self.shouldUnhide(outlook, owners: ["com.microsoft.Outlook"]))
+    }
+
+    @Test func appsApplyNeverRestartsStayAsTheyAre() {
+        #expect(!Self.shouldUnhide(Self.facts("com.apple.Spotlight", path: "/System/Library/CoreServices/Spotlight.app")))
+        #expect(!Self.shouldUnhide(Self.facts("com.example.dl", path: "/Users/x/Downloads/D.app")))
+        #expect(!Self.shouldUnhide(Self.facts("com.zapps.yeehaw", path: "/Users/x/Applications/YeeHaw.app")))
+    }
+
+    @Test func userApplicationsFolderCounts() {
+        #expect(Self.shouldUnhide(Self.facts("com.example.c", path: "/Users/x/Applications/C.app")))
+    }
 }

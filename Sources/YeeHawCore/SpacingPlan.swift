@@ -9,7 +9,7 @@ public struct RunningMenuBarApp: Equatable, Sendable {
     /// Whether it has windows open, which a restart would interrupt: hidden (Command-H),
     /// minimized and other-Space windows count (see `SpacingPlan.hasOpenWindows`).
     public var hasOpenWindows: Bool
-    /// Hidden with Command-H; it's reopened hidden too.
+    /// Hidden (Command-H) when the list was read. Apply never reopens an app hidden.
     public var isHidden: Bool
     /// When this process launched, which says the spacing it picked up.
     public var launchDate: Date?
@@ -33,6 +33,24 @@ public struct RelaunchCandidate: Equatable, Sendable {
     public init(app: RunningMenuBarApp, tickedByDefault: Bool) {
         self.app = app
         self.tickedByDefault = tickedByDefault
+    }
+}
+
+/// What the unhide pass needs to know about one running app.
+public struct RunningAppFacts: Equatable, Sendable {
+    public var bundleID: BundleID
+    /// The app bundle's path, e.g. `/Applications/DigUp.app`.
+    public var bundlePath: String
+    /// Hidden, like Command-H.
+    public var isHidden: Bool
+    /// A regular app, with a Dock icon (not a menu-bar-only accessory app).
+    public var isRegular: Bool
+
+    public init(bundleID: BundleID, bundlePath: String, isHidden: Bool, isRegular: Bool) {
+        self.bundleID = bundleID
+        self.bundlePath = bundlePath
+        self.isHidden = isHidden
+        self.isRegular = isRegular
     }
 }
 
@@ -101,11 +119,8 @@ extension SpacingPlan {
     /// (hidden and minimized windows too), anything on screen, and for a regular app, any window
     /// the window server knows of (it may be full screen in another Space, which Accessibility
     /// doesn't list; a false positive only leaves the app unticked). An accessory app's off-screen
-    /// windows don't count: menu bar apps keep closed windows around. `exempt` holds processes
-    /// YeeHaw hid itself after restarting them (some open their main window at launch); they
-    /// count as windowless while they stay hidden.
-    public static func hasOpenWindows(_ facts: WindowFacts, exempt: Set<Int32> = []) -> Bool {
-        if facts.isHidden, exempt.contains(facts.pid) { return false }
+    /// windows don't count: menu bar apps keep closed windows around.
+    public static func hasOpenWindows(_ facts: WindowFacts) -> Bool {
         if let ax = facts.axWindows, ax > 0 { return true }
         if facts.onScreenWindows > 0 { return true }
         return facts.isRegular && facts.windowsAnywhere > 0
@@ -120,5 +135,18 @@ extension SpacingPlan {
             order.append(id)
         }
         return order
+    }
+
+    /// Whether a hidden app should be shown again because YeeHaw may be why it's hidden: earlier
+    /// versions reopened the apps Spacing Apply restarted hidden and never showed them, and a hidden
+    /// app can't open the panel or popover its menu bar item shows. Only apps Apply could have
+    /// restarted count (not Apple's, not YeeHaw, inside an Applications folder). A menu-bar-only app
+    /// counts whenever it's hidden, since people don't hide those themselves; a regular app only
+    /// when it owns a menu bar item (`menuBarOwners`), so an ordinary app someone hid stays hidden.
+    public static func shouldUnhide(_ app: RunningAppFacts, menuBarOwners: Set<BundleID>, own: BundleID,
+                                    home: String = NSHomeDirectory()) -> Bool {
+        guard app.isHidden, !app.bundleID.hasPrefix("com.apple."), app.bundleID != own,
+              isInApplicationsFolder(app.bundlePath, home: home) else { return false }
+        return !app.isRegular || menuBarOwners.contains(app.bundleID)
     }
 }

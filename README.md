@@ -16,13 +16,16 @@ It aims to be trustworthy above all:
 - **Apple's switch wins.** An app you switched off in System Settings → Menu Bar never appears in
   YeeHaw, and YeeHaw never switches it back on.
 - **Nothing is lost if YeeHaw quits or crashes.** Hidden icons go back to the menu bar on quit, and
-  the next launch repairs anything a crash left behind.
+  the next launch repairs anything a crash left behind. To put every icon back without opening
+  YeeHaw (after a crash or a force quit), run
+  `~/Applications/YeeHaw.app/Contents/MacOS/YeeHaw --restore`.
 
 ## Using it
 
 - **Click** the hat to open or close the strip of hidden icons. Esc closes it; the arrow keys and
   Return work in it, and every icon has a VoiceOver label.
-- **Right-click** (or Control-click) the hat for **Layout…**, **Settings…** and **Quit YeeHaw**.
+- **Right-click** (or Control-click) the hat for **Layout…**, **Settings…**,
+  **Restore Everything and Quit** and **Quit YeeHaw**.
 - **Layout…** shows the menu bar and the Hidden row. Drag between them, or use each icon's
   actions. Spacing lives at the bottom of the same window.
 - **Settings…** has Open at Login, the permission statuses with buttons to fix a missing one, and
