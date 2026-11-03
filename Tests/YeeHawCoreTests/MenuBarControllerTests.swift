@@ -787,6 +787,95 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
         #expect(system.positions == original)
     }
 
+    @Test func endRevealLeavesTheAppOnWhileItsMenuIsOpenAgain() async throws {
+        let system = try Self.revealSystem()
+        let original = system.positions
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        let writes = system.allowWrites
+        let positions = system.positions
+
+        let ended = try await c.endReveal(unlessInUse: { true })
+        #expect(!ended)
+        #expect(system.allowSnapshot[Self.a] == true)
+        #expect(c.state.pendingReveal?.bundleID == Self.a)
+        #expect(system.positions == positions)
+        #expect(system.allowWrites == writes)
+
+        let endedLater = try await c.endReveal()
+        #expect(endedLater)
+        #expect(system.allowSnapshot[Self.a] == false)
+        #expect(system.positions == original)
+    }
+
+    @Test func endRevealAsksJustBeforeTheSwitchOff() async throws {
+        let system = try Self.revealSystem()
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a], journal: [Self.a]))
+        let c = rig.controller()
+        _ = try await c.beginReveal(Self.a, nextTo: FakeSystem.item(Self.yeehaw))
+        let before = system.allowWrites
+        var calls = 0
+        var writesWhenAsked: Int?
+        let ended = try await c.endReveal(unlessInUse: {
+            calls += 1
+            writesWhenAsked = system.allowWrites
+            return false
+        })
+        #expect(ended)
+        #expect(calls == 1)
+        #expect(writesWhenAsked == before)
+        #expect(system.allowSnapshot[Self.a] == false)
+    }
+
+    @Test func endRevealWithNothingPendingNeverAsks() async throws {
+        let rig = Self.rig(try Self.revealSystem())
+        let c = rig.controller()
+        var calls = 0
+        let ended = try await c.endReveal(unlessInUse: {
+            calls += 1
+            return true
+        })
+        #expect(ended)
+        #expect(calls == 0)
+    }
+
+    @Test func aSecondRevealLeavesAnOpenLeftoverAlone() async throws {
+        let system = try Self.revealSystem()
+        try system.setExternally(Self.b, allowed: false)
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a, Self.b], journal: [Self.a, Self.b]))
+        let c = rig.controller()
+        let yeehawItem = FakeSystem.item(Self.yeehaw)
+        _ = try await c.beginReveal(Self.a, nextTo: yeehawItem)
+        await #expect(throws: ControllerError.revealInUse(Self.a)) {
+            _ = try await c.beginReveal(Self.b, nextTo: yeehawItem, leftoverInUse: { $0 == Self.a })
+        }
+        #expect(system.allowSnapshot[Self.a] == true)
+        #expect(system.allowSnapshot[Self.b] == false)
+        #expect(c.state.pendingReveal?.bundleID == Self.a)
+    }
+
+    @Test func aSecondRevealFinishesAClosedLeftover() async throws {
+        let system = try Self.revealSystem()
+        try system.setExternally(Self.b, allowed: false)
+        let original = system.positions
+        let rig = Self.rig(system, state: HidingState(hidden: [Self.a, Self.b], journal: [Self.a, Self.b]))
+        let c = rig.controller()
+        let yeehawItem = FakeSystem.item(Self.yeehaw)
+        _ = try await c.beginReveal(Self.a, nextTo: yeehawItem)
+        var asked: [BundleID] = []
+        _ = try await c.beginReveal(Self.b, nextTo: yeehawItem, leftoverInUse: { leftover in
+            asked.append(leftover)
+            return false
+        })
+        #expect(asked == [Self.a])
+        #expect(system.allowSnapshot[Self.a] == false)
+        #expect(system.positions["status:\(Self.a)::Item-0"] == original["status:\(Self.a)::Item-0"])
+        #expect(c.state.pendingReveal?.bundleID == Self.b)
+        try await c.endReveal()
+        #expect(system.positions == original)
+    }
+
     @Test func endRevealWithoutPendingDoesNothing() async throws {
         let rig = Self.rig(try Self.revealSystem())
         let c = rig.controller()
