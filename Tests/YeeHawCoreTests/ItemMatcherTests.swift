@@ -55,6 +55,20 @@ import Testing
         #expect(apple[0].y == -900)
     }
 
+    @Test func theSameCopyIsTheNearestOnTheSameBar() {
+        func copy(x: Double, y: Double) -> MenuBarItem {
+            MenuBarItem(id: "com.example.a#0", bundleID: "com.example.a", appleIdentifier: nil, indexInApp: 0,
+                        label: "", keyNames: [], keyPrefixes: [], x: x, width: 20, isPinned: false, y: y)
+        }
+        let read = [copy(x: 60, y: 0), copy(x: 1572, y: 0), copy(x: 62, y: -900)]
+        let found = ItemMatcher.sameCopy(of: copy(x: 61, y: 0), in: read)
+        #expect(found?.x == 60)
+        #expect(found?.y == 0)
+        let other = MenuBarItem(id: "com.example.zzz#0", bundleID: "com.example.zzz", appleIdentifier: nil, indexInApp: 0,
+                                label: "", keyNames: [], keyPrefixes: [], x: 61, width: 20, isPinned: false)
+        #expect(ItemMatcher.sameCopy(of: other, in: read) == nil)
+    }
+
     @Test func appleItemsArePinnedWhenClockOrControlCenter() {
         let drawn = [
             DrawnItem(x: 100, width: 20, label: "Clock", appleIdentifier: "com.apple.menuextra.clock"),

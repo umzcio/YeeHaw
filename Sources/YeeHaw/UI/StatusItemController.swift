@@ -83,7 +83,7 @@ final class StatusItemController: NSObject {
         // Read again first: the app may draw a different icon by now (Fiddle's is wider running).
         reveal.onClosed = { [icons, controller] item in
             await controller.refresh()
-            await icons.captureSettled(controller.items.first { $0.id == item.id } ?? item)
+            await icons.captureSettled(ItemMatcher.sameCopy(of: item, in: controller.items) ?? item)
         }
         reveal.beforePress = { [strip] in await strip.waitUntilOffScreen() }
     }

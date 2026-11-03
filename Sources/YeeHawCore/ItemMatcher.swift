@@ -145,6 +145,13 @@ public enum ItemMatcher {
         return items.sorted { $0.x < $1.x }
     }
 
+    /// The copy of `item` in a fresh read that is the same drawn copy: same id, same bar (y), nearest
+    /// in x. A re-read can widen an icon (an app drawing a different glyph), so x isn't matched exactly.
+    public static func sameCopy(of item: MenuBarItem, in read: [MenuBarItem]) -> MenuBarItem? {
+        read.filter { $0.id == item.id && abs($0.y - item.y) <= tolerance }
+            .min { abs($0.x - item.x) < abs($1.x - item.x) }
+    }
+
     /// The slots (copies) of `items` whose photograph, taken between that read and `reread`, can be
     /// stored as their own, one per drawn copy: each is in both reads at the same frame (the bar
     /// didn't move under the shot), no other item on its bar in either read overlaps it, neither
