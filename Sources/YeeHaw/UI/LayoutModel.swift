@@ -366,14 +366,17 @@ final class LayoutModel {
         let neighbours = Dictionary(changes.moves.map { ($0.item.id, draft.neighbours(of: $0.item)) }) { first, _ in first }
         let order = draft.hidden
         let hiddenBefore = draft.realHidden
-        let spacing = spacing?.isPending == true ? spacing : nil
+        // The spacing change as the footer names it now: the window keeps re-reading running apps
+        // during the layout part, and that mustn't add apps to restart or move the value.
+        let spacing = self.spacing
+        let spacingChange = spacing?.isPending == true ? spacing?.snapshotForApply() : nil
         applying = true
         message = nil
         return Task {
             let failures = await applyLayout(changes, neighbours: neighbours, hiddenOrder: order,
                                              hiddenBefore: hiddenBefore)
             // The spacing section reports (and announces) its own outcome.
-            if let spacing { await spacing.apply() }
+            if let spacing, let spacingChange { await spacing.apply(spacingChange) }
             await controller.refresh()
             applying = false
             refreshPending = false
