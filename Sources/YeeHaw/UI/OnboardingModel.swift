@@ -198,12 +198,9 @@ final class LiveOnboardingSystem: OnboardingSystem {
 
     func requestGrant(_ file: GrantedFile) async -> Bool { await files.grant(file) }
 
-    /// `AXIsProcessTrustedWithOptions` with the prompt option is what adds an app to the
-    /// Accessibility list (a plain `AXIsProcessTrusted` doesn't). macOS shows its own prompt the
-    /// first time, whose button opens the same pane; once trusted it's a plain check. The key is
-    /// `kAXTrustedCheckOptionPrompt`'s value, which Swift 6 can't read from the global.
+    /// See `AccessibilityRegistration.register`.
     func registerWithAccessibility() {
-        _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+        AccessibilityRegistration.register()
     }
 
     func openAccessibilitySettings() {

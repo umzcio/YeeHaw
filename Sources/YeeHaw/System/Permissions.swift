@@ -137,15 +137,33 @@ struct FileAccess {
     }
 }
 
-/// The real checks. None of them prompts: Screen Recording is read with
+/// Adding YeeHaw to Privacy & Security → Accessibility.
+enum AccessibilityRegistration {
+    /// `AXIsProcessTrustedWithOptions` with the prompt option is what adds an app to the
+    /// Accessibility list (a plain `AXIsProcessTrusted` doesn't). macOS shows its own prompt the
+    /// first time, whose button opens the same pane; once trusted it's a plain check. The key is
+    /// `kAXTrustedCheckOptionPrompt`'s value, which Swift 6 can't read from the global.
+    @MainActor static func register() {
+        _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+    }
+}
+
+/// The real checks and fixes. The checks never prompt: Screen Recording is read with
 /// `CGPreflightScreenCaptureAccess` and fixed only in System Settings, never with
-/// `CGRequestScreenCaptureAccess`.
+/// `CGRequestScreenCaptureAccess`. Fixing Accessibility first registers YeeHaw
+/// (`AccessibilityRegistration`), so the pane has a row to turn on even after the permission was
+/// removed; macOS may show its own prompt then.
 @MainActor
 final class LivePermissions: PermissionSystem {
     private let files: FileAccess
+    private let registerAccessibility: () -> Void
+    private let openURL: (URL) -> Void
 
-    init(files: FileAccess) {
+    init(files: FileAccess, registerAccessibility: @escaping () -> Void = { AccessibilityRegistration.register() },
+         openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
         self.files = files
+        self.registerAccessibility = registerAccessibility
+        self.openURL = openURL
     }
 
     func isGranted(_ permission: AppPermission) -> Bool {
@@ -158,7 +176,8 @@ final class LivePermissions: PermissionSystem {
 
     func fix(_ permission: AppPermission) async -> Bool {
         if let file = permission.file { return await files.grant(file) }
-        if let url = permission.settingsURL { NSWorkspace.shared.open(url) }
+        if permission == .accessibility { registerAccessibility() }
+        if let url = permission.settingsURL { openURL(url) }
         return false
     }
 }

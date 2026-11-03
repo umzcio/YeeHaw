@@ -140,7 +140,7 @@ final class FakePermissions: PermissionSystem {
         #expect(fixed == [.layoutFile])
     }
 
-    @Test func fixingASystemPermissionOnlyOpensSettings() async {
+    @Test func fixingASystemPermissionReportsNoGrant() async {
         let (permissions, _, model) = Self.model()
         var fixed: [AppPermission] = []
         model.onGrantFixed = { fixed.append($0) }
@@ -185,7 +185,7 @@ final class FakePermissions: PermissionSystem {
     }
 
     @Test func systemPermissionsAreFixedByOpeningTheirPane() {
-        // Fix opens System Settings at the right pane; it never calls CGRequestScreenCaptureAccess.
+        // Fix opens System Settings at the right pane (Accessibility registers YeeHaw first; see LivePermissionsTests); it never calls CGRequestScreenCaptureAccess.
         #expect(AppPermission.screenRecording.settingsURL?.absoluteString
                 == "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
         #expect(AppPermission.accessibility.settingsURL?.absoluteString
@@ -248,5 +248,36 @@ final class FakePermissions: PermissionSystem {
         calls.log = []
         #expect(await !access.grant(.positions))
         #expect(calls.log == ["panel positions"])
+    }
+}
+
+@MainActor
+@Suite struct LivePermissionsTests {
+    static func permissions(_ calls: FileAccessTests.Calls) -> LivePermissions {
+        LivePermissions(files: FileAccessTests.access(calls),
+                        registerAccessibility: { calls.log.append("register") },
+                        openURL: { calls.log.append("open \($0.absoluteString)") })
+    }
+
+    @Test func fixingAccessibilityRegistersYeeHawThenOpensThePane() async {
+        let calls = FileAccessTests.Calls()
+        let fixed = await Self.permissions(calls).fix(.accessibility)
+        #expect(!fixed)
+        #expect(calls.log == ["register",
+                              "open x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"])
+    }
+
+    @Test func fixingScreenRecordingOnlyOpensThePane() async {
+        let calls = FileAccessTests.Calls()
+        let fixed = await Self.permissions(calls).fix(.screenRecording)
+        #expect(!fixed)
+        #expect(calls.log == ["open x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"])
+    }
+
+    @Test func fixingAFileGrantNeverTouchesSystemSettings() async {
+        let calls = FileAccessTests.Calls()
+        calls.panelAnswer = false
+        _ = await Self.permissions(calls).fix(.allowList)
+        #expect(calls.log == ["panel allowList"])
     }
 }
