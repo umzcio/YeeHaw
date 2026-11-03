@@ -2,12 +2,15 @@ public struct DrawnItem: Equatable, Sendable {
     public var x, width: Double
     public var label: String
     public var appleIdentifier: String?
+    /// The item's top edge (global, top-left origin): each display draws its own copy of the bar, and stacked displays share x.
+    public var y: Double
 
-    public init(x: Double, width: Double, label: String, appleIdentifier: String? = nil) {
+    public init(x: Double, width: Double, label: String, appleIdentifier: String? = nil, y: Double = 0) {
         self.x = x
         self.width = width
         self.label = label
         self.appleIdentifier = appleIdentifier
+        self.y = y
     }
 }
 
@@ -48,10 +51,12 @@ public struct MenuBarItem: Equatable, Identifiable, Sendable {
     public var isPinned: Bool        // clock, control center
     /// Another app, no more likely to be off, reports this frame too: the owner is a guess.
     public var contested: Bool
+    /// The top edge of this copy's frame (global, top-left origin), telling apart the copies each display draws.
+    public var y: Double
 
     public init(id: String, bundleID: BundleID?, appleIdentifier: String?, indexInApp: Int,
                 label: String, keyNames: [String], keyPrefixes: [String],
-                x: Double, width: Double, isPinned: Bool, contested: Bool = false) {
+                x: Double, width: Double, isPinned: Bool, contested: Bool = false, y: Double = 0) {
         self.id = id
         self.bundleID = bundleID
         self.appleIdentifier = appleIdentifier
@@ -63,7 +68,21 @@ public struct MenuBarItem: Equatable, Identifiable, Sendable {
         self.width = width
         self.isPinned = isPinned
         self.contested = contested
+        self.y = y
     }
+}
+
+/// One drawn copy of an item. Every display draws its own copy of the bar under the same id,
+/// so a photograph is proven and stored per copy, not per id.
+public struct ItemSlot: Hashable, Sendable {
+    public var id: String
+    public var x: Double
+    public var y: Double
+    public init(id: String, x: Double, y: Double) { self.id = id; self.x = x; self.y = y }
+}
+
+extension MenuBarItem {
+    public var slot: ItemSlot { ItemSlot(id: id, x: x, y: y) }
 }
 
 public enum ItemMatcher {
@@ -100,7 +119,7 @@ public enum ItemMatcher {
                 items.append(MenuBarItem(
                     id: apple, bundleID: nil, appleIdentifier: apple, indexInApp: 0,
                     label: d.label, keyNames: [], keyPrefixes: [],
-                    x: d.x, width: d.width, isPinned: pinnedIdentifiers.contains(apple)))
+                    x: d.x, width: d.width, isPinned: pinnedIdentifiers.contains(apple), y: d.y))
             } else if let i = unused.firstIndex(where: {
                 abs($0.x - d.x) <= tolerance && abs($0.width - d.width) <= tolerance
             }) {
@@ -115,12 +134,12 @@ public enum ItemMatcher {
                     keyNames: [e.identifier, e.title, e.description].filter { !$0.isEmpty },
                     keyPrefixes: PositionKey.prefixes(bundleID: e.bundleID, executableName: e.executableName,
                                                       notarized: e.notarized),
-                    x: d.x, width: d.width, isPinned: false, contested: !rivals.isEmpty))
+                    x: d.x, width: d.width, isPinned: false, contested: !rivals.isEmpty, y: d.y))
             } else {
                 items.append(MenuBarItem(
                     id: "unknown@\(Int(d.x))", bundleID: nil, appleIdentifier: nil, indexInApp: 0,
                     label: d.label, keyNames: [], keyPrefixes: [],
-                    x: d.x, width: d.width, isPinned: false))
+                    x: d.x, width: d.width, isPinned: false, y: d.y))
             }
         }
         return items.sorted { $0.x < $1.x }

@@ -45,6 +45,16 @@ import Testing
         #expect(items[0].label == "")
     }
 
+    @Test func eachDrawnCopyKeepsItsHeight() {
+        let extras = [AppExtra(bundleID: "com.example.a", indexInApp: 0, x: 100, width: 20)]
+        let third = ItemMatcher.match(drawn: [DrawnItem(x: 100, width: 20, label: "A", y: -900)], extras: extras)
+        #expect(third[0].y == -900)
+        let apple = ItemMatcher.match(
+            drawn: [DrawnItem(x: 100, width: 20, label: "W", appleIdentifier: "com.apple.menuextra.wifi", y: -900)],
+            extras: [])
+        #expect(apple[0].y == -900)
+    }
+
     @Test func appleItemsArePinnedWhenClockOrControlCenter() {
         let drawn = [
             DrawnItem(x: 100, width: 20, label: "Clock", appleIdentifier: "com.apple.menuextra.clock"),
