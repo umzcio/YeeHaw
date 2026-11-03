@@ -50,11 +50,17 @@ final class RevealCoordinator {
 
     /// How a call to `open` went, as far as the app appearing is concerned.
     enum Outcome {
-        /// The app was drawn next to YeeHaw (whatever happened with the press afterwards).
+        /// The app was drawn and pressed, and a menu or window appeared.
         case revealed
+        /// The app was drawn and pressed, but no menu or window appeared before the reveal ended:
+        /// its icon does something else, or the app is stuck (plan 013 counts these).
+        case nothingOpened
+        /// The app was drawn, but no press method reached its icon and nothing opened.
+        case pressFailed
         /// A later click replaced this one while it waited for the open reveal to end.
         case ignored
-        /// `beginReveal` threw; the reveal was ended.
+        /// `beginReveal` threw; the reveal was ended (unless it was `revealInUse`, which leaves
+        /// the earlier app alone).
         case failed(Error)
     }
 

@@ -243,4 +243,14 @@ import YeeHawCore
         #expect(Self.notice([], .failed("dig"))?.actionTitle == nil)
         #expect(Self.notice(ownIconMissing: true) == StripNotice(message: "YeeHaw can’t find its own menu bar icon."))
     }
+
+    @Test func aFailedPressOffersToTryAgain() {
+        #expect(Self.notice([], .pressFailed("dig"))
+                == StripNotice(message: "YeeHaw couldn’t click DigUp’s icon.", action: .retry("dig")))
+    }
+
+    @Test func aStillOpenEarlierRevealNamesItAndRetriesTheClickedApp() {
+        #expect(Self.notice([], .stillOpen(open: "dig", clicked: "x"))
+                == StripNotice(message: "DigUp’s menu is still open. Close it, then try again.", action: .retry("x")))
+    }
 }
