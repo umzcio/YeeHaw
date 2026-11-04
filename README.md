@@ -14,6 +14,7 @@
   <img src="https://img.shields.io/badge/macOS-27.2%2B-2E1C11" alt="macOS 27.2 or later">
   <img src="https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white" alt="Swift 6.2">
   <img src="https://img.shields.io/badge/notarized-Developer%20ID-B8987A" alt="Notarized with a Developer ID">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-6E5440" alt="MIT License"></a>
 </p>
 
 YeeHaw hides the menu bar icons you don't need and keeps them one click away. It does three
@@ -145,3 +146,9 @@ notary keys, passwords or the Sparkle private key in the repository.
 - `Tests` — Swift Testing suites for both targets.
 - `scripts` — building, releasing, and drawing the installer's background.
 - `docs/superpowers/specs` — the design.
+
+## License
+
+YeeHaw is released under the [MIT License](LICENSE). It includes
+[Sparkle](https://github.com/sparkle-project/Sparkle), under Sparkle's own license (in the app as
+`Contents/Resources/Sparkle-LICENSE.txt`).
