@@ -182,8 +182,15 @@ codesign --force --timestamp --sign "$identity" "$dmg"
 notarize "$dmg"
 xcrun stapler staple "$dmg"
 xcrun stapler validate "$dmg"
-spctl -a -vv -t open --context context:primary-signature "$dmg" 2>&1 | grep -q "source=Notarized Developer ID" ||
-    die "Gatekeeper doesn't see $dmg as notarized"
+# Right after stapling, Gatekeeper once refused a freshly notarized DMG (v0.0.3) and accepted it
+# moments later, so it's asked a few times before giving up.
+for attempt in 1 2 3 4 5; do
+    assessment="$(spctl -a -vv -t open --context context:primary-signature "$dmg" 2>&1)" &&
+        grep -q "source=Notarized Developer ID" <<<"$assessment" && break
+    ((attempt < 5)) || die "Gatekeeper doesn't see $dmg as notarized: $assessment"
+    echo "Gatekeeper doesn't accept $dmg yet; asking again in 5 s"
+    sleep 5
+done
 
 # ---- Update feed -------------------------------------------------------------------------------
 
