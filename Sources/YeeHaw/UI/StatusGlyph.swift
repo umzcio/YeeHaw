@@ -17,7 +17,8 @@ enum StatusGlyph {
         return image
     }
 
-    /// 18×18 pt box, y up. Filled with even-odd winding, so the hat band is knocked out.
+    /// 18×18 pt box, y up, the ink centred vertically. Filled with even-odd winding, so the hat
+    /// band is knocked out.
     static func hat() -> NSBezierPath {
         let p = NSBezierPath()
         p.windingRule = .evenOdd
@@ -37,6 +38,9 @@ enum StatusGlyph {
         p.close()
         // Hat band knocked out of the crown.
         p.appendRect(NSRect(x: 4.95, y: 9.1, width: 8.1, height: 1.0))
+        // The points above sit about 1 pt high; moved down so the ink is centred in the box, as the
+        // system's glyphs are. Off centre, the hat floats in the top half of the menu bar.
+        p.transform(using: AffineTransform(translationByX: 0, byY: size.height / 2 - p.bounds.midY))
         return p
     }
 }

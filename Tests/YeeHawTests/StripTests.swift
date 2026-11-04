@@ -72,7 +72,8 @@ import YeeHawCore
         #expect(image.isTemplate)
     }
 
-    @Test func glyphFillsTheCrownAndKnocksOutTheBand() throws {
+    /// The glyph drawn at 2x, as on a Retina menu bar.
+    static func glyphBitmap() throws -> NSBitmapImageRep {
         let rep = try #require(NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: 36, pixelsHigh: 36, bitsPerSample: 8, samplesPerPixel: 4,
             hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
@@ -81,14 +82,31 @@ import YeeHawCore
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         StatusGlyph.image().draw(in: NSRect(origin: .zero, size: StatusGlyph.size))
         NSGraphicsContext.restoreGraphicsState()
+        return rep
+    }
+
+    @Test func glyphFillsTheCrownAndKnocksOutTheBand() throws {
+        let rep = try Self.glyphBitmap()
         // colorAt uses a top-left origin in pixels; the glyph is y-up in points.
         func alpha(_ x: CGFloat, _ y: CGFloat) -> CGFloat {
             rep.colorAt(x: Int(x * 2), y: Int((18 - y) * 2))?.alphaComponent ?? 0
         }
-        #expect(alpha(9, 11.5) > 0.9)  // crown
-        #expect(alpha(9, 6) > 0.9)     // brim
-        #expect(alpha(9, 9.6) < 0.1)   // band
+        #expect(alpha(9, 10.4) > 0.9)  // crown
+        #expect(alpha(9, 4.9) > 0.9)   // brim
+        #expect(alpha(9, 8.5) < 0.1)   // band
         #expect(alpha(1, 1) < 0.1)     // outside
+    }
+
+    /// The menu bar centres the 18 pt box, so the hat looks centred only if its ink is: drawn high,
+    /// it floated in the top half of the bar next to the system's icons.
+    @Test func glyphIsCentredVertically() throws {
+        let rep = try Self.glyphBitmap()
+        let inked = (0..<36).filter { row in
+            (0..<36).contains { (rep.colorAt(x: $0, y: row)?.alphaComponent ?? 0) > 0.5 }
+        }
+        let top = try #require(inked.first), bottom = try #require(inked.last)
+        // Empty pixel rows above and below the ink differ by at most one (half a point).
+        #expect(abs(top - (35 - bottom)) <= 1, "ink spans rows \(top)...\(bottom) of 36")
     }
 
     @Test(arguments: [
