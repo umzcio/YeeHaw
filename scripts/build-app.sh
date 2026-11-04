@@ -25,7 +25,7 @@ SPARKLE=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64
 FRAMEWORK="$APP/Contents/Frameworks/Sparkle.framework"
 mkdir -p "$APP/Contents/Frameworks"
 ditto "$SPARKLE" "$FRAMEWORK"
-cp .build/checkouts/Sparkle/LICENSE "$APP/Contents/Resources/Sparkle-LICENSE.txt"
+install -m 0644 .build/checkouts/Sparkle/LICENSE "$APP/Contents/Resources/Sparkle-LICENSE.txt"
 for component in XPCServices/Downloader.xpc XPCServices/Installer.xpc Autoupdate Updater.app; do
     codesign --force --sign "$IDENTITY" --options runtime --timestamp --preserve-metadata=entitlements \
         "$FRAMEWORK/Versions/B/$component"
