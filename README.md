@@ -1,14 +1,31 @@
-# YeeHaw
+<p align="center">
+  <img src="docs/assets/icon.png" width="128" height="128" alt="YeeHaw's icon: a cream cowboy hat on burnt orange">
+</p>
 
-YeeHaw is a small menu bar manager for macOS 27.2 and later. It does three things:
+<h1 align="center">YeeHaw</h1>
 
-- **Hides the menu bar icons you don't need.** Hidden icons leave the menu bar. Click YeeHaw's hat
-  icon to open a strip just below the menu bar with the hidden icons in it; clicking one works as
-  if you had clicked it in the menu bar.
-- **Sets the order of the icons that stay visible**, in the Layout window. Drag icons to reorder
-  them, or between rows to hide and show them.
-- **Adjusts the spacing between menu bar icons**, with an explicit Apply step that restarts only
-  the apps you pick.
+<p align="center">
+  <strong>Round up your menu bar.</strong><br>
+  A small, trustworthy menu bar manager for macOS 27.2 and later.
+</p>
+
+<p align="center">
+  <a href="https://github.com/umzcio/YeeHaw/releases/latest"><img src="https://img.shields.io/github/v/release/umzcio/YeeHaw?label=download&color=D9622F" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/macOS-27.2%2B-2E1C11" alt="macOS 27.2 or later">
+  <img src="https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white" alt="Swift 6.2">
+  <img src="https://img.shields.io/badge/notarized-Developer%20ID-B8987A" alt="Notarized with a Developer ID">
+</p>
+
+YeeHaw hides the menu bar icons you don't need and keeps them one click away. It does three
+things:
+
+- **Hides icons.** Hidden icons leave the menu bar. Click YeeHaw's hat to open a strip just below
+  the menu bar with the hidden icons in it. Clicking one works as if you had clicked it in the
+  menu bar, and right-clicking gets its right-click menu.
+- **Orders the icons that stay**, in the Layout window. Drag icons to reorder them, or between
+  rows to hide and show them.
+- **Adjusts the spacing between menu bar icons.** Change the layout and the spacing, then press
+  Apply once for both. Apply restarts only the apps you pick.
 
 It aims to be trustworthy above all:
 
@@ -18,18 +35,38 @@ It aims to be trustworthy above all:
 - **Nothing is lost if YeeHaw quits or crashes.** Hidden icons go back to the menu bar on quit, and
   the next launch repairs anything a crash left behind. To put every icon back without opening
   YeeHaw (after a crash or a force quit), run
-  `~/Applications/YeeHaw.app/Contents/MacOS/YeeHaw --restore`.
+  `~/Applications/YeeHaw.app/Contents/MacOS/YeeHaw --restore`, or choose **Restore Everything and
+  Quit** from the hat's menu.
+
+## Install
+
+1. Download `YeeHaw-<version>.dmg` from the [latest release](https://github.com/umzcio/YeeHaw/releases/latest).
+2. Open it and drag YeeHaw to Applications, partner.
+3. Open YeeHaw. A short first-run guide asks for the permissions below, one at a time.
+
+<p align="center">
+  <img src="docs/assets/install.png" width="600" alt="The YeeHaw installer window: drag YeeHaw to Applications">
+</p>
+
+YeeHaw is signed with a Developer ID and notarized by Apple, so it opens without warnings.
+
+### Updates
+
+YeeHaw checks for a new version once a day and asks before installing it. Choose
+**Check for Updates…** from the hat's menu to check now, or turn the daily check off in Settings.
+Updates come from this repository's releases, through [Sparkle](https://sparkle-project.org), and
+YeeHaw installs only an update signed with its own key.
 
 ## Using it
 
 - **Click** the hat to open or close the strip of hidden icons. Esc closes it; the arrow keys and
   Return work in it, and every icon has a VoiceOver label.
 - **Right-click** (or Control-click) the hat for **Layout…**, **Settings…**,
-  **Restore Everything and Quit** and **Quit YeeHaw**.
+  **Check for Updates…**, **Restore Everything and Quit** and **Quit YeeHaw**.
 - **Layout…** shows the menu bar and the Hidden row. Drag between them, or use each icon's
   actions. Spacing lives at the bottom of the same window.
-- **Settings…** has Open at Login, the permission statuses with buttons to fix a missing one, and
-  the list of apps you switched off yourself.
+- **Settings…** has Open at Login, updates, the permission statuses with buttons to fix a missing
+  one, and the list of apps you switched off yourself.
 
 ## Requirements
 
@@ -51,7 +88,8 @@ for spacing all need that.
 
 ## Building
 
-You need Xcode 27.2 (Swift 6.2). There are no third-party dependencies.
+You need Xcode 27.2 (Swift 6.2). The one dependency, [Sparkle](https://github.com/sparkle-project/Sparkle)
+(updates), comes through Swift Package Manager.
 
 ```sh
 swift test                         # unit tests (Swift Testing)
@@ -105,4 +143,5 @@ notary keys, passwords or the Sparkle private key in the repository.
 - `Sources/YeeHaw` — the app: the status item, strip, Layout, Settings and first-run windows, and
   the system adapters (Accessibility, the two preference files, ScreenCaptureKit).
 - `Tests` — Swift Testing suites for both targets.
+- `scripts` — building, releasing, and drawing the installer's background.
 - `docs/superpowers/specs` — the design.
