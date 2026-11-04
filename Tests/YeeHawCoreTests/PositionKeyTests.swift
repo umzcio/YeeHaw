@@ -106,13 +106,13 @@ import Testing
     @Test func anItemsOnlyUnclaimedSlotIsItsOwn() {
         // zStats on the owner's Mac: MenuBarAgent names the slot after the status item's autosave
         // name, which Accessibility doesn't show; the item reads "zStats system monitor".
-        let zStats = Self.item("dev.zach.zStats", names: ["zStats system monitor"], prefixes: ["dev.zach.zStats", "zStats"])
-        let table = PositionTable(["status:dev.zach.zStats::zStats.MenuBarLayout": 256, "status:other::Item-0": 300])
-        #expect(PositionKey.keys(for: zStats, among: [zStats], table: table) == ["status:dev.zach.zStats::zStats.MenuBarLayout"])
+        let zStats = Self.item("com.example.zStats", names: ["zStats system monitor"], prefixes: ["com.example.zStats", "zStats"])
+        let table = PositionTable(["status:com.example.zStats::zStats.MenuBarLayout": 256, "status:other::Item-0": 300])
+        #expect(PositionKey.keys(for: zStats, among: [zStats], table: table) == ["status:com.example.zStats::zStats.MenuBarLayout"])
         // Under either prefix, every key with that name.
-        let both = PositionTable(["status:dev.zach.zStats::zStats.MenuBarLayout": 256, "status:zStats::zStats.MenuBarLayout": 256])
+        let both = PositionTable(["status:com.example.zStats::zStats.MenuBarLayout": 256, "status:zStats::zStats.MenuBarLayout": 256])
         #expect(PositionKey.keys(for: zStats, among: [zStats], table: both)
-            == ["status:dev.zach.zStats::zStats.MenuBarLayout", "status:zStats::zStats.MenuBarLayout"])
+            == ["status:com.example.zStats::zStats.MenuBarLayout", "status:zStats::zStats.MenuBarLayout"])
     }
 
     @Test func aSlotAnotherIconOfTheAppHasIsntTaken() {

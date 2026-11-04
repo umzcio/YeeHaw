@@ -728,7 +728,7 @@ final class FakeSleeper: Sleeper, @unchecked Sendable {
     }
 
     @Test func anIconWhoseSlotIsNamedAfterItsAutosaveNameCanAnchorAMove() async throws {
-        let zStats = "dev.zach.zStats"
+        let zStats = "com.example.zStats"
         let item = FakeSystem.item(zStats, names: ["zStats system monitor"], x: 200)
         let rig = Self.rig(try FakeSystem(
             allow: [(Self.a, true), (zStats, true)],
