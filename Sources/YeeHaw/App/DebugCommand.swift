@@ -108,7 +108,8 @@ enum DebugCommand {
         defer { withExtendedLifetime(statusItem) {} }
 
         var lines: [String] = []
-        guard let yeehaw = await OwnIconLocator.waitUntilReady(grants: grants, log: { lines.append($0) }) else {
+        guard let yeehaw = await OwnIconLocator.waitUntilReady(grants: grants, offApps: switchedOff(grants: grants),
+                                                               log: { lines.append($0) }) else {
             return lines
         }
 
@@ -142,6 +143,15 @@ enum DebugCommand {
         return lines
     }
 
+    /// The apps switched off in Apple's Allow list, read without writing; empty when it can't be read.
+    /// Passed to reads so a switched-off app's stale frame can't claim the icon drawn there now.
+    @MainActor
+    private static func switchedOff(grants: FileGrantStore) -> Set<BundleID> {
+        guard let data = try? GrantedPreferencesFile(file: .allowList, grants: grants).read(MenuBarController.allowKey) as? Data,
+              let list = try? AllowList(data: data) else { return [] }
+        return Set(list.snapshot.filter { !$0.value }.keys)
+    }
+
     @MainActor
     private static func probe(grants: FileGrantStore) async -> [String] {
         var lines: [String] = []
@@ -149,7 +159,7 @@ enum DebugCommand {
         if !AXIsProcessTrusted() {
             lines.append("accessibility: not trusted")
         }
-        for item in await AXMenuBarReader().items() {
+        for item in await AXMenuBarReader().items(offApps: switchedOff(grants: grants), revealed: nil) {
             let owner = item.bundleID ?? item.appleIdentifier ?? "unknown"
             lines.append("\(owner)|\(item.label) @\(format(item.x)) \(format(item.width))")
         }

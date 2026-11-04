@@ -17,17 +17,26 @@ enum OwnIconLocator {
 
     /// YeeHaw's drawn item once its position key exists, or nil (with the reason logged) after
     /// `timeout`. Only reads; nothing is written.
+    ///
+    /// `offApps` are the apps switched off in Apple's Allow list. One can keep reporting the frame
+    /// its icon last had, and when YeeHaw's hat has slid into that place, an unfiltered read gives
+    /// the hat to that app (Tailscale, on 2026-11-03), so the hat was never found.
     @MainActor
-    static func waitUntilReady(grants: FileGrantStore, timeout: Double = timeout,
+    static func waitUntilReady(grants: FileGrantStore, offApps: Set<BundleID>, timeout: Double = timeout,
                                log: (String) -> Void) async -> MenuBarItem? {
-        let reader = AXMenuBarReader()
-        let positions = GrantedPreferencesFile(file: .positions, grants: grants)
+        await waitUntilReady(reader: AXMenuBarReader(), positions: GrantedPreferencesFile(file: .positions, grants: grants),
+                             offApps: offApps, timeout: timeout, log: log)
+    }
+
+    @MainActor
+    static func waitUntilReady(reader: some MenuBarReading, positions: some PreferencesFile, offApps: Set<BundleID>,
+                               timeout: Double = timeout, log: (String) -> Void) async -> MenuBarItem? {
         let deadline = ContinuousClock.now + .seconds(timeout)
         var drawn: MenuBarItem?
         var keys: [String] = []
         var readError: Error?
         while true {
-            drawn = Self.drawn(in: await reader.items())
+            drawn = Self.drawn(in: await reader.items(offApps: offApps, revealed: nil))
             do {
                 let table = PositionTable(try positions.read(MenuBarController.positionsKey) as? [String: Double] ?? [:])
                 readError = nil

@@ -106,7 +106,9 @@ final class StatusItemController: NSObject {
     /// Call once the controller has launched: finds YeeHaw's own drawn item (waiting for its
     /// position key) and photographs the third-party items that are drawn.
     func start(grants: FileGrantStore) async {
-        yeehawItem = await OwnIconLocator.waitUntilReady(grants: grants) { Self.log.notice("\($0, privacy: .public)") }
+        yeehawItem = await OwnIconLocator.waitUntilReady(grants: grants, offApps: controller.switchedOff) {
+            Self.log.notice("\($0, privacy: .public)")
+        }
         await controller.refresh()
         await icons.captureIfPermitted(controller.items)
     }
