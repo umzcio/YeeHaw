@@ -15,12 +15,18 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.0.1</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>27.2</string>
     <key>LSUIElement</key>
+    <true/>
+    <key>SUFeedURL</key>
+    <string>https://github.com/umzcio/YeeHaw/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>OhIowqI/ExQ1WX74jC+MYxQ110xLpvzLEvdhmhW7BJ4=</string>
+    <key>SUEnableAutomaticChecks</key>
     <true/>
 </dict>
 </plist>

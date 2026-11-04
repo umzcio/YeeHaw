@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 import YeeHawCore
 
-/// The Settings window (spec "Settings"): open at login, each permission's status with a fix, and
-/// the switched-off apps review. One instance, brought to the front when opened again. Spacing
+/// The Settings window (spec "Settings"): open at login, updates, each permission's status with a
+/// fix, and the switched-off apps review. One instance, brought to the front when opened again. Spacing
 /// lives in the Layout window.
 @MainActor
 final class SettingsWindowController: NSObject, NSWindowDelegate {
@@ -67,11 +67,16 @@ struct SettingsView: View {
     static let boxRadius: CGFloat = 10
 
     @Bindable var model: SettingsModel
+    private let updater = AppUpdater.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             section("General") {
-                box { loginRow }
+                box {
+                    loginRow
+                    Divider().padding(.horizontal, PermissionRow.horizontalPadding)
+                    updatesRow
+                }
             }
             section("Permissions") {
                 box {
@@ -139,6 +144,39 @@ struct SettingsView: View {
     }
 
     private static let loginDetail = "YeeHaw starts when you log in, and keeps your hidden icons hidden."
+
+    private var updatesRow: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Check for Updates Automatically")
+                Text(updatesDetail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityHidden(true)
+            Spacer(minLength: 12)
+            if updater.isAvailable {
+                Button("Check Now") { updater.checkForUpdates() }
+                    .accessibilityLabel("Check for updates now")
+                Toggle("Check for Updates Automatically",
+                       isOn: Binding(get: { updater.checksAutomatically }, set: { updater.checksAutomatically = $0 }))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .accessibilityHint(updatesDetail)
+            }
+        }
+        .padding(.horizontal, PermissionRow.horizontalPadding)
+        .padding(.vertical, 11)
+    }
+
+    private var updatesDetail: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let current = version.map { "You have YeeHaw \($0). " } ?? ""
+        return updater.isAvailable
+            ? current + "YeeHaw looks for a new version once a day and asks before installing it."
+            : current + "This copy was built without updates."
+    }
 
     private var reviewRow: some View {
         HStack(spacing: 12) {

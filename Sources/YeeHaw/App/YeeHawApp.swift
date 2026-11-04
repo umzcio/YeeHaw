@@ -66,6 +66,8 @@ final class YeeHawApp: NSObject, NSApplicationDelegate {
             return
         }
         Self.log.notice("YeeHaw started")
+        // Starts Sparkle's daily check for a new version.
+        _ = AppUpdater.shared
         quitOnTerminationSignals()
         watchForThaw()
         // Earlier Spacing Applies left the apps they restarted hidden; show them again, once.

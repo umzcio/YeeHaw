@@ -5,8 +5,9 @@ import YeeHawCore
 /// YeeHaw's own menu bar icon and the strip it opens (spec "Your menu bar icon", "The strip").
 ///
 /// A plain click toggles the strip. Right-click, Control-click and Option-click show the small
-/// menu (Layout…, Settings…, Restore Everything and Quit, Quit YeeHaw); right-clicks were verified
-/// to arrive on macOS 27.2. VoiceOver gets the same four as actions on the icon.
+/// menu (Layout…, Settings…, Check for Updates…, Restore Everything and Quit, Quit YeeHaw);
+/// right-clicks were verified to arrive on macOS 27.2. VoiceOver gets the same five as actions on
+/// the icon.
 @MainActor
 final class StatusItemController: NSObject {
     /// The status item's autosave name, which keeps YeeHaw's existing position key (`--reveal`'s
@@ -58,6 +59,7 @@ final class StatusItemController: NSObject {
             button.setAccessibilityCustomActions([
                 NSAccessibilityCustomAction(name: "Open Layout") { [weak self] in self?.layoutChosen(); return true },
                 NSAccessibilityCustomAction(name: "Open Settings") { [weak self] in self?.settingsChosen(); return true },
+                NSAccessibilityCustomAction(name: "Check for Updates") { [weak self] in self?.updatesChosen(); return true },
                 NSAccessibilityCustomAction(name: "Restore Everything and Quit") { [weak self] in self?.restoreChosen(); return true },
                 NSAccessibilityCustomAction(name: "Quit YeeHaw") { [weak self] in self?.quitChosen(); return true },
             ])
@@ -176,6 +178,7 @@ final class StatusItemController: NSObject {
         let items: [(String, Selector, String)] = [
             ("Layout…", #selector(layoutChosen), "l"),
             ("Settings…", #selector(settingsChosen), ","),
+            ("Check for Updates…", #selector(updatesChosen), ""),
         ]
         for (title, action, key) in items {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
@@ -199,6 +202,11 @@ final class StatusItemController: NSObject {
     @objc private func settingsChosen() {
         strip.dismiss()
         openSettings()
+    }
+
+    @objc private func updatesChosen() {
+        strip.dismiss()
+        AppUpdater.shared.checkForUpdates()
     }
 
     /// Switches back on everything YeeHaw switched off, then quits.
