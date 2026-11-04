@@ -67,23 +67,36 @@ from the same team (its SHA-1 hash); `build-app.sh` refuses a build that isn't s
 
 ## Releasing
 
+Bump `CFBundleShortVersionString` and `CFBundleVersion` in `Resources/Info.plist`, commit and push,
+then:
+
 ```sh
-scripts/release.sh
+scripts/release.sh --notes-file notes.md            # builds release/, prints the publish command
+scripts/release.sh --notes-file notes.md --publish  # also tags vX.Y.Z and creates the GitHub release
 ```
 
 The script:
 
-1. Builds the app with team `V2P99VF75Q`'s Developer ID Application certificate and refuses to
+1. Checks that YeeHaw's Sparkle key (login Keychain, account `com.zapps.yeehaw`) matches
+   `SUPublicEDKey` in `Info.plist`. Installed copies refuse any update not signed with it.
+2. Builds the app with team `V2P99VF75Q`'s Developer ID Application certificate and refuses to
    continue if the signature names any other team, or lacks the hardened runtime or a secure
    timestamp.
-2. Zips it and notarizes the zip with `xcrun notarytool submit --keychain-profile notary --wait`.
-3. Staples the ticket to the app, zips it again and checks that Gatekeeper reports
-   `source=Notarized Developer ID`.
+3. Notarizes the app with `xcrun notarytool submit --keychain-profile notary --wait`, staples it
+   and checks that Gatekeeper reports `source=Notarized Developer ID`.
+4. Makes `release/YeeHaw-<version>.dmg` with [create-dmg](https://github.com/create-dmg/create-dmg)
+   (`brew install create-dmg`) over the background `scripts/render-dmg-background.swift` draws,
+   then signs, notarizes and staples the DMG.
+5. Writes `release/appcast.xml` with Sparkle's `generate_appcast`: the new version, the DMG as its
+   download, its signature and the release notes.
 
-The results are `release/YeeHaw.app` and `release/YeeHaw.zip` (the folder isn't tracked). Notary
-credentials live only in the `notary` Keychain profile, created once with
+With `--publish` it tags `v<version>` and creates the GitHub release with the DMG and
+`appcast.xml`. Installed copies read `releases/latest/download/appcast.xml`, so they see the update
+as soon as the release exists: within a day on their own, or at once from **Check for Updates…**.
+
+Notary credentials live only in the `notary` Keychain profile, created once with
 `xcrun notarytool store-credentials notary`; set `NOTARY_PROFILE` to use another profile. Never put
-notary keys or passwords in the repository.
+notary keys, passwords or the Sparkle private key in the repository.
 
 ## Project layout
 
